@@ -823,6 +823,70 @@ def default_capability_registry() -> CapabilityRegistry:
                 safety_notes="Controller clamps velocity and stops for lidar obstacles.",
             ),
             CapabilityDefinition(
+                name="move_relative",
+                description=(
+                    "Move a bounded signed distance from the current trusted odometry pose."
+                ),
+                canonical_id="robotics.motion.move_relative@1",
+                tags=("relative-motion", "distance", "jog", "前進", "後退", "公分"),
+                aliases=(
+                    "move relative",
+                    "move forward",
+                    "move backward",
+                    "前進一段距離",
+                    "後退一段距離",
+                ),
+                control_class="motion",
+                required_observations=("odometry", "minimum_range"),
+                required_resources=("base_controller",),
+                safety_class="motion_bounded",
+                side_effects=("robot_motion",),
+                intent_ids=("motion.relative.displacement",),
+                affordances=("motion.base.relative_distance",),
+                effects=("robot.displacement.reached",),
+                handled_events=(
+                    "input.pressed",
+                    "input.released",
+                    "input.disconnected",
+                    "obstacle.detected",
+                ),
+                positive_examples=(
+                    "前進三十公分",
+                    "move backward 0.3 meters",
+                ),
+                negative_examples=(
+                    "前往護理站",
+                    "沿藍線",
+                ),
+                recovery_capabilities=("safe_stop", "ask_human"),
+                legacy_zero_score_fallback=False,
+                arguments=(
+                    ArgumentSpec(
+                        "distance_m",
+                        "number",
+                        minimum=-2.0,
+                        maximum=2.0,
+                        description=(
+                            "Signed distance in metres; positive is forward and negative "
+                            "is backward."
+                        ),
+                    ),
+                    ArgumentSpec(
+                        "speed",
+                        "number",
+                        required=False,
+                        minimum=0.02,
+                        maximum=0.35,
+                        default=0.12,
+                    ),
+                ),
+                safety_notes=(
+                    "Distance is measured from odometry captured by the deterministic "
+                    "controller. Obstacles and external dead-man cancellation force zero "
+                    "velocity."
+                ),
+            ),
+            CapabilityDefinition(
                 name="navigate_to_location",
                 description=(
                     "Resolve one stable semantic location ID through the trusted map "

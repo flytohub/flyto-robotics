@@ -118,6 +118,85 @@ def test_controller_accepts_a_custom_composition() -> None:
     assert any(event.kind == "primitive_completed" for event in controller.events)
 
 
+def test_move_relative_plan_is_validated_and_closes_odometry_loop() -> None:
+    plan = parse_plan(
+        {
+            "contract_version": "flyto.robotics.plan.v1",
+            "plan_id": "shortcut.forward.30cm.v1",
+            "robot_id": "flyto-rover-sim-001",
+            "goal": "前進三十公分後安全停止",
+            "generated_by": {
+                "kind": "human",
+                "provider": "flyto-cloud",
+                "model": "workflow-card",
+            },
+            "steps": [
+                {
+                    "step_id": "move.forward",
+                    "capability": "move_relative",
+                    "arguments": {"distance_m": 0.3, "speed": 0.12},
+                    "timeout_seconds": 5.0,
+                    "on_failure": "abort",
+                },
+                {
+                    "step_id": "stop.finish",
+                    "capability": "safe_stop",
+                    "arguments": {"seconds": 0.0},
+                    "timeout_seconds": 1.0,
+                    "on_failure": "abort",
+                },
+            ],
+        }
+    )
+    workflow = compile_workflow(plan)
+    controller = MissionController(load_job(EXAMPLE_JOB), workflow=workflow)
+
+    moving = controller.tick(
+        Pose2D(1.0, 2.0, 0.0),
+        minimum_range=math.inf,
+        now=0.0,
+    )
+    reached = controller.tick(
+        Pose2D(1.3, 2.0, 0.0),
+        minimum_range=math.inf,
+        now=1.0,
+    )
+
+    assert workflow.steps[0].kind == PrimitiveKind.MOVE_RELATIVE
+    assert moving.linear_x > 0.0
+    assert reached.linear_x == 0.0
+    assert controller.state == MissionState.STOPPED
+    kinds = [event.kind for event in controller.events]
+    assert "relative_origin_captured" in kinds
+    assert "primitive_completed" in kinds
+
+
+def test_move_relative_requires_terminal_safe_stop() -> None:
+    with pytest.raises(PlanValidationError, match="must end with safe_stop"):
+        parse_plan(
+            {
+                "contract_version": "flyto.robotics.plan.v1",
+                "plan_id": "unsafe.shortcut.v1",
+                "robot_id": "flyto-rover-sim-001",
+                "goal": "前進三十公分",
+                "generated_by": {
+                    "kind": "human",
+                    "provider": "flyto-cloud",
+                    "model": "workflow-card",
+                },
+                "steps": [
+                    {
+                        "step_id": "move.forward",
+                        "capability": "move_relative",
+                        "arguments": {"distance_m": 0.3},
+                        "timeout_seconds": 5.0,
+                        "on_failure": "abort",
+                    }
+                ],
+            }
+        )
+
+
 def test_unknown_or_sensitive_job_fields_are_rejected() -> None:
     decoded = job_to_dict(load_job(EXAMPLE_JOB))
     decoded["patient_name"] = "must-not-enter-robot-contract"
@@ -184,6 +263,7 @@ def test_static_assets_are_parseable_and_self_contained() -> None:
     assert "models/flyto_rover/model.sdf" in checked
     assert "worlds/atomic-color-route.sdf" in checked
     assert "contracts/plan-v1.schema.json" in checked
+    assert "contracts/input-event-v1.schema.json" in checked
     assert "contracts/human-decision-v1.schema.json" in checked
     assert "contracts/capability-manifest-v1.schema.json" in checked
     assert "contracts/capability-route-v1.schema.json" in checked
@@ -198,6 +278,7 @@ def test_static_assets_are_parseable_and_self_contained() -> None:
     assert "examples/plans/careflow-waypoints-human-gate.json" in checked
     assert "examples/plans/semantic-location-sequence.json" in checked
     assert "examples/plans/teach-current-location.json" in checked
+    assert "examples/plans/shortcut-forward-30cm.json" in checked
     assert "https://" not in world
     assert "fuel.gazebosim.org" not in world
 
@@ -208,6 +289,7 @@ def test_capability_manifest_has_stable_namespaced_ids_and_snapshot() -> None:
 
     assert {item["canonical_id"] for item in catalog} >= {
         "robotics.motion.navigate@1",
+        "robotics.motion.move_relative@1",
         "robotics.vision.follow_line@1",
         "robotics.safety.safe_stop@1",
         "robotics.motion.navigate_to_location@1",

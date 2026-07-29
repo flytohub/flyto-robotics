@@ -102,6 +102,7 @@ class MissionController:
         self.safety_stop_count = 0
         self.line_acquired_at: float | None = None
         self.line_last_seen_at: float | None = None
+        self.relative_origin: Pose2D | None = None
         self.clear_since: float | None = None
         self.clearance_blocked = False
         self.approval_requests: set[str] = set()
@@ -169,14 +170,20 @@ class MissionController:
         return Command(0.0, 0.0, self.state, reason)
 
     def cancel(self, now: float) -> Command:
+        return self.cancel_for_safety(now, reason="cancel_requested")
+
+    def cancel_for_safety(self, now: float, *, reason: str) -> Command:
+        """Cancel with a bounded external safety reason while holding zero velocity."""
+        if not SAFE_TEXT.fullmatch(reason):
+            raise ValueError("safety cancellation reason must be a safe identifier")
         if not self.terminal:
             self._transition(
                 MissionState.CANCELLED,
                 now,
-                detail="cancel requested",
+                detail=reason,
                 kind="mission_cancelled",
             )
-        return Command(0.0, 0.0, self.state, "cancelled")
+        return Command(0.0, 0.0, self.state, reason)
 
     def submit_human_decision(
         self,
@@ -248,6 +255,7 @@ class MissionController:
         step = self._current_step()
         self.line_acquired_at = None
         self.line_last_seen_at = None
+        self.relative_origin = None
         self.clear_since = None
         self.clearance_blocked = False
         target_detail = (
@@ -331,6 +339,60 @@ class MissionController:
         linear = min(limits.max_linear_speed, max(0.04, 0.65 * distance))
         linear *= max(0.15, math.cos(heading_error))
         return Command(linear, angular, self.state, "advancing_to_target")
+
+    def _move_relative(
+        self,
+        pose: Pose2D,
+        minimum_range: float,
+        now: float,
+    ) -> Command:
+        """Move a bounded distance from a controller-captured odometry origin."""
+        guarded = self._obstacle_guard(minimum_range, now)
+        if guarded is not None:
+            return guarded
+
+        step = self._current_step()
+        target_distance = float(step.argument("distance_m"))
+        if self.relative_origin is None:
+            self.relative_origin = pose
+            self._record_event(
+                now,
+                "relative_origin_captured",
+                f"{step.step_id} captured trusted odometry origin",
+            )
+
+        origin = self.relative_origin
+        delta_x = pose.x - origin.x
+        delta_y = pose.y - origin.y
+        progress = delta_x * math.cos(origin.yaw) + delta_y * math.sin(origin.yaw)
+        tolerance = max(0.015, min(0.03, self.job.safety.pose_tolerance))
+        reached = (
+            progress >= target_distance - tolerance
+            if target_distance > 0.0
+            else progress <= target_distance + tolerance
+        )
+        if reached:
+            return self._complete_step(
+                now,
+                f"{step.step_id} moved {progress:.3f}m toward {target_distance:.3f}m",
+            )
+
+        remaining = target_distance - progress
+        speed_limit = min(
+            self.job.safety.max_linear_speed,
+            float(step.argument("speed", 0.12)),
+        )
+        linear = math.copysign(
+            min(speed_limit, max(0.02, 0.8 * abs(remaining))),
+            remaining,
+        )
+        heading_error = normalize_angle(origin.yaw - pose.yaw)
+        angular = _clamp(
+            1.8 * heading_error,
+            -self.job.safety.max_angular_speed,
+            self.job.safety.max_angular_speed,
+        )
+        return Command(linear, angular, self.state, "moving_relative")
 
     def _follow_line(
         self,
@@ -539,6 +601,9 @@ class MissionController:
             PrimitiveKind.NAVIGATE_TO_LOCATION,
         }:
             return self._navigate(pose, minimum_range, now)
+
+        if step.kind == PrimitiveKind.MOVE_RELATIVE:
+            return self._move_relative(pose, minimum_range, now)
 
         if step.kind == PrimitiveKind.FOLLOW_LINE:
             return self._follow_line(line_scene, minimum_range, now)

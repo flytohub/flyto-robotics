@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://flyto2.com/contracts/robotics/input-event-v1.schema.json",
+  "title": "Flyto Robotics Input Event v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract_version",
+    "event_id",
+    "source_id",
+    "control_id",
+    "session_id",
+    "phase",
+    "sequence"
+  ],
+  "properties": {
+    "contract_version": {
+      "const": "flyto.robotics.input-event.v1"
+    },
+    "event_id": {
+      "$ref": "#/$defs/identifier"
+    },
+    "source_id": {
+      "$ref": "#/$defs/identifier"
+    },
+    "control_id": {
+      "$ref": "#/$defs/identifier"
+    },
+    "session_id": {
+      "$ref": "#/$defs/identifier"
+    },
+    "phase": {
+      "enum": [
+        "press",
+        "heartbeat",
+        "release",
+        "disconnect"
+      ]
+    },
+    "sequence": {
+      "type": "integer",
+      "minimum": 1
+    }
+  },
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    }
+  }
+}

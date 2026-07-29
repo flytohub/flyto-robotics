@@ -1,5 +1,21 @@
 # Decisions
 
+## 2026-07-30 — Shortcuts select workflows, never motor commands
+
+Decision: keyboard, joystick, and external-device inputs use the versioned
+`flyto.robotics.input-event.v1` lifecycle contract. Exact bindings resolve to
+prevalidated workflow IDs for the active robot. `press` starts a workflow;
+`release`, source disconnect, or heartbeat timeout cancels it before the next
+controller update. The first jog behavior is the atomic `move_relative`
+primitive followed by mandatory `safe_stop`.
+
+Reason: a shortcut is useful for rapid testing and manual operation, but
+mapping it directly to velocity or PWM would bypass plan validation, capability
+policy, obstacle guards, and replayable evidence. Keeping input lifecycle,
+workflow selection, and deterministic motion as separate small components
+preserves the same safety boundary for keyboard, joystick, Gazebo, and physical
+hardware.
+
 ## 2026-07-28 — Semantic labels are not location identity
 
 Decision: location memory uses a stable, map-scoped `location_id`; bounded

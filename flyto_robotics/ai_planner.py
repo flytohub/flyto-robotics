@@ -37,7 +37,7 @@ MAX_PLAN_BYTES = 128 * 1024
 MAX_PLAN_STEPS = 64
 ALLOWED_FAILURE_POLICIES = frozenset({"abort", "request_replan"})
 MOTION_CAPABILITIES = frozenset(
-    {"navigate", "navigate_to_location", "follow_line"}
+    {"navigate", "navigate_to_location", "move_relative", "follow_line"}
 )
 
 
@@ -534,6 +534,11 @@ def compile_workflow(
             )
             kind = PrimitiveKind.NAVIGATE
             state = MissionState.NAVIGATING
+            dwell_seconds = 0.0
+        elif call.capability == "move_relative":
+            station = None
+            kind = PrimitiveKind.MOVE_RELATIVE
+            state = MissionState.MOVING_RELATIVE
             dwell_seconds = 0.0
         elif call.capability == "navigate_to_location":
             if semantic_map is None:

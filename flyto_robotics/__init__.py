@@ -26,6 +26,19 @@ from .human_approval import (
     VerifiedHumanDecision,
     build_signed_human_decision,
 )
+from .input_runtime import (
+    INPUT_EVENT_CONTRACT_VERSION,
+    InputEvent,
+    InputPhase,
+    InputRuntimeEvent,
+    InputValidationError,
+    ShortcutAction,
+    ShortcutBinding,
+    ShortcutDispatcher,
+    ShortcutRuntime,
+    ValidatedWorkflowCatalog,
+    parse_input_event,
+)
 from .line_perception import LineObservation, LineScene, detect_line_scene
 from .mission import Command, MissionController, Pose2D
 from .semantic_map import (
@@ -58,7 +71,12 @@ __all__ = [
     "HUMAN_DECISION_CONTRACT_VERSION",
     "HumanDecisionAuthenticator",
     "HumanDecisionValidationError",
+    "INPUT_EVENT_CONTRACT_VERSION",
     "GoalFrame",
+    "InputEvent",
+    "InputPhase",
+    "InputRuntimeEvent",
+    "InputValidationError",
     "JobValidationError",
     "LineObservation",
     "LineScene",
@@ -74,9 +92,14 @@ __all__ = [
     "SemanticLocationMap",
     "SemanticLocationStore",
     "SemanticMapValidationError",
+    "ShortcutAction",
+    "ShortcutBinding",
+    "ShortcutDispatcher",
+    "ShortcutRuntime",
     "VerifiedHumanDecision",
     "WorkflowPlan",
     "WorkflowStep",
+    "ValidatedWorkflowCatalog",
     "compile_workflow",
     "build_signed_human_decision",
     "default_capability_registry",
@@ -85,6 +108,7 @@ __all__ = [
     "load_job",
     "load_plan",
     "parse_semantic_location_map",
+    "parse_input_event",
     "request_ai_plan",
 ]
 

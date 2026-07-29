@@ -9,6 +9,13 @@
   injectable workflows: `navigate`, `navigate_to_location`,
   `save_current_location`, `follow_line`, `dwell`, `wait_until_clear`,
   `ask_human`, `resume`, and `safe_stop`.
+- Shortcut control now adds a tenth `move_relative` primitive and a
+  transport-neutral `input-event.v1` gate. Keyboard, joystick, or adapter
+  inputs resolve only prevalidated workflow IDs; release, disconnect, and
+  dead-man timeout cancel the mission before its next controller update.
+- `shortcut.forward.30cm.v1` is the first bounded workflow-card example.
+  Press starts an odometry-closed 0.3 m move, while input and mission audit
+  streams retain start, keepalive, rejection, and safe-stop reasons.
 - Capability selection now uses namespaced/versioned manifests, registry
   snapshot hashes, language-neutral Goal Frames, canonical
   intent/affordance/effect/event matching, runtime compatibility hard filters,
@@ -79,6 +86,8 @@
 - Stabilize full physical camera line handoff before claiming visual routing.
 - Validate hardware E-stop, watchdog, network loss, sensor loss, battery, and
   site-specific acceptance on the selected physical robot.
+- Connect Flyto Cloud input capture to `input-event.v1` and validate keyboard
+  and joystick arrival latency on the selected deployment network.
 
 ## Verification
 
@@ -93,6 +102,10 @@
   plan calls containing no coordinates. Chinese, Arabic, and Japanese input
   with the same Goal Frame produced the identical
   `navigate_to_location → safe_stop` shortlist.
+- The shortcut controller soak completed 30/30 bounded 0.3 m workflows. Six
+  runs injected a lidar obstacle and all six stopped at zero velocity before
+  resuming; separate tests cover release, disconnect, heartbeat extension,
+  timeout, replay, wrong-robot, and unregistered-workflow rejection.
 - Cross-repository live-process routing used the real Blueprint engine and the
   real Flyto Core 2.26.9 bridge; `follow_line`, `wait_until_clear`, and
   `safe_stop` were selected for the Chinese color-route/obstacle goal.

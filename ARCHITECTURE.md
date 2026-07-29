@@ -70,6 +70,34 @@ The LLM chooses semantic steps in a slow loop and never participates in the
 10 Hz motor loop. Obstacle stopping remains a cross-cutting deterministic
 safety guard applied to every motion primitive.
 
+## Workflow shortcut trust boundary
+
+```text
+keyboard / joystick / external adapter
+  → flyto.robotics.input-event.v1
+  → exact source + control binding
+  → registered workflow ID
+  → normal plan validator + immutable WorkflowPlan
+  → MissionController
+  → velocity command
+```
+
+Input events contain lifecycle only: `press`, `heartbeat`, `release`, or
+`disconnect`. The schema has no velocity, PWM, ROS topic, or arbitrary command
+field. A press arms a prevalidated workflow such as
+`shortcut.forward.30cm.v1`; only the controller's next observation tick may
+produce motion. Release, source disconnect, or heartbeat expiry cancels the
+active mission before the next controller update and therefore yields zero
+velocity. Replayed event IDs, non-increasing session sequences, unknown
+bindings, wrong-robot workflows, and concurrent shortcut starts fail closed
+with bounded audit evidence.
+
+`move_relative` is a single-purpose primitive. It captures the current trusted
+odometry pose on entry, projects displacement along that starting heading,
+clamps speed, applies the global obstacle guard, and completes at a bounded
+distance tolerance. Positive distance moves forward and negative distance
+moves backward. It does not add a second device-specific motor controller.
+
 ## Semantic-location trust boundary
 
 ```text
@@ -170,6 +198,10 @@ timeouts, and `abort` or `request_replan` failure policies.
 
 `flyto.robotics.human-decision.v1` records a short-lived decision, actor ID,
 job/robot/approval scope, nonce, and HMAC-SHA256 signature.
+
+`flyto.robotics.input-event.v1` records an input source, control, session,
+phase, and monotonic sequence. Arrival time and dead-man policy are trusted
+runtime state rather than caller-provided timestamps.
 
 ## Simulation
 

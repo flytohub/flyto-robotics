@@ -37,3 +37,13 @@ All notable project changes are recorded here.
   through `make gazebo-video`.
 - Verified a 19.0-second, 960×540 Gazebo evidence video covering the injected
   obstacle, blue/yellow/purple traversal, approval, and terminal safe stop.
+- Added the atomic `move_relative` controller with bounded signed distance,
+  odometry origin capture, speed clamping, obstacle stopping, and mandatory
+  terminal `safe_stop`.
+- Added the versioned `input-event.v1` shortcut boundary, validated workflow
+  catalog, exact source/control bindings, replay and sequence rejection,
+  heartbeat dead-man timeout, release/disconnect cancellation, and audit
+  events.
+- Added the `shortcut.forward.30cm.v1` workflow-card example.
+- Added a deterministic 30-run shortcut soak with 30/30 completions and six
+  verified obstacle stops before recovery.

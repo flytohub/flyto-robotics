@@ -11,6 +11,7 @@ from .contracts import DeliveryJob, StationPose
 class MissionState(str, Enum):
     ACCEPTED = "accepted"
     NAVIGATING = "navigating"
+    MOVING_RELATIVE = "moving_relative"
     NAVIGATING_TO_PICKUP = "navigating_to_pickup"
     WAITING_FOR_PICKUP = "waiting_for_pickup"
     NAVIGATING_TO_DROPOFF = "navigating_to_dropoff"
@@ -30,6 +31,7 @@ class MissionState(str, Enum):
 
 class PrimitiveKind(str, Enum):
     NAVIGATE = "navigate"
+    MOVE_RELATIVE = "move_relative"
     DWELL = "dwell"
     FOLLOW_LINE = "follow_line"
     WAIT_UNTIL_CLEAR = "wait_until_clear"
@@ -70,6 +72,16 @@ class WorkflowStep:
             raise ValueError("navigate primitives cannot define dwell_seconds")
         if self.kind in navigate_kinds and self.station is None:
             raise ValueError("navigate primitives require a station")
+        if self.kind == PrimitiveKind.MOVE_RELATIVE:
+            distance = self.argument("distance_m")
+            if (
+                isinstance(distance, bool)
+                or not isinstance(distance, (int, float))
+                or not 0.01 <= abs(float(distance)) <= 2.0
+            ):
+                raise ValueError(
+                    "move_relative primitives require distance_m between -2.0 and 2.0"
+                )
         if self.kind == PrimitiveKind.FOLLOW_LINE and self.argument("color") is None:
             raise ValueError("follow_line primitives require a color")
         if self.kind in {PrimitiveKind.ASK_HUMAN, PrimitiveKind.RESUME} and self.argument(

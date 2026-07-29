@@ -30,9 +30,11 @@ the example JSON as a device job, but neither project imports the other.
 - `flyto.robotics.job.v1`, `plan.v1`, and `result.v1` JSON Schemas;
 - versioned capability-manifest and capability-route schemas;
 - a signed `human-decision.v1` contract for short-lived approval messages;
-- executable `navigate`, `navigate_to_location`, `save_current_location`,
-  `follow_line`, `dwell`, `wait_until_clear`, `ask_human`, `resume`, and
-  `safe_stop` primitives;
+- executable `navigate`, `navigate_to_location`, `move_relative`,
+  `save_current_location`, `follow_line`, `dwell`, `wait_until_clear`,
+  `ask_human`, `resume`, and `safe_stop` primitives;
+- a workflow-card shortcut gate for keyboard, joystick, or adapter inputs with
+  press, heartbeat, release, disconnect, and dead-man timeout handling;
 - a machine-readable capability registry exposed to AI planners;
 - plan-level checks for terminal safe stop, consistent line transitions, and
   paired human approval/resume gates;
@@ -78,6 +80,8 @@ python3 -m flyto_robotics.cli dry-run-plan \
 python3 -m flyto_robotics.cli dry-run-plan \
   --job examples/jobs/pharmacy-to-ward.json \
   --plan examples/plans/careflow-human-gate.json
+python3 -m flyto_robotics.cli validate-plan \
+  examples/plans/shortcut-forward-30cm.json
 ```
 
 `dry-run` executes the same controller against deterministic planar kinematics.
@@ -154,6 +158,10 @@ unregistered tools. Steering, speed clamps, lidar stopping, sensor freshness,
 timeouts, and emergency behavior remain deterministic.
 
 Motion plans are rejected unless their final capability is `safe_stop`.
+Shortcut controls resolve only a registered workflow ID. They cannot carry
+linear or angular velocity fields. `release`, input disconnect, or a missing
+heartbeat cancels the active mission before the next controller update, while
+the input and mission event streams preserve the reason for audit.
 `ask_human` always holds zero velocity and cannot be satisfied by the planner:
 the controller requires an explicit matching decision from an identified
 external actor. A later `resume` fails closed unless that approval exists.
@@ -176,6 +184,8 @@ The stable external API is file-based and language-neutral:
 
 - `contracts/job-v1.schema.json` validates input jobs;
 - `contracts/plan-v1.schema.json` validates AI-composed capability plans;
+- `contracts/input-event-v1.schema.json` validates keyboard, joystick, and
+  external input lifecycle events without accepting motor values;
 - `contracts/capability-manifest-v1.schema.json` describes discoverable atoms;
 - `contracts/capability-route-v1.schema.json` records shortlist evidence;
 - `contracts/goal-frame-v1.schema.json` separates language understanding from
