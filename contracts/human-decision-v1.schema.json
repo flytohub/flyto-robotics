@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://flyto2.com/contracts/robotics/human-decision-v1.schema.json",
+  "title": "Flyto Robotics Authenticated Human Decision v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract_version",
+    "job_id",
+    "robot_id",
+    "approval_id",
+    "approved",
+    "actor_id",
+    "issued_at_epoch_seconds",
+    "expires_at_epoch_seconds",
+    "nonce",
+    "signature"
+  ],
+  "properties": {
+    "contract_version": {
+      "const": "flyto.robotics.human-decision.v1"
+    },
+    "job_id": {
+      "$ref": "#/$defs/identifier"
+    },
+    "robot_id": {
+      "$ref": "#/$defs/identifier"
+    },
+    "approval_id": {
+      "$ref": "#/$defs/identifier"
+    },
+    "approved": {
+      "type": "boolean"
+    },
+    "actor_id": {
+      "$ref": "#/$defs/identifier"
+    },
+    "issued_at_epoch_seconds": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "expires_at_epoch_seconds": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "nonce": {
+      "$ref": "#/$defs/identifier"
+    },
+    "signature": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  },
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    }
+  }
+}

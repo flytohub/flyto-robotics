@@ -1,0 +1,67 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="720" viewBox="0 0 1280 720" role="img" aria-labelledby="title desc">
+  <title id="title">Flyto Robotics closed-loop verification ladder</title>
+  <desc id="desc">Seven verification layers from static contracts through a physical robot, with the first six implemented or prepared and physical robot testing explicitly not claimed.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0b1020"/>
+      <stop offset="1" stop-color="#18213f"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="7" stdDeviation="8" flood-opacity=".3"/>
+    </filter>
+  </defs>
+  <rect width="1280" height="720" fill="url(#bg)"/>
+  <text x="70" y="72" fill="#f8fafc" font-family="Inter, Noto Sans TC, sans-serif" font-size="34" font-weight="700">Flyto Robotics 驗證閉環</text>
+  <text x="70" y="108" fill="#a8b4d8" font-family="Inter, Noto Sans TC, sans-serif" font-size="18">每一層都有獨立 oracle；上一層成功不取代下一層</text>
+  <g font-family="Inter, Noto Sans TC, sans-serif" filter="url(#shadow)">
+    <g transform="translate(70 150)">
+      <rect width="1140" height="66" rx="14" fill="#29365f" stroke="#7181b7"/>
+      <circle cx="38" cy="33" r="18" fill="#7c8cff"/><text x="38" y="39" text-anchor="middle" fill="white" font-size="17" font-weight="700">1</text>
+      <text x="72" y="28" fill="white" font-size="20" font-weight="700">Static contracts</text>
+      <text x="72" y="51" fill="#ccd5f5" font-size="15">Ruff · pytest · JSON Schema · SDF/XML · bridge · launch</text>
+      <rect x="1010" y="17" width="100" height="32" rx="16" fill="#166534"/><text x="1060" y="39" text-anchor="middle" fill="#dcfce7" font-size="15">PASS</text>
+    </g>
+    <g transform="translate(105 226)">
+      <rect width="1105" height="66" rx="14" fill="#29365f" stroke="#7181b7"/>
+      <circle cx="38" cy="33" r="18" fill="#7c8cff"/><text x="38" y="39" text-anchor="middle" fill="white" font-size="17" font-weight="700">2</text>
+      <text x="72" y="28" fill="white" font-size="20" font-weight="700">Deterministic controller</text>
+      <text x="72" y="51" fill="#ccd5f5" font-size="15">相同 plan、故障與核准產生可重播狀態轉移</text>
+      <rect x="975" y="17" width="100" height="32" rx="16" fill="#166534"/><text x="1025" y="39" text-anchor="middle" fill="#dcfce7" font-size="15">PASS</text>
+    </g>
+    <g transform="translate(140 302)">
+      <rect width="1070" height="66" rx="14" fill="#29365f" stroke="#7181b7"/>
+      <circle cx="38" cy="33" r="18" fill="#7c8cff"/><text x="38" y="39" text-anchor="middle" fill="white" font-size="17" font-weight="700">3</text>
+      <text x="72" y="28" fill="white" font-size="20" font-weight="700">50-run soak</text>
+      <text x="72" y="51" fill="#ccd5f5" font-size="15">50 / 50 · 單一 normalized fingerprint · 0 failures</text>
+      <rect x="940" y="17" width="100" height="32" rx="16" fill="#166534"/><text x="990" y="39" text-anchor="middle" fill="#dcfce7" font-size="15">PASS</text>
+    </g>
+    <g transform="translate(175 378)">
+      <rect width="1035" height="66" rx="14" fill="#29365f" stroke="#7181b7"/>
+      <circle cx="38" cy="33" r="18" fill="#7c8cff"/><text x="38" y="39" text-anchor="middle" fill="white" font-size="17" font-weight="700">4</text>
+      <text x="72" y="28" fill="white" font-size="20" font-weight="700">Strict Gazebo lab</text>
+      <text x="72" y="51" fill="#ccd5f5" font-size="15">28 / 28 · LiDAR fault · signed approval · ground truth · PNG</text>
+      <rect x="905" y="17" width="100" height="32" rx="16" fill="#166534"/><text x="955" y="39" text-anchor="middle" fill="#dcfce7" font-size="15">PASS</text>
+    </g>
+    <g transform="translate(210 454)">
+      <rect width="1000" height="66" rx="14" fill="#29365f" stroke="#7181b7"/>
+      <circle cx="38" cy="33" r="18" fill="#7c8cff"/><text x="38" y="39" text-anchor="middle" fill="white" font-size="17" font-weight="700">5</text>
+      <text x="72" y="28" fill="white" font-size="20" font-weight="700">3 cold-start matrix</text>
+      <text x="72" y="51" fill="#ccd5f5" font-size="15">新 container · 新 ROS graph · 新 Gazebo · 新 secret</text>
+      <rect x="870" y="17" width="100" height="32" rx="16" fill="#166534"/><text x="920" y="39" text-anchor="middle" fill="#dcfce7" font-size="15">PASS</text>
+    </g>
+    <g transform="translate(245 530)">
+      <rect width="965" height="66" rx="14" fill="#29365f" stroke="#7181b7"/>
+      <circle cx="38" cy="33" r="18" fill="#7c8cff"/><text x="38" y="39" text-anchor="middle" fill="white" font-size="17" font-weight="700">6</text>
+      <text x="72" y="28" fill="white" font-size="20" font-weight="700">External evaluator sandbox</text>
+      <text x="72" y="51" fill="#ccd5f5" font-size="15">短效非管理員帳號 · 隔離 · reset · hands-on guide</text>
+      <rect x="810" y="17" width="125" height="32" rx="16" fill="#1d4ed8"/><text x="872" y="39" text-anchor="middle" fill="#dbeafe" font-size="15">READY</text>
+    </g>
+    <g transform="translate(280 606)">
+      <rect width="930" height="66" rx="14" fill="#2a2735" stroke="#8f819d" stroke-dasharray="8 7"/>
+      <circle cx="38" cy="33" r="18" fill="#786b86"/><text x="38" y="39" text-anchor="middle" fill="white" font-size="17" font-weight="700">7</text>
+      <text x="72" y="28" fill="white" font-size="20" font-weight="700">Physical robot + site acceptance</text>
+      <text x="72" y="51" fill="#d8cfe2" font-size="15">硬體 E-stop · watchdog · BOM · 場域 · 人因</text>
+      <rect x="770" y="17" width="130" height="32" rx="16" fill="#713f12"/><text x="835" y="39" text-anchor="middle" fill="#fef3c7" font-size="15">NOT CLAIMED</text>
+    </g>
+  </g>
+</svg>

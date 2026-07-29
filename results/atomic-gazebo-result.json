@@ -1,0 +1,82 @@
+{
+  "contract_version": "flyto.robotics.result.v1",
+  "elapsed_seconds": 15.1,
+  "events": [
+    {
+      "at_seconds": 0.0,
+      "detail": "job contract validated; workflow=color-route-waypoints.v1",
+      "kind": "mission_accepted",
+      "state": "accepted"
+    },
+    {
+      "at_seconds": 0.1,
+      "detail": "start primitive route.blue at blue.end",
+      "kind": "primitive_started",
+      "state": "navigating"
+    },
+    {
+      "at_seconds": 4.2,
+      "detail": "route.blue reached blue.end",
+      "kind": "primitive_completed",
+      "state": "navigating"
+    },
+    {
+      "at_seconds": 4.2,
+      "detail": "start primitive route.yellow at yellow.end",
+      "kind": "primitive_started",
+      "state": "navigating"
+    },
+    {
+      "at_seconds": 8.9,
+      "detail": "route.yellow reached yellow.end",
+      "kind": "primitive_completed",
+      "state": "navigating"
+    },
+    {
+      "at_seconds": 8.9,
+      "detail": "start primitive route.purple at purple.end",
+      "kind": "primitive_started",
+      "state": "navigating"
+    },
+    {
+      "at_seconds": 14.1,
+      "detail": "route.purple reached purple.end",
+      "kind": "primitive_completed",
+      "state": "navigating"
+    },
+    {
+      "at_seconds": 14.1,
+      "detail": "start primitive stop.finish",
+      "kind": "primitive_started",
+      "state": "stopped"
+    },
+    {
+      "at_seconds": 15.1,
+      "detail": "stop.finish held stop for 1.000s",
+      "kind": "primitive_completed",
+      "state": "stopped"
+    },
+    {
+      "at_seconds": 15.1,
+      "detail": "workflow color-route-waypoints.v1 completed",
+      "kind": "mission_completed",
+      "state": "completed"
+    }
+  ],
+  "final_pose": {
+    "x": 4.2615,
+    "y": -0.0,
+    "yaw": 0.0
+  },
+  "final_state": "completed",
+  "generated_at": "2026-07-28T08:06:21.204287Z",
+  "job_id": "demo-pharmacy-to-ward-001",
+  "reason": null,
+  "robot_id": "flyto-rover-sim-001",
+  "safety_stop_count": 0,
+  "simulation": {
+    "gazebo_physics": true,
+    "mode": "gazebo_ros2"
+  },
+  "status": "succeeded"
+}

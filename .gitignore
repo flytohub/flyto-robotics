@@ -1,0 +1,17 @@
+.flyto/
+.flyto-index/
+.pytest_cache/
+.ruff_cache/
+__pycache__/
+*.py[cod]
+build/
+dist/
+install/
+log/
+*.egg-info/
+out/
+results/*
+!results/gazebo-result.json
+!results/atomic-gazebo-result.json
+!results/careflow-gazebo-human-gate-result.json
+.DS_Store

@@ -1,0 +1,62 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="720" viewBox="0 0 1280 720" role="img" aria-labelledby="title desc">
+  <title id="title">Flyto Robotics Gazebo adversarial lab topology</title>
+  <desc id="desc">The AI plan passes validation into a deterministic controller, ROS and Gazebo. A test driver injects an obstacle and signed approval, while independent ground truth and images feed a strict report.</desc>
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto"><path d="M0,0 L10,3 L0,6 Z" fill="#7383bd"/></marker>
+    <marker id="greenArrow" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto"><path d="M0,0 L10,3 L0,6 Z" fill="#22c55e"/></marker>
+  </defs>
+  <rect width="1280" height="720" fill="#0c1224"/>
+  <text x="60" y="65" fill="#f8fafc" font-family="Inter, Noto Sans TC, sans-serif" font-size="32" font-weight="700">Gazebo 對抗式閉環拓撲</text>
+  <g font-family="Inter, Noto Sans TC, sans-serif">
+    <g transform="translate(70 115)">
+      <rect width="260" height="105" rx="16" fill="#252f55" stroke="#7181b7"/>
+      <text x="130" y="37" text-anchor="middle" fill="white" font-size="20" font-weight="700">AI / Goal Frame</text>
+      <text x="130" y="66" text-anchor="middle" fill="#cbd5f5" font-size="15">能力 shortlist + plan</text>
+      <text x="130" y="88" text-anchor="middle" fill="#cbd5f5" font-size="15">不含 PWM / 任意 ROS topic</text>
+    </g>
+    <g transform="translate(510 115)">
+      <rect width="260" height="105" rx="16" fill="#252f55" stroke="#7181b7"/>
+      <text x="130" y="37" text-anchor="middle" fill="white" font-size="20" font-weight="700">Validator</text>
+      <text x="130" y="66" text-anchor="middle" fill="#cbd5f5" font-size="15">schema · registry · policy</text>
+      <text x="130" y="88" text-anchor="middle" fill="#cbd5f5" font-size="15">immutable WorkflowPlan</text>
+    </g>
+    <g transform="translate(950 115)">
+      <rect width="260" height="105" rx="16" fill="#252f55" stroke="#7181b7"/>
+      <text x="130" y="37" text-anchor="middle" fill="white" font-size="20" font-weight="700">MissionController</text>
+      <text x="130" y="66" text-anchor="middle" fill="#cbd5f5" font-size="15">10 Hz deterministic loop</text>
+      <text x="130" y="88" text-anchor="middle" fill="#cbd5f5" font-size="15">safe stop · audit events</text>
+    </g>
+    <path d="M330 168 H500" stroke="#7383bd" stroke-width="4" marker-end="url(#arrow)"/>
+    <path d="M770 168 H940" stroke="#7383bd" stroke-width="4" marker-end="url(#arrow)"/>
+
+    <g transform="translate(680 315)">
+      <rect width="530" height="165" rx="20" fill="#172e32" stroke="#2dd4bf" stroke-width="2"/>
+      <text x="265" y="40" text-anchor="middle" fill="#e6fffb" font-size="22" font-weight="700">ROS 2 Jazzy ↔ Gazebo Harmonic</text>
+      <text x="32" y="80" fill="#b8f3eb" font-size="16">commands: /flyto/cmd_vel</text>
+      <text x="32" y="108" fill="#b8f3eb" font-size="16">observations: /flyto/odom · /flyto/scan · camera</text>
+      <text x="32" y="136" fill="#b8f3eb" font-size="16">independent: /flyto/ground_truth · overhead camera</text>
+    </g>
+    <path d="M1080 220 V305" stroke="#22c55e" stroke-width="4" marker-end="url(#greenArrow)"/>
+    <path d="M990 305 V230" stroke="#22c55e" stroke-width="4" marker-end="url(#greenArrow)"/>
+
+    <g transform="translate(70 315)">
+      <rect width="470" height="250" rx="20" fill="#33283d" stroke="#c084fc"/>
+      <text x="235" y="40" text-anchor="middle" fill="#faf5ff" font-size="22" font-weight="700">Adversarial test driver</text>
+      <text x="28" y="82" fill="#eadcf5" font-size="16">1. 動態障礙注入 LiDAR braking band</text>
+      <text x="28" y="113" fill="#eadcf5" font-size="16">2. 清除障礙並等待 continuous clearance</text>
+      <text x="28" y="144" fill="#eadcf5" font-size="16">3. 短效 HMAC signed approval</text>
+      <text x="28" y="175" fill="#eadcf5" font-size="16">4. 相同 nonce 重播 8 次</text>
+      <text x="28" y="206" fill="#eadcf5" font-size="16">5. startup / obstacle / approval / done PNG</text>
+    </g>
+    <path d="M540 400 H670" stroke="#c084fc" stroke-width="4" marker-end="url(#arrow)"/>
+    <path d="M540 455 H670" stroke="#c084fc" stroke-width="4" marker-end="url(#arrow)"/>
+
+    <g transform="translate(380 610)">
+      <rect width="520" height="70" rx="18" fill="#173927" stroke="#4ade80" stroke-width="2"/>
+      <text x="260" y="29" text-anchor="middle" fill="#dcfce7" font-size="20" font-weight="700">Strict evaluator → JSON · Markdown · JUnit · hashes</text>
+      <text x="260" y="54" text-anchor="middle" fill="#bbf7d0" font-size="15">28 assertions + ≥ 3.8 m world displacement</text>
+    </g>
+    <path d="M305 565 L475 603" stroke="#7383bd" stroke-width="4" marker-end="url(#arrow)"/>
+    <path d="M945 480 L800 603" stroke="#7383bd" stroke-width="4" marker-end="url(#arrow)"/>
+  </g>
+</svg>

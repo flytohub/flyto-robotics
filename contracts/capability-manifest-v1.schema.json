@@ -1,0 +1,120 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://flyto2.com/contracts/capability-manifest-v1.schema.json",
+  "title": "Flyto Capability Manifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "manifest_contract",
+    "canonical_id",
+    "runtime_name",
+    "name",
+    "version",
+    "domain",
+    "description",
+    "tags",
+    "aliases",
+    "control_class",
+    "safety_class",
+    "required_observations",
+    "required_resources",
+    "required_permissions",
+    "compatible_robots",
+    "arguments",
+    "safety_notes",
+    "side_effects",
+    "positive_examples",
+    "negative_examples",
+    "recovery_capabilities"
+  ],
+  "properties": {
+    "manifest_contract": {"const": "flyto.capability-manifest.v1"},
+    "canonical_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,191}$"
+    },
+    "runtime_name": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "name": {"type": "string"},
+    "version": {"type": "string"},
+    "domain": {"type": "string"},
+    "description": {"type": "string", "minLength": 1},
+    "tags": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+    "aliases": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+    "control_class": {"type": "string"},
+    "safety_class": {"type": "string"},
+    "required_observations": {
+      "type": "array",
+      "items": {"type": "string"},
+      "uniqueItems": true
+    },
+    "required_resources": {
+      "type": "array",
+      "items": {"type": "string"},
+      "uniqueItems": true
+    },
+    "required_permissions": {
+      "type": "array",
+      "items": {"type": "string"},
+      "uniqueItems": true
+    },
+    "compatible_robots": {
+      "type": "array",
+      "items": {"type": "string"},
+      "minItems": 1,
+      "uniqueItems": true
+    },
+    "arguments": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "type", "required", "description"],
+        "properties": {
+          "name": {"type": "string"},
+          "type": {"enum": ["string", "text", "number", "boolean"]},
+          "required": {"type": "boolean"},
+          "description": {"type": "string"}
+        }
+      }
+    },
+    "safety_notes": {"type": "string", "minLength": 1},
+    "side_effects": {"type": "array", "items": {"type": "string"}},
+    "positive_examples": {"type": "array", "items": {"type": "string"}},
+    "negative_examples": {"type": "array", "items": {"type": "string"}},
+    "recovery_capabilities": {"type": "array", "items": {"type": "string"}},
+    "intent_ids": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,191}$"
+      },
+      "uniqueItems": true
+    },
+    "affordances": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,191}$"
+      },
+      "uniqueItems": true
+    },
+    "effects": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,191}$"
+      },
+      "uniqueItems": true
+    },
+    "handled_events": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,191}$"
+      },
+      "uniqueItems": true
+    }
+  }
+}

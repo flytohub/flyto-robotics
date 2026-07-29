@@ -1,0 +1,32 @@
+{
+  "contract_version": "flyto.robotics.plan.v1",
+  "plan_id": "teach-current-location.v1",
+  "robot_id": "flyto-rover-sim-001",
+  "goal": "記住這裡是展示起點。",
+  "generated_by": {
+    "kind": "llm",
+    "provider": "flyto-ai",
+    "model": "planner-demo"
+  },
+  "steps": [
+    {
+      "step_id": "remember.demo_start",
+      "capability": "save_current_location",
+      "arguments": {
+        "location_id": "hospital.demo_start.1",
+        "label": "展示起點"
+      },
+      "timeout_seconds": 5.0,
+      "on_failure": "abort"
+    },
+    {
+      "step_id": "stop.finish",
+      "capability": "safe_stop",
+      "arguments": {
+        "seconds": 0.5
+      },
+      "timeout_seconds": 2.0,
+      "on_failure": "abort"
+    }
+  ]
+}

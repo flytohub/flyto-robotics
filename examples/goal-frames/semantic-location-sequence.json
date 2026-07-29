@@ -1,0 +1,25 @@
+{
+  "contract_version": "flyto.goal-frame.v1",
+  "intent_ids": [
+    "route.navigate.location"
+  ],
+  "required_affordances": [
+    "motion.navigate.semantic_location"
+  ],
+  "desired_effects": [
+    "robot.location.reached",
+    "robot.motion.stopped"
+  ],
+  "trigger_events": [],
+  "constraints": [
+    {
+      "key": "route.location.sequence",
+      "operator": "ordered",
+      "value": [
+        "hospital.route.blue_end",
+        "hospital.route.yellow_end",
+        "hospital.route.purple_end"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,110 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://flyto2.com/contracts/robotics/plan-v1.schema.json",
+  "title": "Flyto Robotics AI-Composed Capability Plan v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract_version",
+    "plan_id",
+    "robot_id",
+    "goal",
+    "generated_by",
+    "steps"
+  ],
+  "properties": {
+    "contract_version": {
+      "const": "flyto.robotics.plan.v1"
+    },
+    "plan_id": {
+      "$ref": "#/$defs/identifier"
+    },
+    "robot_id": {
+      "$ref": "#/$defs/identifier"
+    },
+    "goal": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2000
+    },
+    "generated_by": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "provider",
+        "model"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "llm",
+            "human",
+            "deterministic_demo"
+          ]
+        },
+        "provider": {
+          "$ref": "#/$defs/identifier"
+        },
+        "model": {
+          "$ref": "#/$defs/identifier"
+        }
+      }
+    },
+    "steps": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 64,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "step_id",
+          "capability",
+          "arguments",
+          "timeout_seconds",
+          "on_failure"
+        ],
+        "properties": {
+          "step_id": {
+            "$ref": "#/$defs/identifier"
+          },
+          "capability": {
+            "$ref": "#/$defs/identifier"
+          },
+          "arguments": {
+            "type": "object",
+            "maxProperties": 16,
+            "propertyNames": {
+              "$ref": "#/$defs/identifier"
+            },
+            "additionalProperties": {
+              "type": [
+                "string",
+                "number",
+                "boolean"
+              ]
+            }
+          },
+          "timeout_seconds": {
+            "type": "number",
+            "minimum": 0.1,
+            "maximum": 3600.0
+          },
+          "on_failure": {
+            "enum": [
+              "abort",
+              "request_replan"
+            ]
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    }
+  }
+}

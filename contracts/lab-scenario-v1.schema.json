@@ -1,0 +1,133 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://flyto2.com/contracts/robotics/lab-scenario-v1.schema.json",
+  "title": "Flyto2 Robotics Gazebo Lab Scenario v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract_version",
+    "scenario_id",
+    "title",
+    "description",
+    "assets",
+    "soak_runs",
+    "expectations"
+  ],
+  "properties": {
+    "contract_version": {
+      "const": "flyto.robotics.lab-scenario.v1"
+    },
+    "scenario_id": {
+      "$ref": "#/$defs/identifier"
+    },
+    "title": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 160
+    },
+    "description": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2000
+    },
+    "assets": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["world", "job", "plan", "model", "bridge"],
+      "properties": {
+        "world": {"$ref": "#/$defs/path"},
+        "job": {"$ref": "#/$defs/path"},
+        "plan": {"$ref": "#/$defs/path"},
+        "model": {"$ref": "#/$defs/path"},
+        "bridge": {"$ref": "#/$defs/path"}
+      }
+    },
+    "soak_runs": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 500
+    },
+    "expectations": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "gazebo_physics",
+        "min_safety_stop_count",
+        "max_elapsed_seconds",
+        "required_event_kinds",
+        "required_capabilities",
+        "required_actor_ids",
+        "required_capture_labels",
+        "min_world_displacement",
+        "final_pose"
+      ],
+      "properties": {
+        "status": {
+          "enum": ["succeeded", "failed", "cancelled"]
+        },
+        "gazebo_physics": {
+          "type": "boolean"
+        },
+        "min_safety_stop_count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000
+        },
+        "max_elapsed_seconds": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 3600
+        },
+        "required_event_kinds": {
+          "$ref": "#/$defs/identifierArray"
+        },
+        "required_capabilities": {
+          "$ref": "#/$defs/identifierArray"
+        },
+        "required_actor_ids": {
+          "$ref": "#/$defs/identifierArray"
+        },
+        "required_capture_labels": {
+          "$ref": "#/$defs/identifierArray"
+        },
+        "min_world_displacement": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 10000
+        },
+        "final_pose": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["min_x", "max_x", "min_y", "max_y"],
+          "properties": {
+            "min_x": {"type": "number"},
+            "max_x": {"type": "number"},
+            "min_y": {"type": "number"},
+            "max_y": {"type": "number"}
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "identifierArray": {
+      "type": "array",
+      "maxItems": 64,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/identifier"
+      }
+    },
+    "path": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*\\\\).+$"
+    }
+  }
+}

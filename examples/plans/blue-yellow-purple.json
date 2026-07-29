@@ -1,0 +1,68 @@
+{
+  "contract_version": "flyto.robotics.plan.v1",
+  "plan_id": "color-route-demo.v1",
+  "robot_id": "flyto-rover-sim-001",
+  "goal": "先走藍線，再走黃線，最後走紫線並安全停止。",
+  "generated_by": {
+    "kind": "llm",
+    "provider": "flyto-ai",
+    "model": "planner-demo"
+  },
+  "steps": [
+    {
+      "step_id": "follow.blue",
+      "capability": "follow_line",
+      "arguments": {
+        "line_id": "route.blue",
+        "color": "blue",
+        "speed": 0.25,
+        "steering_gain": 0.0,
+        "completion": "next_color",
+        "next_color": "yellow",
+        "minimum_follow_seconds": 0.5,
+        "transition_search_seconds": 5.0
+      },
+      "timeout_seconds": 60.0,
+      "on_failure": "request_replan"
+    },
+    {
+      "step_id": "follow.yellow",
+      "capability": "follow_line",
+      "arguments": {
+        "line_id": "route.yellow",
+        "color": "yellow",
+        "speed": 0.25,
+        "steering_gain": 0.0,
+        "completion": "next_color",
+        "next_color": "purple",
+        "minimum_follow_seconds": 0.5,
+        "transition_search_seconds": 5.0
+      },
+      "timeout_seconds": 60.0,
+      "on_failure": "request_replan"
+    },
+    {
+      "step_id": "follow.purple",
+      "capability": "follow_line",
+      "arguments": {
+        "line_id": "route.purple",
+        "color": "purple",
+        "speed": 0.25,
+        "steering_gain": 0.0,
+        "completion": "line_end",
+        "minimum_follow_seconds": 0.5
+      },
+      "timeout_seconds": 60.0,
+      "on_failure": "request_replan"
+    },
+    {
+      "step_id": "stop.finish",
+      "capability": "safe_stop",
+      "arguments": {
+        "seconds": 1.0
+      },
+      "timeout_seconds": 2.0,
+      "on_failure": "abort"
+    }
+  ]
+}

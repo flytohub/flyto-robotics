@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="520" viewBox="0 0 1280 520" role="img" aria-labelledby="title desc">
+  <title id="title">Flyto Robotics evidence and trust chain</title>
+  <desc id="desc">Versioned scenario inputs and ephemeral secrets drive a simulation, which produces separate mission, driver, image, and ground-truth evidence that is hashed into strict reports.</desc>
+  <defs>
+    <marker id="a" markerWidth="9" markerHeight="9" refX="8" refY="3" orient="auto"><path d="M0,0 L9,3 L0,6 Z" fill="#8da0de"/></marker>
+  </defs>
+  <rect width="1280" height="520" fill="#0d1326"/>
+  <text x="60" y="62" fill="#f8fafc" font-family="Inter, Noto Sans TC, sans-serif" font-size="31" font-weight="700">Evidence trust chain</text>
+  <g font-family="Inter, Noto Sans TC, sans-serif">
+    <g transform="translate(60 115)">
+      <rect width="250" height="130" rx="16" fill="#28345d" stroke="#7c8cff"/>
+      <text x="125" y="35" text-anchor="middle" fill="white" font-size="20" font-weight="700">Versioned inputs</text>
+      <text x="22" y="67" fill="#d4dcf8" font-size="15">scenario · plan · job</text>
+      <text x="22" y="92" fill="#d4dcf8" font-size="15">world · model · bridge</text>
+      <text x="22" y="117" fill="#d4dcf8" font-size="15">SHA-256 provenance</text>
+    </g>
+    <g transform="translate(515 115)">
+      <rect width="250" height="130" rx="16" fill="#17373a" stroke="#2dd4bf"/>
+      <text x="125" y="35" text-anchor="middle" fill="white" font-size="20" font-weight="700">Fresh simulation</text>
+      <text x="22" y="67" fill="#c7f7ef" font-size="15">Docker · ROS 2 · Gazebo</text>
+      <text x="22" y="92" fill="#c7f7ef" font-size="15">ephemeral approval key</text>
+      <text x="22" y="117" fill="#c7f7ef" font-size="15">fault injection</text>
+    </g>
+    <g transform="translate(970 115)">
+      <rect width="250" height="130" rx="16" fill="#3a2a45" stroke="#c084fc"/>
+      <text x="125" y="35" text-anchor="middle" fill="white" font-size="20" font-weight="700">Independent evidence</text>
+      <text x="22" y="67" fill="#f0defa" font-size="15">mission events / odometry</text>
+      <text x="22" y="92" fill="#f0defa" font-size="15">Gazebo ground truth</text>
+      <text x="22" y="117" fill="#f0defa" font-size="15">4 PNG + driver manifest</text>
+    </g>
+    <path d="M310 180 H505" stroke="#8da0de" stroke-width="4" marker-end="url(#a)"/>
+    <path d="M765 180 H960" stroke="#8da0de" stroke-width="4" marker-end="url(#a)"/>
+    <g transform="translate(330 335)">
+      <rect width="620" height="120" rx="20" fill="#173927" stroke="#4ade80" stroke-width="2"/>
+      <text x="310" y="38" text-anchor="middle" fill="#ecfdf5" font-size="22" font-weight="700">Strict report contracts</text>
+      <text x="310" y="70" text-anchor="middle" fill="#c8f7d7" font-size="16">28 checks · world displacement gate · consistency matrix</text>
+      <text x="310" y="97" text-anchor="middle" fill="#c8f7d7" font-size="16">report.json · report.md · junit.xml · evidence hashes</text>
+    </g>
+    <path d="M1095 245 C1095 315 940 355 960 382" fill="none" stroke="#8da0de" stroke-width="4" marker-end="url(#a)"/>
+    <path d="M185 245 C185 315 340 355 320 382" fill="none" stroke="#8da0de" stroke-width="4" marker-end="url(#a)"/>
+  </g>
+</svg>

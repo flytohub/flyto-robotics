@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://flyto2.com/contracts/goal-frame-v1.schema.json",
+  "title": "Flyto Goal Frame v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract_version",
+    "intent_ids",
+    "required_affordances",
+    "desired_effects",
+    "trigger_events",
+    "constraints"
+  ],
+  "properties": {
+    "contract_version": {"const": "flyto.goal-frame.v1"},
+    "intent_ids": {"$ref": "#/$defs/semantic_ids"},
+    "required_affordances": {"$ref": "#/$defs/semantic_ids"},
+    "desired_effects": {"$ref": "#/$defs/semantic_ids"},
+    "trigger_events": {"$ref": "#/$defs/semantic_ids"},
+    "constraints": {
+      "type": "array",
+      "maxItems": 64,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["key", "operator", "value"],
+        "properties": {
+          "key": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,191}$"
+          },
+          "operator": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+          },
+          "value": {}
+        }
+      }
+    }
+  },
+  "$defs": {
+    "semantic_ids": {
+      "type": "array",
+      "maxItems": 128,
+      "items": {
+        "type": "string",
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,191}$"
+      },
+      "uniqueItems": true
+    }
+  }
+}

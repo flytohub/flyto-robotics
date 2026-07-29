@@ -1,0 +1,97 @@
+{
+  "contract_version": "flyto.robotics.plan.v1",
+  "plan_id": "careflow-human-gate.v1",
+  "robot_id": "flyto-rover-sim-001",
+  "goal": "沿藍線與黃線運送耗材，確認路徑安全並取得護理站人員核准後，沿紫線離開並安全停止。",
+  "generated_by": {
+    "kind": "llm",
+    "provider": "flyto",
+    "model": "careflow-demo"
+  },
+  "steps": [
+    {
+      "step_id": "route.blue",
+      "capability": "follow_line",
+      "arguments": {
+        "line_id": "route.blue",
+        "color": "blue",
+        "speed": 0.14,
+        "steering_gain": 1.2,
+        "completion": "next_color",
+        "next_color": "yellow",
+        "minimum_follow_seconds": 0.5,
+        "transition_search_seconds": 1.5
+      },
+      "timeout_seconds": 30.0,
+      "on_failure": "request_replan"
+    },
+    {
+      "step_id": "safety.wait_until_clear",
+      "capability": "wait_until_clear",
+      "arguments": {
+        "clear_seconds": 0.4
+      },
+      "timeout_seconds": 15.0,
+      "on_failure": "request_replan"
+    },
+    {
+      "step_id": "route.yellow",
+      "capability": "follow_line",
+      "arguments": {
+        "line_id": "route.yellow",
+        "color": "yellow",
+        "speed": 0.12,
+        "steering_gain": 1.2,
+        "completion": "next_color",
+        "next_color": "purple",
+        "minimum_follow_seconds": 0.5,
+        "transition_search_seconds": 1.5
+      },
+      "timeout_seconds": 30.0,
+      "on_failure": "request_replan"
+    },
+    {
+      "step_id": "delivery.ask_nurse",
+      "capability": "ask_human",
+      "arguments": {
+        "approval_id": "delivery.nurse_station",
+        "prompt_key": "confirm.material_received"
+      },
+      "timeout_seconds": 30.0,
+      "on_failure": "abort"
+    },
+    {
+      "step_id": "delivery.resume",
+      "capability": "resume",
+      "arguments": {
+        "approval_id": "delivery.nurse_station"
+      },
+      "timeout_seconds": 2.0,
+      "on_failure": "abort"
+    },
+    {
+      "step_id": "route.purple",
+      "capability": "follow_line",
+      "arguments": {
+        "line_id": "route.purple",
+        "color": "purple",
+        "speed": 0.1,
+        "steering_gain": 1.2,
+        "completion": "line_end",
+        "minimum_follow_seconds": 0.5,
+        "transition_search_seconds": 1.5
+      },
+      "timeout_seconds": 30.0,
+      "on_failure": "request_replan"
+    },
+    {
+      "step_id": "mission.safe_stop",
+      "capability": "safe_stop",
+      "arguments": {
+        "seconds": 0.5
+      },
+      "timeout_seconds": 2.0,
+      "on_failure": "abort"
+    }
+  ]
+}

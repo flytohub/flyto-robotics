@@ -1,0 +1,27 @@
+{
+  "contract_version": "flyto.goal-frame.v1",
+  "intent_ids": [
+    "location.remember.current_pose"
+  ],
+  "required_affordances": [
+    "map.semantic_location.write"
+  ],
+  "desired_effects": [
+    "location.pose.saved"
+  ],
+  "trigger_events": [
+    "location.teach.requested"
+  ],
+  "constraints": [
+    {
+      "key": "target.location_id",
+      "operator": "equals",
+      "value": "hospital.demo_start.1"
+    },
+    {
+      "key": "target.location_label",
+      "operator": "equals",
+      "value": "展示起點"
+    }
+  ]
+}

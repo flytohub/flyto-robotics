@@ -1,0 +1,86 @@
+{
+  "contract_version": "flyto.robotics.plan.v1",
+  "plan_id": "careflow-waypoints-human-gate.v1",
+  "robot_id": "flyto-rover-sim-001",
+  "goal": "依序經過藍色與黃色區域，確認走道淨空並取得護理站收件核准後，前往紫色區域安全停止。",
+  "generated_by": {
+    "kind": "llm",
+    "provider": "flyto-ai",
+    "model": "careflow-demo"
+  },
+  "steps": [
+    {
+      "step_id": "route.blue",
+      "capability": "navigate",
+      "arguments": {
+        "station_id": "blue.end",
+        "x": 1.45,
+        "y": 0.0,
+        "yaw": 0.0
+      },
+      "timeout_seconds": 30.0,
+      "on_failure": "request_replan"
+    },
+    {
+      "step_id": "safety.wait_until_clear",
+      "capability": "wait_until_clear",
+      "arguments": {
+        "clear_seconds": 0.5
+      },
+      "timeout_seconds": 15.0,
+      "on_failure": "request_replan"
+    },
+    {
+      "step_id": "route.yellow",
+      "capability": "navigate",
+      "arguments": {
+        "station_id": "yellow.end",
+        "x": 2.85,
+        "y": 0.0,
+        "yaw": 0.0
+      },
+      "timeout_seconds": 30.0,
+      "on_failure": "request_replan"
+    },
+    {
+      "step_id": "delivery.ask_nurse",
+      "capability": "ask_human",
+      "arguments": {
+        "approval_id": "delivery.nurse_station",
+        "prompt_key": "confirm.material_received"
+      },
+      "timeout_seconds": 30.0,
+      "on_failure": "abort"
+    },
+    {
+      "step_id": "delivery.resume",
+      "capability": "resume",
+      "arguments": {
+        "approval_id": "delivery.nurse_station"
+      },
+      "timeout_seconds": 2.0,
+      "on_failure": "abort"
+    },
+    {
+      "step_id": "route.purple",
+      "capability": "navigate",
+      "arguments": {
+        "station_id": "purple.end",
+        "x": 4.45,
+        "y": 0.0,
+        "yaw": 0.0
+      },
+      "timeout_seconds": 30.0,
+      "on_failure": "request_replan"
+    },
+    {
+      "step_id": "mission.safe_stop",
+      "capability": "safe_stop",
+      "arguments": {
+        "seconds": 1.0
+      },
+      "timeout_seconds": 2.0,
+      "on_failure": "abort"
+    }
+  ]
+}

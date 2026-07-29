@@ -1,0 +1,54 @@
+{
+  "contract_version": "flyto.robotics.lab-scenario.v1",
+  "scenario_id": "gazebo.careflow.adversarial.v1",
+  "title": "CareFlow adversarial hospital delivery",
+  "description": "Runs the AI-composed blue, yellow, and purple waypoint workflow in Gazebo Harmonic. A physical obstacle enters and leaves the route, a signed evaluator approval is accepted, replayed nonces are rejected, the rover resumes, and terminal zero-motion evidence plus overhead images are required.",
+  "assets": {
+    "world": "worlds/atomic-color-route-lab.sdf",
+    "job": "examples/jobs/pharmacy-to-ward.json",
+    "plan": "examples/plans/careflow-waypoints-human-gate.json",
+    "model": "models/flyto_rover/model.sdf",
+    "bridge": "config/bridge.yaml"
+  },
+  "soak_runs": 50,
+  "expectations": {
+    "status": "succeeded",
+    "gazebo_physics": true,
+    "min_safety_stop_count": 1,
+    "max_elapsed_seconds": 90.0,
+    "required_event_kinds": [
+      "mission_accepted",
+      "obstacle_stop",
+      "path_clear",
+      "clearance_window_started",
+      "human_approval_requested",
+      "human_approved",
+      "human_decision_rejected",
+      "resume_authorized",
+      "mission_completed"
+    ],
+    "required_capabilities": [
+      "navigate",
+      "wait_until_clear",
+      "ask_human",
+      "resume",
+      "safe_stop"
+    ],
+    "required_actor_ids": [
+      "evaluator.gazebo"
+    ],
+    "required_capture_labels": [
+      "startup",
+      "obstacle",
+      "approval",
+      "completed"
+    ],
+    "min_world_displacement": 3.8,
+    "final_pose": {
+      "min_x": 4.15,
+      "max_x": 4.55,
+      "min_y": -0.25,
+      "max_y": 0.25
+    }
+  }
+}

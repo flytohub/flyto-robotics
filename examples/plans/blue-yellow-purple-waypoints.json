@@ -1,0 +1,58 @@
+{
+  "contract_version": "flyto.robotics.plan.v1",
+  "plan_id": "color-route-waypoints.v1",
+  "robot_id": "flyto-rover-sim-001",
+  "goal": "先走完整段藍線，再走完整段黃線，最後走完整段紫線並安全停止。",
+  "generated_by": {
+    "kind": "llm",
+    "provider": "flyto-ai",
+    "model": "planner-demo"
+  },
+  "steps": [
+    {
+      "step_id": "route.blue",
+      "capability": "navigate",
+      "arguments": {
+        "station_id": "blue.end",
+        "x": 1.45,
+        "y": 0.0,
+        "yaw": 0.0
+      },
+      "timeout_seconds": 30.0,
+      "on_failure": "request_replan"
+    },
+    {
+      "step_id": "route.yellow",
+      "capability": "navigate",
+      "arguments": {
+        "station_id": "yellow.end",
+        "x": 2.85,
+        "y": 0.0,
+        "yaw": 0.0
+      },
+      "timeout_seconds": 30.0,
+      "on_failure": "request_replan"
+    },
+    {
+      "step_id": "route.purple",
+      "capability": "navigate",
+      "arguments": {
+        "station_id": "purple.end",
+        "x": 4.45,
+        "y": 0.0,
+        "yaw": 0.0
+      },
+      "timeout_seconds": 30.0,
+      "on_failure": "request_replan"
+    },
+    {
+      "step_id": "stop.finish",
+      "capability": "safe_stop",
+      "arguments": {
+        "seconds": 1.0
+      },
+      "timeout_seconds": 2.0,
+      "on_failure": "abort"
+    }
+  ]
+}

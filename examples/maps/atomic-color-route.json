@@ -1,0 +1,46 @@
+{
+  "contract_version": "flyto.robotics.semantic-location-map.v1",
+  "map_id": "gazebo.atomic-color-route.v1",
+  "revision": 1,
+  "locations": [
+    {
+      "location_id": "hospital.route.blue_end",
+      "labels": [
+        "藍線終點",
+        "Blue route endpoint",
+        "青ルート終点"
+      ],
+      "pose": {
+        "x": 1.45,
+        "y": 0.0,
+        "yaw": 0.0
+      }
+    },
+    {
+      "location_id": "hospital.route.purple_end",
+      "labels": [
+        "紫線終點",
+        "Purple route endpoint",
+        "紫ルート終点"
+      ],
+      "pose": {
+        "x": 4.45,
+        "y": 0.0,
+        "yaw": 0.0
+      }
+    },
+    {
+      "location_id": "hospital.route.yellow_end",
+      "labels": [
+        "黃線終點",
+        "Yellow route endpoint",
+        "黄ルート終点"
+      ],
+      "pose": {
+        "x": 2.85,
+        "y": 0.0,
+        "yaw": 0.0
+      }
+    }
+  ]
+}

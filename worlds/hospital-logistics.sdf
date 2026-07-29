@@ -1,0 +1,168 @@
+<?xml version="1.0"?>
+<sdf version="1.9">
+  <world name="flyto_hospital">
+    <physics name="default_physics" type="dart">
+      <max_step_size>0.001</max_step_size>
+      <real_time_factor>1.0</real_time_factor>
+    </physics>
+    <gravity>0 0 -9.80665</gravity>
+    <magnetic_field>6e-06 2.3e-05 -4.2e-05</magnetic_field>
+
+    <plugin filename="gz-sim-physics-system"
+            name="gz::sim::systems::Physics"/>
+    <plugin filename="gz-sim-user-commands-system"
+            name="gz::sim::systems::UserCommands"/>
+    <plugin filename="gz-sim-scene-broadcaster-system"
+            name="gz::sim::systems::SceneBroadcaster"/>
+    <plugin filename="gz-sim-sensors-system"
+            name="gz::sim::systems::Sensors">
+      <render_engine>ogre2</render_engine>
+    </plugin>
+
+    <scene>
+      <ambient>0.65 0.65 0.65 1</ambient>
+      <background>0.92 0.95 0.98 1</background>
+      <shadows>true</shadows>
+      <grid>true</grid>
+    </scene>
+    <light name="ceiling_light" type="directional">
+      <cast_shadows>true</cast_shadows>
+      <pose>0 0 8 0 0 0</pose>
+      <diffuse>0.9 0.9 0.9 1</diffuse>
+      <specular>0.3 0.3 0.3 1</specular>
+      <direction>-0.3 0.2 -1</direction>
+    </light>
+
+    <model name="hospital_floor">
+      <static>true</static>
+      <link name="floor">
+        <collision name="collision">
+          <geometry>
+            <box>
+              <size>11 7 0.10</size>
+            </box>
+          </geometry>
+        </collision>
+        <visual name="visual">
+          <geometry>
+            <box>
+              <size>11 7 0.10</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.62 0.66 0.68 1</ambient>
+            <diffuse>0.82 0.86 0.88 1</diffuse>
+            <specular>0.2 0.2 0.2 1</specular>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <model name="outer_walls">
+      <static>true</static>
+      <link name="north">
+        <pose>0 3.5 1 0 0 0</pose>
+        <collision name="collision">
+          <geometry><box><size>11.2 0.15 2</size></box></geometry>
+        </collision>
+        <visual name="visual">
+          <geometry><box><size>11.2 0.15 2</size></box></geometry>
+          <material>
+            <ambient>0.75 0.83 0.88 1</ambient>
+            <diffuse>0.86 0.92 0.96 1</diffuse>
+          </material>
+        </visual>
+      </link>
+      <link name="south">
+        <pose>0 -3.5 1 0 0 0</pose>
+        <collision name="collision">
+          <geometry><box><size>11.2 0.15 2</size></box></geometry>
+        </collision>
+        <visual name="visual">
+          <geometry><box><size>11.2 0.15 2</size></box></geometry>
+          <material>
+            <ambient>0.75 0.83 0.88 1</ambient>
+            <diffuse>0.86 0.92 0.96 1</diffuse>
+          </material>
+        </visual>
+      </link>
+      <link name="east">
+        <pose>5.5 0 1 0 0 0</pose>
+        <collision name="collision">
+          <geometry><box><size>0.15 7 2</size></box></geometry>
+        </collision>
+        <visual name="visual">
+          <geometry><box><size>0.15 7 2</size></box></geometry>
+          <material>
+            <ambient>0.75 0.83 0.88 1</ambient>
+            <diffuse>0.86 0.92 0.96 1</diffuse>
+          </material>
+        </visual>
+      </link>
+      <link name="west">
+        <pose>-5.5 0 1 0 0 0</pose>
+        <collision name="collision">
+          <geometry><box><size>0.15 7 2</size></box></geometry>
+        </collision>
+        <visual name="visual">
+          <geometry><box><size>0.15 7 2</size></box></geometry>
+          <material>
+            <ambient>0.75 0.83 0.88 1</ambient>
+            <diffuse>0.86 0.92 0.96 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <model name="pharmacy_zone">
+      <static>true</static>
+      <pose>3 -2 0.056 0 0 0</pose>
+      <link name="marker">
+        <visual name="visual">
+          <geometry><box><size>1.2 1.2 0.012</size></box></geometry>
+          <material>
+            <ambient>0.03 0.48 0.62 1</ambient>
+            <diffuse>0.08 0.72 0.86 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <model name="ward_a_zone">
+      <static>true</static>
+      <pose>3 2 0.056 0 0 0</pose>
+      <link name="marker">
+        <visual name="visual">
+          <geometry><box><size>1.2 1.2 0.012</size></box></geometry>
+          <material>
+            <ambient>0.22 0.55 0.20 1</ambient>
+            <diffuse>0.36 0.78 0.32 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <model name="side_obstacle">
+      <static>true</static>
+      <pose>-2.2 1.8 0.45 0 0 0</pose>
+      <link name="cart">
+        <collision name="collision">
+          <geometry><box><size>0.7 0.45 0.9</size></box></geometry>
+        </collision>
+        <visual name="visual">
+          <geometry><box><size>0.7 0.45 0.9</size></box></geometry>
+          <material>
+            <ambient>0.62 0.20 0.04 1</ambient>
+            <diffuse>0.88 0.35 0.08 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <include>
+      <uri>model://flyto_rover</uri>
+      <name>flyto_rover</name>
+      <pose>0 0 0 0 0 0</pose>
+    </include>
+  </world>
+</sdf>

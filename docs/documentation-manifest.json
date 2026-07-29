@@ -1,0 +1,8 @@
+{
+  "documentation": {
+    "module_roots": [
+      "flyto_robotics"
+    ],
+    "description": "Only the Python package is a source module; ROS, Gazebo, contract, example, CI, and container directories are documented assets."
+  }
+}

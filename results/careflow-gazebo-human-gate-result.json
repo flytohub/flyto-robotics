@@ -1,0 +1,302 @@
+{
+  "contract_version": "flyto.robotics.result.v1",
+  "elapsed_seconds": 34.4,
+  "events": [
+    {
+      "actor_id": null,
+      "at_seconds": 0.0,
+      "capability": null,
+      "detail": "job contract validated; workflow=careflow-waypoints-human-gate.v1",
+      "kind": "mission_accepted",
+      "sequence": 1,
+      "state": "accepted",
+      "step_id": null
+    },
+    {
+      "actor_id": null,
+      "at_seconds": 0.1,
+      "capability": "navigate",
+      "detail": "start primitive route.blue at blue.end",
+      "kind": "primitive_started",
+      "sequence": 2,
+      "state": "navigating",
+      "step_id": "route.blue"
+    },
+    {
+      "actor_id": null,
+      "at_seconds": 4.2,
+      "capability": "navigate",
+      "detail": "route.blue reached blue.end",
+      "kind": "primitive_completed",
+      "sequence": 3,
+      "state": "navigating",
+      "step_id": "route.blue"
+    },
+    {
+      "actor_id": null,
+      "at_seconds": 4.2,
+      "capability": "wait_until_clear",
+      "detail": "start primitive safety.wait_until_clear",
+      "kind": "primitive_started",
+      "sequence": 4,
+      "state": "waiting_for_clear",
+      "step_id": "safety.wait_until_clear"
+    },
+    {
+      "actor_id": null,
+      "at_seconds": 4.3,
+      "capability": "wait_until_clear",
+      "detail": "continuous safe-clearance verification started",
+      "kind": "clearance_window_started",
+      "sequence": 5,
+      "state": "waiting_for_clear",
+      "step_id": "safety.wait_until_clear"
+    },
+    {
+      "actor_id": null,
+      "at_seconds": 4.8,
+      "capability": "wait_until_clear",
+      "detail": "safety.wait_until_clear observed clear path for 0.500s",
+      "kind": "primitive_completed",
+      "sequence": 6,
+      "state": "waiting_for_clear",
+      "step_id": "safety.wait_until_clear"
+    },
+    {
+      "actor_id": null,
+      "at_seconds": 4.8,
+      "capability": "navigate",
+      "detail": "start primitive route.yellow at yellow.end",
+      "kind": "primitive_started",
+      "sequence": 7,
+      "state": "navigating",
+      "step_id": "route.yellow"
+    },
+    {
+      "actor_id": null,
+      "at_seconds": 9.4,
+      "capability": "navigate",
+      "detail": "route.yellow reached yellow.end",
+      "kind": "primitive_completed",
+      "sequence": 8,
+      "state": "navigating",
+      "step_id": "route.yellow"
+    },
+    {
+      "actor_id": null,
+      "at_seconds": 9.4,
+      "capability": "ask_human",
+      "detail": "start primitive delivery.ask_nurse",
+      "kind": "primitive_started",
+      "sequence": 9,
+      "state": "waiting_for_human",
+      "step_id": "delivery.ask_nurse"
+    },
+    {
+      "actor_id": null,
+      "at_seconds": 9.5,
+      "capability": "ask_human",
+      "detail": "approval requested for delivery.nurse_station; prompt=confirm.material_received",
+      "kind": "human_approval_requested",
+      "sequence": 10,
+      "state": "waiting_for_human",
+      "step_id": "delivery.ask_nurse"
+    },
+    {
+      "actor_id": "operator.gazebo",
+      "at_seconds": 28.042,
+      "capability": "ask_human",
+      "detail": "decision recorded for delivery.nurse_station",
+      "kind": "human_approved",
+      "sequence": 11,
+      "state": "waiting_for_human",
+      "step_id": "delivery.ask_nurse"
+    },
+    {
+      "actor_id": null,
+      "at_seconds": 28.1,
+      "capability": "ask_human",
+      "detail": "delivery.ask_nurse accepted approval from operator.gazebo",
+      "kind": "primitive_completed",
+      "sequence": 12,
+      "state": "waiting_for_human",
+      "step_id": "delivery.ask_nurse"
+    },
+    {
+      "actor_id": null,
+      "at_seconds": 28.1,
+      "capability": "resume",
+      "detail": "start primitive delivery.resume",
+      "kind": "primitive_started",
+      "sequence": 13,
+      "state": "resuming",
+      "step_id": "delivery.resume"
+    },
+    {
+      "actor_id": "operator.gazebo",
+      "at_seconds": 28.2,
+      "capability": "resume",
+      "detail": "matching approval verified for delivery.nurse_station",
+      "kind": "resume_authorized",
+      "sequence": 14,
+      "state": "resuming",
+      "step_id": "delivery.resume"
+    },
+    {
+      "actor_id": null,
+      "at_seconds": 28.2,
+      "capability": "resume",
+      "detail": "delivery.resume resumed after delivery.nurse_station",
+      "kind": "primitive_completed",
+      "sequence": 15,
+      "state": "resuming",
+      "step_id": "delivery.resume"
+    },
+    {
+      "actor_id": null,
+      "at_seconds": 28.2,
+      "capability": "navigate",
+      "detail": "start primitive route.purple at purple.end",
+      "kind": "primitive_started",
+      "sequence": 16,
+      "state": "navigating",
+      "step_id": "route.purple"
+    },
+    {
+      "actor_id": null,
+      "at_seconds": 28.242,
+      "capability": "navigate",
+      "detail": "human decision nonce was already used",
+      "kind": "human_decision_rejected",
+      "sequence": 17,
+      "state": "navigating",
+      "step_id": "route.purple"
+    },
+    {
+      "actor_id": null,
+      "at_seconds": 28.443,
+      "capability": "navigate",
+      "detail": "human decision nonce was already used",
+      "kind": "human_decision_rejected",
+      "sequence": 18,
+      "state": "navigating",
+      "step_id": "route.purple"
+    },
+    {
+      "actor_id": null,
+      "at_seconds": 28.643,
+      "capability": "navigate",
+      "detail": "human decision nonce was already used",
+      "kind": "human_decision_rejected",
+      "sequence": 19,
+      "state": "navigating",
+      "step_id": "route.purple"
+    },
+    {
+      "actor_id": null,
+      "at_seconds": 28.844,
+      "capability": "navigate",
+      "detail": "human decision nonce was already used",
+      "kind": "human_decision_rejected",
+      "sequence": 20,
+      "state": "navigating",
+      "step_id": "route.purple"
+    },
+    {
+      "actor_id": null,
+      "at_seconds": 29.038,
+      "capability": "navigate",
+      "detail": "human decision nonce was already used",
+      "kind": "human_decision_rejected",
+      "sequence": 21,
+      "state": "navigating",
+      "step_id": "route.purple"
+    },
+    {
+      "actor_id": null,
+      "at_seconds": 29.238,
+      "capability": "navigate",
+      "detail": "human decision nonce was already used",
+      "kind": "human_decision_rejected",
+      "sequence": 22,
+      "state": "navigating",
+      "step_id": "route.purple"
+    },
+    {
+      "actor_id": null,
+      "at_seconds": 29.439,
+      "capability": "navigate",
+      "detail": "human decision nonce was already used",
+      "kind": "human_decision_rejected",
+      "sequence": 23,
+      "state": "navigating",
+      "step_id": "route.purple"
+    },
+    {
+      "actor_id": null,
+      "at_seconds": 29.643,
+      "capability": "navigate",
+      "detail": "human decision nonce was already used",
+      "kind": "human_decision_rejected",
+      "sequence": 24,
+      "state": "navigating",
+      "step_id": "route.purple"
+    },
+    {
+      "actor_id": null,
+      "at_seconds": 33.4,
+      "capability": "navigate",
+      "detail": "route.purple reached purple.end",
+      "kind": "primitive_completed",
+      "sequence": 25,
+      "state": "navigating",
+      "step_id": "route.purple"
+    },
+    {
+      "actor_id": null,
+      "at_seconds": 33.4,
+      "capability": "safe_stop",
+      "detail": "start primitive mission.safe_stop",
+      "kind": "primitive_started",
+      "sequence": 26,
+      "state": "stopped",
+      "step_id": "mission.safe_stop"
+    },
+    {
+      "actor_id": null,
+      "at_seconds": 34.4,
+      "capability": "safe_stop",
+      "detail": "mission.safe_stop held stop for 1.000s",
+      "kind": "primitive_completed",
+      "sequence": 27,
+      "state": "stopped",
+      "step_id": "mission.safe_stop"
+    },
+    {
+      "actor_id": null,
+      "at_seconds": 34.4,
+      "capability": null,
+      "detail": "workflow careflow-waypoints-human-gate.v1 completed",
+      "kind": "mission_completed",
+      "sequence": 28,
+      "state": "completed",
+      "step_id": null
+    }
+  ],
+  "final_pose": {
+    "x": 4.2572,
+    "y": 0.0,
+    "yaw": 0.0
+  },
+  "final_state": "completed",
+  "generated_at": "2026-07-28T08:41:10.160522Z",
+  "job_id": "demo-pharmacy-to-ward-001",
+  "reason": null,
+  "robot_id": "flyto-rover-sim-001",
+  "safety_stop_count": 0,
+  "simulation": {
+    "gazebo_physics": true,
+    "mode": "gazebo_ros2"
+  },
+  "status": "succeeded"
+}

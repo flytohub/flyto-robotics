@@ -1,0 +1,82 @@
+{
+  "contract_version": "flyto.robotics.result.v1",
+  "elapsed_seconds": 26.1,
+  "events": [
+    {
+      "at_seconds": 0.0,
+      "detail": "job contract validated; workflow=hospital_delivery.v1",
+      "kind": "mission_accepted",
+      "state": "accepted"
+    },
+    {
+      "at_seconds": 0.1,
+      "detail": "start primitive navigate.pickup at pharmacy",
+      "kind": "primitive_started",
+      "state": "navigating_to_pickup"
+    },
+    {
+      "at_seconds": 10.7,
+      "detail": "navigate.pickup reached pharmacy",
+      "kind": "primitive_completed",
+      "state": "navigating_to_pickup"
+    },
+    {
+      "at_seconds": 10.7,
+      "detail": "start primitive dwell.pickup at pharmacy",
+      "kind": "primitive_started",
+      "state": "waiting_for_pickup"
+    },
+    {
+      "at_seconds": 11.7,
+      "detail": "dwell.pickup waited 1.000s",
+      "kind": "primitive_completed",
+      "state": "waiting_for_pickup"
+    },
+    {
+      "at_seconds": 11.7,
+      "detail": "start primitive navigate.dropoff at ward_a",
+      "kind": "primitive_started",
+      "state": "navigating_to_dropoff"
+    },
+    {
+      "at_seconds": 25.1,
+      "detail": "navigate.dropoff reached ward_a",
+      "kind": "primitive_completed",
+      "state": "navigating_to_dropoff"
+    },
+    {
+      "at_seconds": 25.1,
+      "detail": "start primitive dwell.dropoff at ward_a",
+      "kind": "primitive_started",
+      "state": "waiting_for_dropoff"
+    },
+    {
+      "at_seconds": 26.1,
+      "detail": "dwell.dropoff waited 1.000s",
+      "kind": "primitive_completed",
+      "state": "waiting_for_dropoff"
+    },
+    {
+      "at_seconds": 26.1,
+      "detail": "workflow hospital_delivery.v1 completed",
+      "kind": "mission_completed",
+      "state": "completed"
+    }
+  ],
+  "final_pose": {
+    "x": 2.9953,
+    "y": 1.8031,
+    "yaw": 1.5471
+  },
+  "final_state": "completed",
+  "generated_at": "2026-07-28T06:51:03.580043Z",
+  "job_id": "demo-pharmacy-to-ward-001",
+  "reason": null,
+  "robot_id": "flyto-rover-sim-001",
+  "safety_stop_count": 0,
+  "simulation": {
+    "gazebo_physics": true,
+    "mode": "gazebo_ros2"
+  },
+  "status": "succeeded"
+}

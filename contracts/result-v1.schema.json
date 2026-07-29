@@ -1,0 +1,190 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://flyto2.com/contracts/robotics/result-v1.schema.json",
+  "title": "Flyto2 Robotics Mission Result v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract_version",
+    "job_id",
+    "robot_id",
+    "status",
+    "reason",
+    "generated_at",
+    "elapsed_seconds",
+    "final_state",
+    "final_pose",
+    "safety_stop_count",
+    "events",
+    "simulation"
+  ],
+  "properties": {
+    "contract_version": {
+      "const": "flyto.robotics.result.v1"
+    },
+    "job_id": {
+      "$ref": "#/$defs/identifier"
+    },
+    "robot_id": {
+      "$ref": "#/$defs/identifier"
+    },
+    "status": {
+      "enum": [
+        "succeeded",
+        "failed",
+        "cancelled"
+      ]
+    },
+    "reason": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "maxLength": 128
+    },
+    "generated_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "elapsed_seconds": {
+      "type": "number",
+      "minimum": 0.0
+    },
+    "final_state": {
+      "enum": [
+        "completed",
+        "failed",
+        "cancelled"
+      ]
+    },
+    "final_pose": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/pose"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "safety_stop_count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "events": {
+      "type": "array",
+      "maxItems": 1000,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "at_seconds",
+          "kind",
+          "state",
+          "detail"
+        ],
+        "properties": {
+          "sequence": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "at_seconds": {
+            "type": "number",
+            "minimum": 0.0
+          },
+          "kind": {
+            "type": "string",
+            "maxLength": 64
+          },
+          "state": {
+            "type": "string",
+            "maxLength": 64
+          },
+          "detail": {
+            "type": "string",
+            "maxLength": 256
+          },
+          "step_id": {
+            "oneOf": [
+              {
+                "$ref": "#/$defs/identifier"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "capability": {
+            "oneOf": [
+              {
+                "$ref": "#/$defs/identifier"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "actor_id": {
+            "oneOf": [
+              {
+                "$ref": "#/$defs/identifier"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      }
+    },
+    "simulation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mode",
+        "gazebo_physics"
+      ],
+      "properties": {
+        "mode": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "gazebo_physics": {
+          "type": "boolean"
+        },
+        "obstacle_injected": {
+          "type": "boolean"
+        },
+        "human_approval_injected": {
+          "type": "boolean"
+        }
+      }
+    }
+  },
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "pose": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "x",
+        "y",
+        "yaw"
+      ],
+      "properties": {
+        "x": {
+          "type": "number"
+        },
+        "y": {
+          "type": "number"
+        },
+        "yaw": {
+          "type": "number"
+        }
+      }
+    }
+  }
+}
