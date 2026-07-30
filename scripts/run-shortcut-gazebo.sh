@@ -76,7 +76,10 @@ docker run --rm \
       format=duration,size:stream=codec_name,width,height,avg_frame_rate,nb_frames \
       -of json /workspace/${run_directory}/gazebo-shortcut-closed-loop.mp4 \
       > /workspace/${run_directory}/video-probe.json
-    sha256sum /workspace/${run_directory}/gazebo-shortcut-closed-loop.mp4 \
+    video_sha=\$(sha256sum \
+      /workspace/${run_directory}/gazebo-shortcut-closed-loop.mp4 \
+      | awk '{print \$1}')
+    printf '%s  %s\n' "\${video_sha}" 'gazebo-shortcut-closed-loop.mp4' \
       > /workspace/${run_directory}/gazebo-shortcut-closed-loop.mp4.sha256
   "
 status=$?
