@@ -264,6 +264,7 @@ def test_static_assets_are_parseable_and_self_contained() -> None:
     assert "worlds/atomic-color-route.sdf" in checked
     assert "contracts/plan-v1.schema.json" in checked
     assert "contracts/input-event-v1.schema.json" in checked
+    assert "contracts/shortcut-result-v1.schema.json" in checked
     assert "contracts/human-decision-v1.schema.json" in checked
     assert "contracts/capability-manifest-v1.schema.json" in checked
     assert "contracts/capability-route-v1.schema.json" in checked
@@ -278,6 +279,7 @@ def test_static_assets_are_parseable_and_self_contained() -> None:
     assert "examples/plans/careflow-waypoints-human-gate.json" in checked
     assert "examples/plans/semantic-location-sequence.json" in checked
     assert "examples/plans/teach-current-location.json" in checked
+    assert "launch/shortcut_gazebo_demo.launch.py" in checked
     assert "examples/plans/shortcut-forward-30cm.json" in checked
     assert "https://" not in world
     assert "fuel.gazebosim.org" not in world

@@ -1,0 +1,110 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://flyto2.com/contracts/robotics/shortcut-result-v1.schema.json",
+  "title": "Flyto2 Robotics Shortcut Result v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract_version",
+    "job_id",
+    "robot_id",
+    "status",
+    "generated_at",
+    "elapsed_seconds",
+    "completed_workflows",
+    "final_pose",
+    "input_events",
+    "missions",
+    "simulation"
+  ],
+  "properties": {
+    "contract_version": {
+      "const": "flyto.robotics.shortcut-result.v1"
+    },
+    "job_id": {
+      "$ref": "#/$defs/identifier"
+    },
+    "robot_id": {
+      "$ref": "#/$defs/identifier"
+    },
+    "status": {
+      "enum": ["running", "succeeded", "stopped"]
+    },
+    "generated_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "elapsed_seconds": {
+      "type": "number",
+      "minimum": 0
+    },
+    "completed_workflows": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "final_pose": {
+      "oneOf": [{"$ref": "#/$defs/pose"}, {"type": "null"}]
+    },
+    "input_events": {
+      "type": "array",
+      "maxItems": 2048,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "sequence",
+          "at_seconds",
+          "kind",
+          "reason",
+          "binding_id",
+          "workflow_id"
+        ],
+        "properties": {
+          "sequence": {"type": "integer", "minimum": 1},
+          "at_seconds": {"type": "number", "minimum": 0},
+          "kind": {"type": "string", "maxLength": 64},
+          "reason": {"type": "string", "maxLength": 128},
+          "binding_id": {
+            "oneOf": [{"$ref": "#/$defs/identifier"}, {"type": "null"}]
+          },
+          "workflow_id": {
+            "oneOf": [{"$ref": "#/$defs/identifier"}, {"type": "null"}]
+          }
+        }
+      }
+    },
+    "missions": {
+      "type": "array",
+      "maxItems": 256,
+      "items": {
+        "type": "object"
+      }
+    },
+    "simulation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "gazebo_physics", "obstacle_injected"],
+      "properties": {
+        "mode": {"enum": ["gazebo_ros2", "physical_ros2"]},
+        "gazebo_physics": {"type": "boolean"},
+        "obstacle_injected": {"type": "boolean"}
+      }
+    }
+  },
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "pose": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["x", "y", "yaw"],
+      "properties": {
+        "x": {"type": "number"},
+        "y": {"type": "number"},
+        "yaw": {"type": "number"}
+      }
+    }
+  }
+}

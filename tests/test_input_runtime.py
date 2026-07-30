@@ -197,6 +197,19 @@ def test_deadman_timeout_stops_before_next_control_update() -> None:
     assert active.events[-1].reason == "input_timeout"
 
 
+def test_deadman_can_stop_without_a_sensor_pose() -> None:
+    active = runtime(timeout=0.2)
+    active.handle_event(event(InputPhase.PRESS, 1), now=0.0)
+
+    action = active.poll(now=0.21)
+
+    assert action is not None
+    assert action.kind == "safe_stop"
+    assert action.reason == "input_timeout"
+    assert active.controller is not None
+    assert active.controller.state == MissionState.CANCELLED
+
+
 def test_heartbeat_extends_deadman_window_and_replay_does_not() -> None:
     active = runtime(timeout=0.2)
     active.handle_event(event(InputPhase.PRESS, 1), now=0.0)

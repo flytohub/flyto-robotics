@@ -40,6 +40,8 @@ setup(
             "flyto-robotics = flyto_robotics.cli:main",
             "gazebo_lab_driver = flyto_robotics.gazebo_lab_driver:main",
             "mission_controller = flyto_robotics.ros2_node:main",
+            "shortcut_controller = flyto_robotics.shortcut_ros2_node:main",
+            "shortcut_gazebo_driver = flyto_robotics.shortcut_gazebo_driver:main",
         ],
     },
 )

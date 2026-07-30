@@ -401,6 +401,13 @@ class ShortcutRuntime:
         self._apply(action, now=now)
         return action
 
+    def poll(self, *, now: float) -> ShortcutAction | None:
+        """Apply deadman expiry without requiring a sensor pose."""
+        deadman_action = self.dispatcher.poll(now=now)
+        if deadman_action is not None:
+            self._apply(deadman_action, now=now)
+        return deadman_action
+
     def tick(
         self,
         pose: Pose2D,
@@ -408,9 +415,7 @@ class ShortcutRuntime:
         minimum_range: float,
         now: float,
     ) -> Command:
-        deadman_action = self.dispatcher.poll(now=now)
-        if deadman_action is not None:
-            self._apply(deadman_action, now=now)
+        self.poll(now=now)
         if self.controller is None:
             return Command(0.0, 0.0, MissionState.STOPPED, "shortcut_idle")
         return self.controller.tick(

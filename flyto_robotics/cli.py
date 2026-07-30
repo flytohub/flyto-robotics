@@ -99,6 +99,7 @@ def validate_assets(root: Path = PROJECT_ROOT) -> list[str]:
     json_paths = [
         root / "contracts/job-v1.schema.json",
         root / "contracts/result-v1.schema.json",
+        root / "contracts/shortcut-result-v1.schema.json",
         root / "contracts/plan-v1.schema.json",
         root / "contracts/input-event-v1.schema.json",
         root / "contracts/human-decision-v1.schema.json",
@@ -156,7 +157,13 @@ def validate_assets(root: Path = PROJECT_ROOT) -> list[str]:
     launch_path = root / "launch/hospital_demo.launch.py"
     ai_launch_path = root / "launch/atomic_ai_demo.launch.py"
     lab_launch_path = root / "launch/gazebo_lab.launch.py"
-    for path in (launch_path, ai_launch_path, lab_launch_path):
+    shortcut_launch_path = root / "launch/shortcut_gazebo_demo.launch.py"
+    for path in (
+        launch_path,
+        ai_launch_path,
+        lab_launch_path,
+        shortcut_launch_path,
+    ):
         compile(path.read_text(encoding="utf-8"), str(path), "exec")
         checked.append(str(path.relative_to(root)))
     return checked

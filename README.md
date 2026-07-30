@@ -67,6 +67,7 @@ make verify
 make soak
 make gazebo-lab
 make gazebo-matrix
+make gazebo-shortcut
 python3 -m flyto_robotics.cli validate-job \
   examples/jobs/pharmacy-to-ward.json
 python3 -m flyto_robotics.cli dry-run \
@@ -372,6 +373,7 @@ Run one strict lab or the default three-run cold-start matrix:
 make gazebo-lab
 make gazebo-matrix
 make gazebo-video
+make gazebo-shortcut
 ```
 
 Each run injects a real dynamic obstacle, verifies a LiDAR stop, removes the
@@ -390,6 +392,51 @@ remain ignored build evidence.
 
 The complete plan, measured results, image inventory, and external evaluator
 walkthrough are indexed in `docs/testing/README.md`.
+
+### Workflow-card shortcut closed loop
+
+`make gazebo-shortcut` exercises the same boundary used by a Flyto2 AI Space
+workflow card. It sends `press`, bounded `heartbeat`, `release`, and a second
+`press` as versioned input events; it never sends velocity or motor fields. The
+ROS adapter resolves `keyboard.main/ArrowUp` to the one validated workflow ID,
+executes that immutable plan, and publishes deterministic velocity commands.
+
+The evidence driver moves a real Gazebo obstacle into and out of the lidar
+path. A run passes only when all of these assertions hold:
+
+- the shortcut starts the reviewed workflow rather than a motor command;
+- missing hold state or release cancels the first mission and publishes stop;
+- lidar produces an obstacle stop followed by a path-clear recovery;
+- the second start completes the workflow;
+- the audit timeline, four labelled Gazebo captures, ground-truth displacement,
+  and at least eight real camera frames are present.
+
+The output directory contains `shortcut-result.json`, `report.json`,
+`report.md`, labelled PNG captures, raw camera frames, an H.264 evidence video,
+and SHA-256 files. The evaluator exits non-zero if any required artifact or
+behavior is missing.
+
+For a Cloud-connected ROS deployment, generate one short-lived local secret
+outside the repositories and provide the same value to the Flyto2 local
+backend and the Robotics process:
+
+```bash
+export FLYTO_ROBOTICS_INPUT_TOKEN="<at-least-32-random-bytes>"
+export FLYTO_ROBOTICS_INPUT_URL="http://127.0.0.1:8765/v1/input-events"
+
+ros2 run flyto_robotics shortcut_controller --ros-args \
+  -p job_file:=/absolute/path/job.json \
+  -p plan_file:=/absolute/path/validated-plan.json \
+  -p result_file:=/absolute/path/shortcut-result.json
+```
+
+The gateway binds to literal loopback only and requires the bearer token for
+health and input events. The Cloud browser talks only to its same-origin local
+WebSocket; the backend keeps the secret off-wire and forwards the strict event
+contract to Robotics. A press is shown as active only after Robotics confirms
+that the exact reviewed workflow ID started. Unknown bindings, workflow
+mismatches, control-thread acknowledgement timeouts, socket loss, stale
+sensors, and dead-man expiry all fail closed.
 
 ## Flyto Cloud boundary
 
