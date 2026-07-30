@@ -1,0 +1,57 @@
+{
+  "contract_version": "flyto.robotics.facility-resources.v1",
+  "space_id": "hospital.demo.floor1",
+  "resources": [
+    {
+      "resource_id": "camera.corridor.a",
+      "device_kind": "camera",
+      "zone_id": "zone.blue",
+      "adapter_id": "gazebo.camera.v1",
+      "endpoint_id": "flyto.evidence.zone_a",
+      "priority": 10,
+      "fallback_zones": []
+    },
+    {
+      "resource_id": "camera.corridor.b",
+      "device_kind": "camera",
+      "zone_id": "zone.yellow",
+      "adapter_id": "gazebo.camera.v1",
+      "endpoint_id": "flyto.evidence.zone_b",
+      "priority": 10,
+      "fallback_zones": [
+        "zone.purple"
+      ]
+    },
+    {
+      "resource_id": "camera.floor1.overhead",
+      "device_kind": "camera",
+      "zone_id": "zone.floor1",
+      "adapter_id": "gazebo.camera.v1",
+      "endpoint_id": "flyto.evidence.overhead",
+      "priority": 100,
+      "fallback_zones": [
+        "*"
+      ]
+    },
+    {
+      "resource_id": "robot.logistics.01",
+      "device_kind": "mobile_robot",
+      "zone_id": "zone.floor1",
+      "adapter_id": "ros2.diff_drive.v1",
+      "endpoint_id": "flyto.cmd_vel",
+      "priority": 10,
+      "fallback_zones": [
+        "*"
+      ]
+    },
+    {
+      "resource_id": "speaker.nurse_station.b",
+      "device_kind": "speaker",
+      "zone_id": "zone.purple",
+      "adapter_id": "facility.audio.v1",
+      "endpoint_id": "nurse_station.delivery",
+      "priority": 10,
+      "fallback_zones": []
+    }
+  ]
+}

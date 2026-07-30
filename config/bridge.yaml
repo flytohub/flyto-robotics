@@ -34,6 +34,18 @@
   gz_type_name: "gz.msgs.Image"
   direction: "GZ_TO_ROS"
 
+- ros_topic_name: "/flyto/evidence/zone_a"
+  gz_topic_name: "/flyto/evidence/zone_a"
+  ros_type_name: "sensor_msgs/msg/Image"
+  gz_type_name: "gz.msgs.Image"
+  direction: "GZ_TO_ROS"
+
+- ros_topic_name: "/flyto/evidence/zone_b"
+  gz_topic_name: "/flyto/evidence/zone_b"
+  ros_type_name: "sensor_msgs/msg/Image"
+  gz_type_name: "gz.msgs.Image"
+  direction: "GZ_TO_ROS"
+
 - ros_topic_name: "/flyto/ground_truth"
   gz_topic_name: "/flyto/ground_truth"
   ros_type_name: "nav_msgs/msg/Odometry"

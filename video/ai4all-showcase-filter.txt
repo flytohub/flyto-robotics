@@ -1,0 +1,11 @@
+color=c=0x090d18:s=1920x1080:d=25.65:r=30[bg];
+[0:v]setpts=1.35*PTS,scale=1180:664:force_original_aspect_ratio=decrease,pad=1180:664:(ow-iw)/2:(oh-ih)/2:color=0x111827[cam];
+[1:v]scale=72:72[logo];
+[bg][logo]overlay=48:38[base];
+[base][cam]overlay=48:170[layout];
+[layout]
+drawbox=x=1260:y=170:w=612:h=664:color=0x111827@0.96:t=fill,
+drawbox=x=48:y=170:w=1180:h=664:color=0x7C3AED@0.75:t=3,
+drawbox=x=1290:y=538:w=552:h=126:color=0x1E293B:t=fill,
+drawbox=x=48:y=878:w=1824:h=132:color=0x111827@0.96:t=fill,
+subtitles=filename=/assets/ai4all-showcase.ass:fontsdir=/assets[out]

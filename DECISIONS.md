@@ -16,6 +16,20 @@ location. A small transport-neutral binding atom lets Cloud perform live
 authorization and leases while Robotics independently verifies the frozen
 decision without importing Cloud or tying the contract to Python.
 
+## 2026-07-30 — Facility handoff is a small deterministic resource runtime
+
+Decision: device kinds, zones, priorities, adapters, endpoints, and fallback
+coverage live in a versioned facility-resource document. A generic selector
+prefers the exact healthy zone, then only declared fallbacks. Health changes
+release the active lease before a replacement is acquired, and every choice is
+appended to replayable evidence.
+
+Reason: embedding hospital geography or camera names in one giant robot
+workflow would make small demos unnecessarily complex and large deployments
+fragile. Keeping semantic AI planning, facility resource binding, ROS control,
+and evidence as separate atoms lets one-camera projects stay simple while
+multi-floor deployments add detail through data.
+
 ## 2026-07-30 — Shortcuts select workflows, never motor commands
 
 Decision: keyboard, joystick, and external-device inputs use the versioned

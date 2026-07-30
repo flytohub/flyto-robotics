@@ -71,6 +71,7 @@ make soak
 make gazebo-lab
 make gazebo-matrix
 make gazebo-shortcut
+make ai4all-showcase
 python3 -m flyto_robotics.cli validate-job \
   examples/jobs/pharmacy-to-ward.json
 python3 -m flyto_robotics.cli dry-run \
@@ -99,6 +100,12 @@ python3 -m flyto_robotics.resource_binding \
 `dry-run` executes the same controller against deterministic planar kinematics.
 It proves the mission state transitions and result envelope; it does not claim
 Gazebo physics evidence.
+
+`make ai4all-showcase` runs the multi-camera hospital story, injects obstacle
+and camera faults, records active-resource handoff video, and fails unless all
+12 Physical AI closure checks pass. See
+[`docs/AI4ALL_SHOWCASE.md`](docs/AI4ALL_SHOWCASE.md) for the product narrative,
+truth boundary, and evidence layout.
 
 ## Atomic and composable by default
 

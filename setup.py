@@ -27,6 +27,10 @@ setup(
             glob("examples/resource-plans/*.json"),
         ),
         (
+            f"share/{PACKAGE_NAME}/examples/facility-resources",
+            glob("examples/facility-resources/*.json"),
+        ),
+        (
             f"share/{PACKAGE_NAME}/scenarios/gazebo",
             glob("scenarios/gazebo/*.json"),
         ),
@@ -46,6 +50,7 @@ setup(
             "mission_controller = flyto_robotics.ros2_node:main",
             "shortcut_controller = flyto_robotics.shortcut_ros2_node:main",
             "shortcut_gazebo_driver = flyto_robotics.shortcut_gazebo_driver:main",
+            "showcase_gazebo_observer = flyto_robotics.showcase_gazebo_observer:main",
         ],
     },
 )

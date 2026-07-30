@@ -78,6 +78,18 @@
   - the 960×540 H.264 evidence video has 27 frames, 6.75 seconds duration, and
     SHA-256
     `b9aa0395da4f82d136e1f570e99a3cd740b194dc68f5b5f759716947f7b3c377`.
+- AI4ALL multi-device Gazebo showcase verification completed on 2026-07-30:
+  - three independent Gazebo cameras produced real sensor frames;
+  - the active lease moved from corridor camera A to corridor camera B, then
+    to the declared overhead fallback after an injected B-camera health fault;
+  - the same run completed the physical obstacle stop/recovery, signed human
+    approval, nonce replay rejection, and completion speaker binding;
+  - the routed shortlist contained eight of ten registered atoms and the
+    strictly validated LLM plan used five capabilities across seven steps;
+  - all 12 multi-device closure checks and all 28 base Gazebo checks passed;
+  - Gazebo ground truth measured 4.246827 m in 19.0 simulated seconds;
+  - both active-camera and overhead H.264 videos plus SHA-256 evidence were
+    generated from the run.
 - Deterministic CareFlow soak completed on 2026-07-29:
   - 50/50 runs passed;
   - all runs produced one normalized evidence fingerprint;

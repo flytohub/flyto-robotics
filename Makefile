@@ -1,6 +1,6 @@
 PYTHON ?= python3
 
-.PHONY: ai-dry-run assets careflow-dry-run dry-run facility-contract gazebo-lab gazebo-matrix gazebo-shortcut gazebo-video lab-contract lint soak test verify
+.PHONY: ai-dry-run ai4all-showcase assets careflow-dry-run dry-run facility-contract gazebo-lab gazebo-matrix gazebo-shortcut gazebo-video lab-contract lint soak test verify
 
 lint:
 	$(PYTHON) -m ruff check .
@@ -55,5 +55,8 @@ gazebo-shortcut:
 
 gazebo-video:
 	FLYTO_ROBOTICS_RECORD_VIDEO=1 ./scripts/run-gazebo-lab.sh
+
+ai4all-showcase:
+	./scripts/run-ai4all-showcase.sh
 
 verify: lint test assets dry-run ai-dry-run careflow-dry-run lab-contract facility-contract

@@ -1,0 +1,46 @@
+[Script Info]
+ScriptType: v4.00+
+PlayResX: 1920
+PlayResY: 1080
+ScaledBorderAndShadow: yes
+WrapStyle: 2
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Title,PingFang TC,42,&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,0,0,7,0,0,0,1
+Style: Subtitle,PingFang TC,24,&H00D0B8AE,&H00D0B8AE,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,0,0,7,0,0,0,1
+Style: PanelHead,PingFang TC,24,&H00FDB5C4,&H00FDB5C4,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,0,0,7,0,0,0,1
+Style: Body,PingFang TC,22,&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,0,0,7,0,0,0,1
+Style: Atom,PingFang TC,19,&H00E1D5CB,&H00E1D5CB,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,0,0,7,0,0,0,1
+Style: Blue,PingFang TC,22,&H00FAA560,&H00FAA560,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,0,0,7,0,0,0,1
+Style: Red,PingFang TC,24,&H007171F8,&H007171F8,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,0,0,7,0,0,0,1
+Style: Green,PingFang TC,24,&H0099D334,&H0099D334,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,0,0,7,0,0,0,1
+Style: Yellow,PingFang TC,24,&H0015CCFA,&H0015CCFA,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,0,0,7,0,0,0,1
+Style: Purple,PingFang TC,24,&H00FC84C0,&H00FC84C0,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,0,0,7,0,0,0,1
+Style: Metric,PingFang TC,28,&H0099D334,&H0099D334,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,0,0,7,0,0,0,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+Dialogue: 0,0:00:00.00,0:00:25.65,Title,,0,0,0,,{\pos(140,42)}跨設備 Physical AI 閉環
+Dialogue: 0,0:00:00.00,0:00:25.65,Subtitle,,0,0,0,,{\pos(140,98)}同一任務，設備與現場狀態改變，安全邊界不變
+Dialogue: 0,0:00:00.00,0:00:25.65,Body,,0,0,0,,{\pos(72,192)}真實 Gazebo 感測器畫面
+Dialogue: 0,0:00:00.00,0:00:11.75,Blue,,0,0,0,,{\pos(72,790)}攝影機 A · zone.blue
+Dialogue: 0,0:00:11.75,0:00:18.50,Yellow,,0,0,0,,{\pos(72,790)}攝影機 B · zone.yellow
+Dialogue: 0,0:00:18.50,0:00:25.65,Purple,,0,0,0,,{\pos(72,790)}備援攝影機 · zone.floor1
+Dialogue: 0,0:00:00.00,0:00:25.65,PanelHead,,0,0,0,,{\pos(1298,206)}自然語言任務
+Dialogue: 0,0:00:00.00,0:00:25.65,Body,,0,0,0,,{\pos(1298,252)}依序通過藍、黃、紫區；有人擋路就停止。
+Dialogue: 0,0:00:00.00,0:00:25.65,Body,,0,0,0,,{\pos(1298,288)}抵達前需核准；設備失聯時切換備援。
+Dialogue: 0,0:00:00.00,0:00:25.65,PanelHead,,0,0,0,,{\pos(1298,350)}AI 選擇證據
+Dialogue: 0,0:00:00.00,0:00:25.65,Body,,0,0,0,,{\pos(1298,394)}能力登錄 10 → shortlist 8 → 計畫 7 步
+Dialogue: 0,0:00:00.00,0:00:25.65,Atom,,0,0,0,,{\pos(1298,440)}navigate · wait_clear
+Dialogue: 0,0:00:00.00,0:00:25.65,Atom,,0,0,0,,{\pos(1298,476)}ask_human · resume · safe_stop
+Dialogue: 0,0:00:00.00,0:00:04.45,Blue,,0,0,0,,{\pos(1318,584)}執行 navigate · 綁定攝影機 A
+Dialogue: 0,0:00:04.45,0:00:08.51,Red,,0,0,0,,{\pos(1318,584)}LiDAR 偵測障礙 · 安全停止
+Dialogue: 0,0:00:08.51,0:00:11.75,Green,,0,0,0,,{\pos(1318,584)}路徑恢復 · 繼續已驗證計畫
+Dialogue: 0,0:00:11.75,0:00:18.50,Yellow,,0,0,0,,{\pos(1318,584)}進入 B 區 · 攝影機租約交接
+Dialogue: 0,0:00:18.50,0:00:22.20,Purple,,0,0,0,,{\pos(1318,584)}B 失聯 · 切換已宣告備援
+Dialogue: 0,0:00:22.20,0:00:25.65,Green,,0,0,0,,{\pos(1318,584)}核准完成 · 喇叭端點 · 證據封存
+Dialogue: 0,0:00:00.00,0:00:25.65,Atom,,0,0,0,,{\pos(1298,714)}LLM 不輸出輪速；Validator 不通過就不能執行
+Dialogue: 0,0:00:00.00,0:00:25.65,Metric,,0,0,0,,{\pos(110,923)}12 / 12  多設備閉環
+Dialogue: 0,0:00:00.00,0:00:25.65,Metric,,0,0,0,,{\pos(650,923)}28 / 28  Gazebo 安全驗證
+Dialogue: 0,0:00:00.00,0:00:25.65,Metric,,0,0,0,,{\pos(1260,923)}4.246827 m  獨立物理位移

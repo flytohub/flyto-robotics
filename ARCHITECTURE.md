@@ -219,6 +219,33 @@ ROS 2 Jazzy communicates through `ros_gz_bridge`:
 - Gazebo world pose → ROS `/flyto/ground_truth`;
 - Gazebo clock → ROS `/clock`.
 
+## Facility resource handoff
+
+Physical devices remain outside the LLM's direct choice boundary:
+
+```text
+robot ground-truth zone + resource health
+  → FacilityResourceCatalog exact-zone filter
+  → declared fallback filter
+  → deterministic priority ordering
+  → release previous lease
+  → acquire exact adapter + endpoint
+  → append replayable evidence event
+```
+
+The catalog is data-driven and accepts arbitrary device kinds, zone IDs,
+adapters, and endpoints. The AI plan composes semantic task atoms; the facility
+runtime binds the exact camera, robot, speaker, elevator, or gateway only from
+the current AI Space resource document. No healthy declared match means no
+lease and no execution.
+
+The AI4ALL world publishes three independent camera topics. Camera A covers
+the blue zone, camera B covers yellow and purple, and the overhead camera is an
+explicit fallback. A test fault makes camera B unhealthy after the rover enters
+purple; the active video sequence then consumes only the newly leased overhead
+stream. The obstacle, approval, controller, and resource timelines retain a
+shared simulated clock for replay.
+
 ## Verification trust boundary
 
 Controller odometry is an execution input, not sufficient proof that the
