@@ -16,6 +16,11 @@
 - `shortcut.forward.30cm.v1` is the first bounded workflow-card example.
   Press starts an odometry-closed 0.3 m move, while input and mission audit
   streams retain start, keepalive, rejection, and safe-stop reasons.
+- Robotics now independently enforces the Cloud
+  `ai-space-resource-plan.v1` boundary. The strict parser verifies exact fields
+  and snapshot identity, rejects raw actuator fields, and requires one matching
+  workflow/resource/endpoint/capability/adapter/Space binding before ROS starts.
+  The projects remain source-independent and share only the JSON contract.
 - Capability selection now uses namespaced/versioned manifests, registry
   snapshot hashes, language-neutral Goal Frames, canonical
   intent/affordance/effect/event matching, runtime compatibility hard filters,
@@ -60,6 +65,19 @@
     19.0 seconds long with no generated/interpolated imagery;
   - MP4 SHA-256 is
     `4752954bd6338f620a8607d7d03f6b264da8950f1dc77602d38fa1452c4633f8`.
+- Exact resource-binding Gazebo shortcut verification completed on 2026-07-30:
+  - real ROS 2 Jazzy and Gazebo Harmonic completed all 11/11 assertions;
+  - release cancelled the first mission at zero velocity and the second
+    workflow completed after 26 accepted heartbeats;
+  - a dynamic obstacle entered the live LiDAR path, caused one safety stop,
+    then moved away and produced one path-clear recovery;
+  - Gazebo ground truth measured 0.41464 m displacement;
+  - the runtime recorded 74 bounded actions, 15 source camera frames, four
+    named evidence captures, and the exact
+    `robotics.gazebo`/`gazebo-rover-motion` binding;
+  - the 960×540 H.264 evidence video has 27 frames, 6.75 seconds duration, and
+    SHA-256
+    `b9aa0395da4f82d136e1f570e99a3cd740b194dc68f5b5f759716947f7b3c377`.
 - Deterministic CareFlow soak completed on 2026-07-29:
   - 50/50 runs passed;
   - all runs produced one normalized evidence fingerprint;
@@ -109,6 +127,9 @@
 - Cross-repository live-process routing used the real Blueprint engine and the
   real Flyto Core 2.26.9 bridge; `follow_line`, `wait_until_clear`, and
   `safe_stop` were selected for the Chinese color-route/obstacle goal.
+- The real resource-binding shortcut run passed 11/11 independent checks and
+  the Cloud builder/Robotics parser live-process compatibility probe accepted
+  the same `ai-space-resource-plan.v1` structure without a source dependency.
 
 ```bash
 make verify

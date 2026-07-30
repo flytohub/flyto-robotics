@@ -2,6 +2,22 @@
 
 All notable project changes are recorded here.
 
+## Unreleased
+
+- Added the strict, language-neutral `ai-space-resource-plan.v1` parser and JSON
+  Schema. ROS startup now requires an exact workflow, resource, endpoint,
+  capability, adapter, Space, confirmation, and immutable snapshot match when
+  resource binding is enabled.
+- Added payload-free resource-binding evidence to shortcut results and strict
+  evaluator checks that independently compare the runtime result with the
+  expected plan snapshot and adapter.
+- Added the Cloud-compatible Gazebo resource-plan example, launch parameters,
+  packaging, asset validation, and `make facility-contract` release gate.
+- Verified the complete shortcut loop in real ROS 2 Jazzy / Gazebo Harmonic:
+  release safe-stop, live heartbeat dead-man, LiDAR obstacle stop, path-clear
+  recovery, 0.41464 m world displacement, exact resource binding, four visual
+  captures, and an uncut H.264 evidence video passed all 11 assertions.
+
 ## 0.1.0 — 2026-07-28
 
 - Created the independent `flyto-robotics` ROS 2 package.

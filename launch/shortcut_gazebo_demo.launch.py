@@ -70,6 +70,11 @@ def _launch_runtime(context: object) -> list[object]:
             {
                 "job_file": LaunchConfiguration("job_file"),
                 "plan_file": LaunchConfiguration("plan_file"),
+                "resource_plan_file": LaunchConfiguration("resource_plan_file"),
+                "require_resource_plan": True,
+                "resource_capability_id": "mobility.move_relative",
+                "resource_adapter_ids": "robotics.gazebo",
+                "resource_target_space_id": "gazebo-lab",
                 "result_file": LaunchConfiguration("result_file"),
                 "deadman_timeout_seconds": 0.8,
                 "gateway_enabled": False,
@@ -108,6 +113,13 @@ def generate_launch_description() -> LaunchDescription:
                 "plan_file",
                 default_value=str(
                     share / "examples/plans/shortcut-forward-30cm.json"
+                ),
+            ),
+            DeclareLaunchArgument(
+                "resource_plan_file",
+                default_value=str(
+                    share
+                    / "examples/resource-plans/gazebo-shortcut-forward-30cm.json"
                 ),
             ),
             DeclareLaunchArgument(

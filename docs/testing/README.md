@@ -11,6 +11,9 @@ models, launch files, and scripts.
   independent oracles, acceptance gates, and exact commands.
 - [Verified results — 2026-07-29](TEST_RESULTS_2026-07-29.md): measured results,
   image inventory, provenance, and discovered failures.
+- [Resource-binding shortcut results — 2026-07-30](TEST_RESULTS_2026-07-30.md):
+  exact Cloud-compatible binding, release/dead-man behavior, obstacle recovery,
+  images, video, and measured Gazebo truth.
 - [External evaluator guide](EVALUATOR_GUIDE.md): safe, bounded hands-on
   walkthrough and feedback checklist.
 
@@ -27,6 +30,7 @@ make verify
 make soak
 make gazebo-lab
 make gazebo-matrix
+make gazebo-shortcut
 ```
 
 `make verify` requires Python only. `make gazebo-lab` and

@@ -55,7 +55,10 @@ docker run --rm \
       --result /workspace/${run_directory}/shortcut-result.json \
       --manifest /workspace/${run_directory}/images/driver-manifest.json \
       --report /workspace/${run_directory}/report.json \
-      --markdown /workspace/${run_directory}/report.md
+      --markdown /workspace/${run_directory}/report.md \
+      --resource-plan \
+        /workspace/examples/resource-plans/gazebo-shortcut-forward-30cm.json \
+      --resource-adapter robotics.gazebo
     frame_count=\$(find /workspace/${run_directory}/video-frames \
       -name 'frame-*.png' -type f | wc -l)
     elapsed=\$(python3 -c \

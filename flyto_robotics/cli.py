@@ -42,6 +42,7 @@ from .matrix import (
     render_matrix_markdown,
 )
 from .mission import MissionController, Pose2D, normalize_angle
+from .resource_binding import load_resource_plan
 from .semantic_map import SemanticLocationStore, parse_semantic_location_map
 from .soak import (
     render_soak_junit,
@@ -100,6 +101,7 @@ def validate_assets(root: Path = PROJECT_ROOT) -> list[str]:
         root / "contracts/job-v1.schema.json",
         root / "contracts/result-v1.schema.json",
         root / "contracts/shortcut-result-v1.schema.json",
+        root / "contracts/facility-resource-plan-v1.schema.json",
         root / "contracts/plan-v1.schema.json",
         root / "contracts/input-event-v1.schema.json",
         root / "contracts/human-decision-v1.schema.json",
@@ -137,6 +139,9 @@ def validate_assets(root: Path = PROJECT_ROOT) -> list[str]:
     for example_plan in sorted((root / "examples/plans").glob("*.json")):
         load_plan(example_plan)
         checked.append(str(example_plan.relative_to(root)))
+    for resource_plan in sorted((root / "examples/resource-plans").glob("*.json")):
+        load_resource_plan(resource_plan)
+        checked.append(str(resource_plan.relative_to(root)))
 
     bridge = (root / "config/bridge.yaml").read_text(encoding="utf-8")
     for required in (

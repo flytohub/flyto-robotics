@@ -28,6 +28,9 @@ the example JSON as a device job, but neither project imports the other.
 - a differential-drive rover with lidar and odometry;
 - a ROS 2 Jazzy bridge and mission-controller launch file;
 - `flyto.robotics.job.v1`, `plan.v1`, and `result.v1` JSON Schemas;
+- the strict `ai-space-resource-plan.v1` boundary that binds an exact
+  workflow, resource, endpoint, adapter, capability, Space, and lease before a
+  ROS/Gazebo/physical adapter may start;
 - versioned capability-manifest and capability-route schemas;
 - a signed `human-decision.v1` contract for short-lived approval messages;
 - executable `navigate`, `navigate_to_location`, `move_relative`,
@@ -83,6 +86,14 @@ python3 -m flyto_robotics.cli dry-run-plan \
   --plan examples/plans/careflow-human-gate.json
 python3 -m flyto_robotics.cli validate-plan \
   examples/plans/shortcut-forward-30cm.json
+python3 -m flyto_robotics.resource_binding \
+  examples/resource-plans/gazebo-shortcut-forward-30cm.json \
+  --workflow shortcut.forward.30cm.v1 \
+  --resource flyto-rover-sim-001 \
+  --capability mobility.move_relative \
+  --adapter robotics.gazebo \
+  --space gazebo-lab \
+  --confirmed
 ```
 
 `dry-run` executes the same controller against deterministic planar kinematics.
@@ -163,6 +174,21 @@ Shortcut controls resolve only a registered workflow ID. They cannot carry
 linear or angular velocity fields. `release`, input disconnect, or a missing
 heartbeat cancels the active mission before the next controller update, while
 the input and mission event streams preserve the reason for audit.
+
+Physical resource selection is a separate trust boundary. The LLM chooses a
+verified workflow from a bounded shortlist; it does not choose a concrete
+camera, robot, elevator, ROS node, or vendor adapter. Flyto2 Cloud freezes that
+decision in `ai-space-resource-plan.v1` only after capability, Space,
+permission, health, freshness, confirmation, priority, and lease checks. This
+repository independently parses the language-neutral contract and requires one
+exact matching binding before the ROS node starts. Unknown fields, a changed
+snapshot, workflow mismatch, wrong adapter, wrong Space, missing confirmation,
+or raw motor fields fail closed.
+
+The two repositories do not import one another. Their shared boundary is the
+versioned JSON contract, allowing the same control plane to bind a Python,
+C/C++, ROS 2, browser-media, ONVIF, or vendor SDK adapter without growing the
+robot controller into a device catalog.
 `ask_human` always holds zero velocity and cannot be satisfied by the planner:
 the controller requires an explicit matching decision from an identified
 external actor. A later `resume` fails closed unless that approval exists.
@@ -187,6 +213,8 @@ The stable external API is file-based and language-neutral:
 - `contracts/plan-v1.schema.json` validates AI-composed capability plans;
 - `contracts/input-event-v1.schema.json` validates keyboard, joystick, and
   external input lifecycle events without accepting motor values;
+- `contracts/facility-resource-plan-v1.schema.json` documents the exact
+  Cloud-to-adapter resource binding and immutable snapshot;
 - `contracts/capability-manifest-v1.schema.json` describes discoverable atoms;
 - `contracts/capability-route-v1.schema.json` records shortlist evidence;
 - `contracts/goal-frame-v1.schema.json` separates language understanding from

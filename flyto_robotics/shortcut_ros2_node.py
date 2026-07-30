@@ -30,6 +30,12 @@ from .input_runtime import (
     parse_input_event,
 )
 from .mission import MissionController, Pose2D
+from .resource_binding import (
+    ResourceBinding,
+    ResourceBindingError,
+    load_resource_plan,
+    select_resource_binding,
+)
 from .workflow import MissionState
 
 SHORTCUT_RESULT_CONTRACT_VERSION = "flyto.robotics.shortcut-result.v1"
@@ -55,11 +61,18 @@ class ShortcutNode(Node):
         job_path: Path | None = None,
         plan_path: Path | None = None,
         result_path: Path | None = None,
+        resource_plan_path: Path | None = None,
     ) -> None:
         super().__init__("flyto_robotics_shortcut")
         self.declare_parameter("job_file", "")
         self.declare_parameter("plan_file", "")
         self.declare_parameter("result_file", "results/shortcut-result.json")
+        self.declare_parameter("resource_plan_file", "")
+        self.declare_parameter("require_resource_plan", False)
+        self.declare_parameter("resource_capability_id", "mobility.move_relative")
+        self.declare_parameter("resource_adapter_ids", "robotics.ros2")
+        self.declare_parameter("resource_target_space_id", "")
+        self.declare_parameter("resource_plan_confirmed", False)
         self.declare_parameter("binding_id", "binding.forward")
         self.declare_parameter("input_source_id", "keyboard.main")
         self.declare_parameter("input_control_id", "ArrowUp")
@@ -82,6 +95,37 @@ class ShortcutNode(Node):
         plan_payload = json.loads(configured_plan.read_text(encoding="utf-8"))
         catalog = ValidatedWorkflowCatalog.from_plan_payloads((plan_payload,))
         workflow_id = str(plan_payload.get("plan_id", ""))
+        configured_resource_plan = resource_plan_path
+        if configured_resource_plan is None:
+            value = str(self.get_parameter("resource_plan_file").value).strip()
+            configured_resource_plan = Path(value) if value else None
+        self.resource_binding: ResourceBinding | None = None
+        if configured_resource_plan is not None:
+            resource_plan = load_resource_plan(configured_resource_plan)
+            adapter_ids = [
+                item.strip()
+                for item in str(
+                    self.get_parameter("resource_adapter_ids").value
+                ).split(",")
+                if item.strip()
+            ]
+            self.resource_binding = select_resource_binding(
+                resource_plan,
+                workflow_id=workflow_id,
+                resource_id=self.job.robot_id,
+                capability_id=str(
+                    self.get_parameter("resource_capability_id").value
+                ),
+                allowed_adapter_ids=adapter_ids,
+                target_space_id=str(
+                    self.get_parameter("resource_target_space_id").value
+                ),
+                confirmed=bool(
+                    self.get_parameter("resource_plan_confirmed").value
+                ),
+            )
+        elif bool(self.get_parameter("require_resource_plan").value):
+            raise ResourceBindingError("resource_plan_file parameter is required")
         binding = ShortcutBinding(
             binding_id=str(self.get_parameter("binding_id").value),
             source_id=str(self.get_parameter("input_source_id").value),
@@ -299,6 +343,11 @@ class ShortcutNode(Node):
                 for item in self.runtime.events
             ],
             "missions": self.missions,
+            "resource_binding": (
+                self.resource_binding.evidence()
+                if self.resource_binding is not None
+                else None
+            ),
             "simulation": {
                 "mode": (
                     "gazebo_ros2"
@@ -420,19 +469,26 @@ def run(
     plan_path: Path,
     result_path: Path,
     *,
+    resource_plan_path: Path | None = None,
     ros_args: Sequence[str] | None = None,
 ) -> int:
     """Run the shortcut adapter with explicit files for tests or deployments."""
     rclpy.init(args=list(ros_args) if ros_args is not None else None)
     node: ShortcutNode | None = None
     try:
-        node = ShortcutNode(job_path, plan_path, result_path)
+        node = ShortcutNode(
+            job_path,
+            plan_path,
+            result_path,
+            resource_plan_path,
+        )
         rclpy.spin(node)
         return 0
     except (
         InputGatewayError,
         InputValidationError,
         JobValidationError,
+        ResourceBindingError,
         json.JSONDecodeError,
         OSError,
         ValueError,
@@ -461,6 +517,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         InputGatewayError,
         InputValidationError,
         JobValidationError,
+        ResourceBindingError,
         json.JSONDecodeError,
         OSError,
         ValueError,

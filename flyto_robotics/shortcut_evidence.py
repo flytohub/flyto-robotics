@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from .contracts import write_json_atomic
+from .resource_binding import load_resource_plan
 
 
 def _check(
@@ -31,6 +32,10 @@ def _check(
 def evaluate_shortcut_evidence(
     result: object,
     manifest: object,
+    *,
+    require_resource_binding: bool = False,
+    expected_resource_plan_snapshot: str = "",
+    expected_resource_adapter: str = "",
 ) -> dict[str, object]:
     """Verify AI-space input lifecycle, safety stops, recovery, and completion."""
     if not isinstance(result, Mapping) or not isinstance(manifest, Mapping):
@@ -173,6 +178,58 @@ def evaluate_shortcut_evidence(
         frame_count,
         "at least 8 real Gazebo camera frames",
     )
+    if require_resource_binding:
+        binding = result.get("resource_binding")
+        binding_workflow = (
+            str(binding.get("workflow_id", ""))
+            if isinstance(binding, Mapping)
+            else ""
+        )
+        event_workflows = {
+            str(item.get("workflow_id", ""))
+            for item in input_events
+            if isinstance(item, Mapping) and item.get("workflow_id")
+        }
+        binding_snapshot = (
+            str(binding.get("plan_snapshot", ""))
+            if isinstance(binding, Mapping)
+            else ""
+        )
+        exact_binding = bool(
+            isinstance(binding, Mapping)
+            and len(binding_snapshot) == 64
+            and binding_snapshot == expected_resource_plan_snapshot
+            and binding.get("resource_id") == result.get("robot_id")
+            and binding_workflow in event_workflows
+            and binding.get("adapter_id") == expected_resource_adapter
+            and binding.get("endpoint_id")
+            and binding.get("capability_id")
+        )
+        _check(
+            checks,
+            "exact_resource_binding",
+            exact_binding,
+            {
+                "plan_snapshot": binding_snapshot,
+                "resource_id": (
+                    binding.get("resource_id")
+                    if isinstance(binding, Mapping)
+                    else None
+                ),
+                "workflow_id": binding_workflow or None,
+                "adapter_id": (
+                    binding.get("adapter_id")
+                    if isinstance(binding, Mapping)
+                    else None
+                ),
+                "endpoint_id": (
+                    binding.get("endpoint_id")
+                    if isinstance(binding, Mapping)
+                    else None
+                ),
+            },
+            "result matches the validated resource plan, robot, workflow and adapter",
+        )
     passed = all(bool(item["passed"]) for item in checks)
     return {
         "contract_version": "flyto.robotics.shortcut-evaluation.v1",
@@ -228,10 +285,25 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--manifest", required=True, type=Path)
     parser.add_argument("--report", required=True, type=Path)
     parser.add_argument("--markdown", required=True, type=Path)
+    parser.add_argument("--resource-plan", type=Path)
+    parser.add_argument("--resource-adapter", default="")
     args = parser.parse_args(argv)
     result: Any = json.loads(args.result.read_text(encoding="utf-8"))
     manifest: Any = json.loads(args.manifest.read_text(encoding="utf-8"))
-    report = evaluate_shortcut_evidence(result, manifest)
+    resource_plan = (
+        load_resource_plan(args.resource_plan)
+        if args.resource_plan is not None
+        else None
+    )
+    report = evaluate_shortcut_evidence(
+        result,
+        manifest,
+        require_resource_binding=resource_plan is not None,
+        expected_resource_plan_snapshot=(
+            str(resource_plan["snapshot"]) if resource_plan is not None else ""
+        ),
+        expected_resource_adapter=args.resource_adapter,
+    )
     write_json_atomic(args.report, report)
     args.markdown.write_text(render_markdown(report), encoding="utf-8")
     return 0 if report["passed"] else 3

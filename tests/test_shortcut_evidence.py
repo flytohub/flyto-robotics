@@ -93,3 +93,75 @@ def test_shortcut_evidence_fails_if_release_or_video_is_missing() -> None:
         if not item["passed"]
     }
     assert {"release_safe_stop", "visual_evidence", "video_frames"} <= failed
+
+
+def test_shortcut_evidence_can_require_exact_resource_plan_binding() -> None:
+    result = {
+        "contract_version": "flyto.robotics.shortcut-result.v1",
+        "robot_id": "flyto-rover-sim-001",
+        "status": "succeeded",
+        "completed_workflows": 1,
+        "resource_binding": {
+            "plan_snapshot": "a" * 64,
+            "resource_id": "flyto-rover-sim-001",
+            "workflow_id": "shortcut.forward.30cm.v1",
+            "adapter_id": "robotics.gazebo",
+            "endpoint_id": "gazebo-rover-motion",
+            "capability_id": "mobility.move_relative",
+        },
+        "input_events": [
+            {
+                "kind": "start_workflow",
+                "reason": "input_pressed",
+                "workflow_id": "shortcut.forward.30cm.v1",
+            },
+            {
+                "kind": "keepalive",
+                "reason": "input_heartbeat",
+                "workflow_id": "shortcut.forward.30cm.v1",
+            },
+            {
+                "kind": "safe_stop",
+                "reason": "input_released",
+                "workflow_id": "shortcut.forward.30cm.v1",
+            },
+            {
+                "kind": "start_workflow",
+                "reason": "input_pressed",
+                "workflow_id": "shortcut.forward.30cm.v1",
+            },
+        ],
+        "missions": [
+            {
+                "final_state": "cancelled",
+                "events": [
+                    {"kind": "obstacle_stop"},
+                    {"kind": "path_clear"},
+                ],
+            },
+            {"final_state": "completed", "events": []},
+        ],
+    }
+    manifest = {
+        "actions": [
+            *[{"kind": "runtime_event"} for _ in range(6)],
+            {"kind": "obstacle_injected", "success": True},
+            {"kind": "obstacle_removed", "success": True},
+        ],
+        "captures": ["ready", "obstacle-stop", "release-stop", "completed"],
+        "video": {"frame_count": 20},
+    }
+
+    report = evaluate_shortcut_evidence(
+        result,
+        manifest,
+        require_resource_binding=True,
+        expected_resource_plan_snapshot="a" * 64,
+        expected_resource_adapter="robotics.gazebo",
+    )
+
+    exact = next(
+        item for item in report["checks"] if item["name"] == "exact_resource_binding"
+    )
+    assert exact["passed"] is True
+    assert report["passed"] is True

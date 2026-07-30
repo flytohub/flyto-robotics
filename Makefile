@@ -1,6 +1,6 @@
 PYTHON ?= python3
 
-.PHONY: ai-dry-run assets careflow-dry-run dry-run gazebo-lab gazebo-matrix gazebo-shortcut gazebo-video lab-contract lint soak test verify
+.PHONY: ai-dry-run assets careflow-dry-run dry-run facility-contract gazebo-lab gazebo-matrix gazebo-shortcut gazebo-video lab-contract lint soak test verify
 
 lint:
 	$(PYTHON) -m ruff check .
@@ -28,6 +28,15 @@ lab-contract:
 	$(PYTHON) -m flyto_robotics.cli validate-lab-scenario \
 		scenarios/gazebo/careflow-adversarial.json
 
+facility-contract:
+	$(PYTHON) -m flyto_robotics.resource_binding \
+		examples/resource-plans/gazebo-shortcut-forward-30cm.json \
+		--workflow shortcut.forward.30cm.v1 \
+		--resource flyto-rover-sim-001 \
+		--capability mobility.move_relative \
+		--adapter robotics.gazebo \
+		--space gazebo-lab
+
 soak:
 	$(PYTHON) -m flyto_robotics.cli soak-plan \
 		--job examples/jobs/pharmacy-to-ward.json \
@@ -47,4 +56,4 @@ gazebo-shortcut:
 gazebo-video:
 	FLYTO_ROBOTICS_RECORD_VIDEO=1 ./scripts/run-gazebo-lab.sh
 
-verify: lint test assets dry-run ai-dry-run careflow-dry-run lab-contract
+verify: lint test assets dry-run ai-dry-run careflow-dry-run lab-contract facility-contract

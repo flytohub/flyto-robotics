@@ -265,12 +265,17 @@ def test_static_assets_are_parseable_and_self_contained() -> None:
     assert "contracts/plan-v1.schema.json" in checked
     assert "contracts/input-event-v1.schema.json" in checked
     assert "contracts/shortcut-result-v1.schema.json" in checked
+    assert "contracts/facility-resource-plan-v1.schema.json" in checked
     assert "contracts/human-decision-v1.schema.json" in checked
     assert "contracts/capability-manifest-v1.schema.json" in checked
     assert "contracts/capability-route-v1.schema.json" in checked
     assert "contracts/goal-frame-v1.schema.json" in checked
     assert "contracts/semantic-location-catalog-v1.schema.json" in checked
     assert "contracts/semantic-location-map-v1.schema.json" in checked
+    assert (
+        "examples/resource-plans/gazebo-shortcut-forward-30cm.json"
+        in checked
+    )
     assert "examples/maps/atomic-color-route.json" in checked
     assert "examples/goal-frames/semantic-location-sequence.json" in checked
     assert "examples/plans/blue-yellow-purple.json" in checked

@@ -80,6 +80,51 @@
         "type": "object"
       }
     },
+    "resource_binding": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "plan_snapshot",
+            "request_id",
+            "workflow_id",
+            "target_space_id",
+            "endpoint_id",
+            "resource_id",
+            "adapter_id",
+            "capability_id",
+            "observation_sequence",
+            "require_confirmation"
+          ],
+          "properties": {
+            "plan_snapshot": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "request_id": {"$ref": "#/$defs/identifier"},
+            "workflow_id": {"$ref": "#/$defs/identifier"},
+            "target_space_id": {"$ref": "#/$defs/identifier"},
+            "endpoint_id": {"$ref": "#/$defs/identifier"},
+            "resource_id": {"$ref": "#/$defs/identifier"},
+            "adapter_id": {"$ref": "#/$defs/identifier"},
+            "capability_id": {"$ref": "#/$defs/identifier"},
+            "observation_sequence": {
+              "oneOf": [
+                {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 256
+                },
+                {"type": "null"}
+              ]
+            },
+            "require_confirmation": {"type": "boolean"}
+          }
+        },
+        {"type": "null"}
+      ]
+    },
     "simulation": {
       "type": "object",
       "additionalProperties": false,

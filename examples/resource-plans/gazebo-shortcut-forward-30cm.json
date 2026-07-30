@@ -1,0 +1,29 @@
+{
+  "schema_version": "ai-space-resource-plan.v1",
+  "request_id": "gazebo-shortcut-run-001",
+  "workflow_id": "shortcut.forward.30cm.v1",
+  "target_space_id": "gazebo-lab",
+  "fail_closed": true,
+  "executable": true,
+  "configured_endpoint_count": 4,
+  "requirement_count": 1,
+  "selected": [
+    {
+      "step": 1,
+      "requirement_id": "motion",
+      "unit": 1,
+      "capability_id": "mobility.move_relative",
+      "lease_only": false,
+      "endpoint_id": "gazebo-rover-motion",
+      "resource_id": "flyto-rover-sim-001",
+      "adapter_id": "robotics.gazebo",
+      "target_space_id": "gazebo-lab",
+      "score": 100,
+      "observation_sequence": "gazebo-sim:ready:1",
+      "require_confirmation": false
+    }
+  ],
+  "missing": [],
+  "excluded": [],
+  "snapshot": "3c645fc02a47dcf09a9398cbc5b8e2d8b632aec145012ae75095d149ef47171d"
+}

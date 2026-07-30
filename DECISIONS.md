@@ -1,5 +1,21 @@
 # Decisions
 
+## 2026-07-30 — Exact physical resources are bound outside the LLM
+
+Decision: Robotics accepts an `ai-space-resource-plan.v1` document only through
+its strict resource-binding boundary. Before ROS starts, the parser requires
+the exact contract fields and SHA-256 snapshot, then selects exactly one
+matching workflow/resource/capability/adapter/Space binding. Confirmation is
+enforced when requested. Unknown fields, raw motor commands, ambiguous
+endpoints, and any identity mismatch fail closed.
+
+Reason: capability selection and physical resource authority are different
+problems. An LLM can compose a semantic workflow, but it cannot safely infer
+which camera, elevator, robot, or vendor adapter currently owns a hospital
+location. A small transport-neutral binding atom lets Cloud perform live
+authorization and leases while Robotics independently verifies the frozen
+decision without importing Cloud or tying the contract to Python.
+
 ## 2026-07-30 — Shortcuts select workflows, never motor commands
 
 Decision: keyboard, joystick, and external-device inputs use the versioned

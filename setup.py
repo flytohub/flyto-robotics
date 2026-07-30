@@ -23,6 +23,10 @@ setup(
         (f"share/{PACKAGE_NAME}/examples/maps", glob("examples/maps/*.json")),
         (f"share/{PACKAGE_NAME}/examples/plans", glob("examples/plans/*.json")),
         (
+            f"share/{PACKAGE_NAME}/examples/resource-plans",
+            glob("examples/resource-plans/*.json"),
+        ),
+        (
             f"share/{PACKAGE_NAME}/scenarios/gazebo",
             glob("scenarios/gazebo/*.json"),
         ),
