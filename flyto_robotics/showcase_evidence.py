@@ -56,6 +56,7 @@ def evaluate_showcase_evidence(
     facility_events = _items(facility.get("events", []), "facility.events")
     mission_events = _items(mission.get("events", []), "mission.events")
     driver_actions = _items(driver.get("actions", []), "driver.actions")
+    driver_kinds = [str(item.get("kind", "")) for item in driver_actions]
     facility_kinds = [str(item.get("kind", "")) for item in facility_events]
     mission_kinds = [str(item.get("kind", "")) for item in mission_events]
     selected_resources = [
@@ -70,32 +71,88 @@ def evaluate_showcase_evidence(
     ]
     selected_capabilities = validated_plan.get("selected_capabilities", [])
     shortlist = routing.get("shortlist", [])
+    selected_route = planning.get("selected_route", {})
+    attestation = validated_plan.get("attestation", {})
+    measured_motion = float(
+        driver.get("world_path_length")
+        or driver.get("world_displacement")
+        or 0.0
+    )
+    guarded_handoff = driver.get("guarded_handoff", {})
+    if not isinstance(guarded_handoff, Mapping):
+        raise ValueError("driver.guarded_handoff must be an object")
+    guarded_handoff_enabled = guarded_handoff.get("enabled") is True
 
     checks: list[dict[str, object]] = []
     _check(
         checks,
         "planning_contract",
         planning.get("contract_version")
-        == "flyto.robotics.showcase-planning-evidence.v1",
+        == "flyto.robotics.showcase-planning-evidence.v2",
         planning.get("contract_version"),
-        "flyto.robotics.showcase-planning-evidence.v1",
+        "flyto.robotics.showcase-planning-evidence.v2",
     )
     _check(
         checks,
-        "llm_plan_strictly_validated",
-        validated_plan.get("source", {}).get("kind") == "llm"
+        "live_llm_plan_attested_and_strictly_validated",
+        planning.get("planning_mode") == "live_llm"
+        and validated_plan.get("source", {}).get("kind") == "llm"
         and validated_plan.get("strict_validation_passed") is True
-        and validated_plan.get("direct_motor_commands_allowed") is False,
+        and validated_plan.get("executed_plan_matches_attestation") is True
+        and validated_plan.get("direct_motor_commands_allowed") is False
+        and isinstance(attestation, Mapping)
+        and bool(attestation.get("run_id"))
+        and isinstance(attestation.get("request_sha256"), str)
+        and len(attestation.get("request_sha256", "")) == 64
+        and isinstance(attestation.get("plan_sha256"), str)
+        and len(attestation.get("plan_sha256", "")) == 64
+        and isinstance(attestation.get("snapshot"), str)
+        and len(attestation.get("snapshot", "")) == 64,
         {
+            "planning_mode": planning.get("planning_mode"),
             "source": validated_plan.get("source"),
             "strict_validation_passed": validated_plan.get(
                 "strict_validation_passed"
             ),
+            "executed_plan_matches_attestation": validated_plan.get(
+                "executed_plan_matches_attestation"
+            ),
             "direct_motor_commands_allowed": validated_plan.get(
                 "direct_motor_commands_allowed"
             ),
+            "attestation": attestation,
         },
-        "LLM plan passed strict validation without direct motor commands",
+        "live model response is attested, independently validated, and identical "
+        "to the executed plan",
+    )
+    _check(
+        checks,
+        "resource_failure_triggered_verified_replan",
+        int(planning.get("round_count") or 0) >= 2
+        and int(planning.get("replan_count") or 0) >= 1
+        and any(
+            isinstance(item, Mapping)
+            and item.get("trigger") == "resource_dependency_changed"
+            and item.get("status") == "selected"
+            for item in planning.get("planning_rounds", [])
+        ),
+        {
+            "round_count": planning.get("round_count"),
+            "replan_count": planning.get("replan_count"),
+            "planning_rounds": planning.get("planning_rounds"),
+        },
+        "initial route is superseded after a dependency change and a verified "
+        "replan is selected",
+    )
+    _check(
+        checks,
+        "branch_route_selected",
+        isinstance(selected_route, Mapping)
+        and bool(selected_route.get("route_id"))
+        and isinstance(selected_route.get("location_ids"), list)
+        and len(selected_route.get("location_ids", [])) >= 2,
+        selected_route,
+        "one named branch with at least two trusted semantic locations",
     )
     _check(
         checks,
@@ -178,6 +235,39 @@ def evaluate_showcase_evidence(
         sorted(set(mission_kinds)),
         "approval, signed decision, replay rejection, and resume",
     )
+    qr_confirmation = driver.get("qr_confirmation", {})
+    _check(
+        checks,
+        "signed_qr_delivery_confirmation",
+        isinstance(qr_confirmation, Mapping)
+        and isinstance(qr_confirmation.get("token_sha256"), str)
+        and len(str(qr_confirmation.get("token_sha256"))) == 64
+        and qr_confirmation.get("raw_token_persisted") is False
+        and "qr_confirmation_verified" in driver_kinds,
+        {
+            "manifest": qr_confirmation,
+            "verified_events": driver_kinds.count("qr_confirmation_verified"),
+        },
+        "signed QR is verified while only its SHA-256 fingerprint is persisted",
+    )
+    _check(
+        checks,
+        "qr_nonce_replay_rejected",
+        isinstance(qr_confirmation, Mapping)
+        and qr_confirmation.get("replay_rejected") is True
+        and "qr_confirmation_replay_rejected" in driver_kinds
+        and "qr_confirmation_replay_accepted" not in driver_kinds,
+        {
+            "manifest": qr_confirmation,
+            "rejected_events": driver_kinds.count(
+                "qr_confirmation_replay_rejected"
+            ),
+            "accepted_events": driver_kinds.count(
+                "qr_confirmation_replay_accepted"
+            ),
+        },
+        "the same delivery QR nonce is rejected on its second use",
+    )
     _check(
         checks,
         "gazebo_fault_injection",
@@ -190,12 +280,13 @@ def evaluate_showcase_evidence(
         "mission_completed_with_motion",
         mission.get("status") == "succeeded"
         and "mission_completed" in mission_kinds
-        and float(driver.get("world_displacement") or 0.0) >= 4.0,
+        and measured_motion >= 4.0,
         {
             "status": mission.get("status"),
             "world_displacement": driver.get("world_displacement"),
+            "world_path_length": driver.get("world_path_length"),
         },
-        "succeeded with at least four metres of measured world motion",
+        "succeeded with at least four metres of measured Gazebo path motion",
     )
     _check(
         checks,
@@ -212,6 +303,159 @@ def evaluate_showcase_evidence(
         frame_count,
         "at least 20 frames from the currently leased real Gazebo camera",
     )
+    if guarded_handoff_enabled:
+        guarded_evidence = guarded_handoff.get("evidence", {})
+        if not isinstance(guarded_evidence, Mapping):
+            raise ValueError("driver.guarded_handoff.evidence must be an object")
+        guarded_events = _items(
+            guarded_evidence.get("events", []),
+            "driver.guarded_handoff.evidence.events",
+        )
+        guarded_kinds = [
+            str(item.get("kind", "")) for item in guarded_events
+        ]
+
+        def _guarded_event(kind: str) -> Mapping[str, object] | None:
+            return next(
+                (
+                    item
+                    for item in guarded_events
+                    if item.get("kind") == kind
+                ),
+                None,
+            )
+
+        precondition_verified = _guarded_event("precondition_verified")
+        item_rejected = _guarded_event("item_rejected")
+        item_verified = _guarded_event("item_verified")
+        checkpoint_resumed = _guarded_event("checkpoint_resumed")
+        recipient_rejected = _guarded_event("recipient_rejected")
+        recipient_verified = _guarded_event("recipient_verified")
+        container_unlocked = _guarded_event("container_unlocked")
+        handoff_completed = _guarded_event("handoff_completed")
+        event_positions = {
+            kind: guarded_kinds.index(kind)
+            for kind in {
+                "precondition_verified",
+                "item_rejected",
+                "item_verified",
+                "checkpoint_resumed",
+                "recipient_rejected",
+                "recipient_verified",
+                "container_unlocked",
+                "handoff_completed",
+            }
+            if kind in guarded_kinds
+        }
+        _check(
+            checks,
+            "guarded_preconditions_verified",
+            precondition_verified is not None
+            and bool(guarded_evidence.get("preconditions_verified"))
+            and precondition_verified.get("container_locked") is True,
+            {
+                "preconditions_verified": guarded_evidence.get(
+                    "preconditions_verified"
+                ),
+                "event": precondition_verified,
+            },
+            "declared preconditions pass while the container remains locked",
+        )
+        _check(
+            checks,
+            "wrong_item_blocked_then_checkpoint_resumed",
+            item_rejected is not None
+            and item_rejected.get("expected") != item_rejected.get("actual")
+            and item_rejected.get("container_locked") is True
+            and item_verified is not None
+            and item_verified.get("container_locked") is True
+            and checkpoint_resumed is not None
+            and checkpoint_resumed.get("container_locked") is True
+            and event_positions.get("item_rejected", -1)
+            < event_positions.get("item_verified", -1)
+            < event_positions.get("checkpoint_resumed", -1),
+            {
+                "item_rejected": item_rejected,
+                "item_verified": item_verified,
+                "checkpoint_resumed": checkpoint_resumed,
+            },
+            "wrong payload is blocked; the corrected payload resumes only "
+            "from its verified checkpoint",
+        )
+        _check(
+            checks,
+            "wrong_recipient_blocked_then_verified",
+            recipient_rejected is not None
+            and recipient_rejected.get("expected")
+            != recipient_rejected.get("actual")
+            and recipient_rejected.get("container_locked") is True
+            and recipient_verified is not None
+            and recipient_verified.get("container_locked") is True
+            and event_positions.get("recipient_rejected", -1)
+            < event_positions.get("recipient_verified", -1),
+            {
+                "recipient_rejected": recipient_rejected,
+                "recipient_verified": recipient_verified,
+            },
+            "wrong recipient is rejected without unlocking, then the intended "
+            "recipient is verified",
+        )
+        _check(
+            checks,
+            "unlock_after_all_guarded_gates",
+            guarded_evidence.get("state") == "completed"
+            and guarded_evidence.get("container_locked") is False
+            and guarded_evidence.get("item_verified") is True
+            and guarded_evidence.get("recipient_verified") is True
+            and guarded_evidence.get("checkpoint") is None
+            and container_unlocked is not None
+            and handoff_completed is not None
+            and event_positions.get("checkpoint_resumed", -1)
+            < event_positions.get("recipient_verified", -1)
+            < event_positions.get("container_unlocked", -1)
+            < event_positions.get("handoff_completed", -1),
+            {
+                "state": guarded_evidence.get("state"),
+                "container_locked": guarded_evidence.get("container_locked"),
+                "item_verified": guarded_evidence.get("item_verified"),
+                "recipient_verified": guarded_evidence.get(
+                    "recipient_verified"
+                ),
+                "checkpoint": guarded_evidence.get("checkpoint"),
+                "container_unlocked": container_unlocked,
+                "handoff_completed": handoff_completed,
+            },
+            "unlock occurs only after every declared gate, then the handoff "
+            "reaches a terminal state",
+        )
+        driver_guarded_positions = {
+            kind: driver_kinds.index(kind)
+            for kind in {
+                "handoff_completed",
+                "guarded_handoff_approved",
+                "approval_published",
+            }
+            if kind in driver_kinds
+        }
+        _check(
+            checks,
+            "guarded_handoff_authorizes_delivery",
+            guarded_handoff.get("failed") is False
+            and {
+                "handoff_completed",
+                "guarded_handoff_approved",
+                "approval_published",
+            }.issubset(set(driver_kinds))
+            and driver_guarded_positions.get("handoff_completed", -1)
+            < driver_guarded_positions.get("guarded_handoff_approved", -1)
+            < driver_guarded_positions.get("approval_published", -1),
+            {
+                "failed": guarded_handoff.get("failed"),
+                "driver_event_positions": driver_guarded_positions,
+            },
+            "the deterministic handoff completes before delivery approval is "
+            "published",
+        )
 
     passed = all(bool(check["passed"]) for check in checks)
     return {
@@ -223,7 +467,9 @@ def evaluate_showcase_evidence(
             "selected_capabilities": selected_capabilities,
             "selected_resources": selected_resources,
             "world_displacement": driver.get("world_displacement"),
+            "world_path_length": driver.get("world_path_length"),
             "active_camera_frames": frame_count,
+            "guarded_handoff_enabled": guarded_handoff_enabled,
         },
         "checks": checks,
     }

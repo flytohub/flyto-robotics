@@ -1,0 +1,17 @@
+color=c=0xf7f7fb:s=1920x1080:d=180:r=30[bg];
+[0:v]setpts=PTS-STARTPTS,tpad=stop_mode=clone:stop_duration=12.0,scale=360:204:force_original_aspect_ratio=decrease,pad=360:204:(ow-iw)/2:(oh-ih)/2:color=white[active];
+[1:v]setpts=PTS-STARTPTS,tpad=stop_mode=clone:stop_duration=12.0,scale=1120:630:force_original_aspect_ratio=decrease,pad=1120:630:(ow-iw)/2:(oh-ih)/2:color=white[overhead];
+[2:v]scale=64:64[logo];
+[bg][logo]overlay=42:34[base];
+[base][overhead]overlay=40:160[with_overhead];
+[with_overhead][active]overlay=776:560[with_active];
+[with_active]
+drawbox=x=40:y=160:w=1120:h=630:color=0xd8d8e5:t=2,
+drawbox=x=768:y=552:w=376:h=219:color=0x7c3aed:t=4,
+drawbox=x=1195:y=150:w=685:h=640:color=white:t=fill,
+drawbox=x=1195:y=150:w=685:h=640:color=0xd8d8e5:t=2,
+drawbox=x=1225:y=518:w=625:h=104:color=0xf7f7fb:t=fill,
+drawbox=x=1225:y=647:w=625:h=112:color=0xf3f0ff:t=fill,
+drawbox=x=40:y=835:w=1840:h=175:color=white:t=fill,
+drawbox=x=40:y=835:w=1840:h=175:color=0xd8d8e5:t=2,
+subtitles=filename=/assets/ai4all-medication-showcase.ass:fontsdir=/assets/fonts[out]

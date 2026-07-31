@@ -1,0 +1,62 @@
+{
+  "contract_version": "flyto.robotics.semantic-location-map.v1",
+  "map_id": "gazebo.ai4all-branching-route.v1",
+  "revision": 1,
+  "locations": [
+    {
+      "location_id": "route.yellow.entry",
+      "labels": ["黃色第一分岔", "Yellow first branch"],
+      "pose": {"x": 1.8, "y": 0.7, "yaw": -0.45}
+    },
+    {
+      "location_id": "route.orange.entry",
+      "labels": ["橘色第一分岔", "Orange first branch"],
+      "pose": {"x": 1.8, "y": -0.7, "yaw": 0.45}
+    },
+    {
+      "location_id": "route.merge.center",
+      "labels": ["中央匯流點", "Central merge"],
+      "pose": {"x": 3.25, "y": 0.0, "yaw": 0.0}
+    },
+    {
+      "location_id": "route.blue.branch",
+      "labels": ["藍色第二分岔", "Blue second branch"],
+      "pose": {"x": 4.5, "y": -1.5, "yaw": -0.45}
+    },
+    {
+      "location_id": "destination.blue",
+      "labels": ["藍區收件站", "Blue destination"],
+      "pose": {"x": 5.4, "y": -1.5, "yaw": 0.0}
+    },
+    {
+      "location_id": "route.green.branch",
+      "labels": ["綠色第二分岔", "Green second branch"],
+      "pose": {"x": 4.5, "y": -0.5, "yaw": -0.18}
+    },
+    {
+      "location_id": "destination.green",
+      "labels": ["綠區收件站", "Green destination"],
+      "pose": {"x": 5.4, "y": -0.5, "yaw": 0.0}
+    },
+    {
+      "location_id": "route.purple.branch",
+      "labels": ["紫色第二分岔", "Purple second branch"],
+      "pose": {"x": 4.5, "y": 0.5, "yaw": 0.18}
+    },
+    {
+      "location_id": "destination.purple",
+      "labels": ["紫區護理站", "Purple nurse station"],
+      "pose": {"x": 5.4, "y": 0.5, "yaw": 0.0}
+    },
+    {
+      "location_id": "route.red.branch",
+      "labels": ["紅色第二分岔", "Red second branch"],
+      "pose": {"x": 4.5, "y": 1.5, "yaw": 0.45}
+    },
+    {
+      "location_id": "destination.red",
+      "labels": ["紅區處置站", "Red destination"],
+      "pose": {"x": 5.4, "y": 1.5, "yaw": 0.0}
+    }
+  ]
+}

@@ -18,11 +18,6 @@ def generate_launch_description() -> LaunchDescription:
     share = Path(get_package_share_directory("flyto_robotics"))
     lab_launch = share / "launch/gazebo_lab.launch.py"
     default_output = Path.cwd() / "results/ai4all-showcase"
-    default_plan = share / "examples/plans/careflow-waypoints-human-gate.json"
-    default_goal = (
-        "依序經過藍色與黃色區域，確認走道淨空並取得護理站收件核准後，"
-        "前往紫色區域安全停止。"
-    )
     return LaunchDescription(
         [
             DeclareLaunchArgument(
@@ -35,13 +30,42 @@ def generate_launch_description() -> LaunchDescription:
                 default_value="false",
                 description="Show Gazebo while recording the same deterministic mission",
             ),
-            DeclareLaunchArgument("goal", default_value=default_goal),
             DeclareLaunchArgument("robot_id", default_value="flyto-rover-sim-001"),
-            DeclareLaunchArgument("plan_file", default_value=str(default_plan)),
+            DeclareLaunchArgument(
+                "plan_file",
+                description="Strict plan generated and validated by planning_session",
+            ),
+            DeclareLaunchArgument(
+                "planning_session_file",
+                description="Attested live planning and replan evidence",
+            ),
+            DeclareLaunchArgument(
+                "qr_recipient_ref",
+                default_value="ward-b.receiver",
+            ),
+            DeclareLaunchArgument(
+                "guarded_handoff_policy_file",
+                default_value="",
+            ),
+            DeclareLaunchArgument(
+                "guarded_handoff_script_file",
+                default_value="",
+            ),
+            DeclareLaunchArgument(
+                "guarded_handoff_step_delay_seconds",
+                default_value="0.65",
+            ),
             IncludeLaunchDescription(
                 PythonLaunchDescriptionSource(str(lab_launch)),
                 launch_arguments={
                     "plan_file": LaunchConfiguration("plan_file"),
+                    "world_file": str(
+                        share / "worlds/ai4all-branching-route.sdf"
+                    ),
+                    "semantic_map_file": str(
+                        share / "examples/maps/ai4all-branching-route.json"
+                    ),
+                    "semantic_map_id": "gazebo.ai4all-branching-route.v1",
                     "result_file": [
                         LaunchConfiguration("output_dir"),
                         "/mission-result.json",
@@ -55,6 +79,18 @@ def generate_launch_description() -> LaunchDescription:
                         "/frames/overhead",
                     ],
                     "video_max_frames": "900",
+                    "qr_recipient_ref": LaunchConfiguration(
+                        "qr_recipient_ref"
+                    ),
+                    "guarded_handoff_policy_file": LaunchConfiguration(
+                        "guarded_handoff_policy_file"
+                    ),
+                    "guarded_handoff_script_file": LaunchConfiguration(
+                        "guarded_handoff_script_file"
+                    ),
+                    "guarded_handoff_step_delay_seconds": LaunchConfiguration(
+                        "guarded_handoff_step_delay_seconds"
+                    ),
                     "headless": LaunchConfiguration("headless"),
                 }.items(),
             ),
@@ -70,10 +106,12 @@ def generate_launch_description() -> LaunchDescription:
                         ),
                         "goal_frame_file": str(
                             share
-                            / "examples/goal-frames/ai4all-careflow-showcase.json"
+                            / "examples/goal-frames/ai4all-branching-careflow.json"
                         ),
                         "plan_file": LaunchConfiguration("plan_file"),
-                        "goal": LaunchConfiguration("goal"),
+                        "planning_session_file": LaunchConfiguration(
+                            "planning_session_file"
+                        ),
                         "robot_id": LaunchConfiguration("robot_id"),
                         "evidence_dir": [
                             LaunchConfiguration("output_dir"),

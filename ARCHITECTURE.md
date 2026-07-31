@@ -70,6 +70,33 @@ The LLM chooses semantic steps in a slow loop and never participates in the
 10 Hz motor loop. Obstacle stopping remains a cross-cutting deterministic
 safety guard applied to every motion primitive.
 
+## Attested branching-plan boundary
+
+```text
+versioned route graph + live resource observations
+  → deterministic hard exclusion and ranking
+  → bounded executable route candidates
+  → Flyto AI structured completion
+  → one Schema branch per full semantic route
+  → provider attestation and independent Robotics validation
+  → resource change
+  → recompute candidates and request a second completion
+  → byte-equivalent attested plan handed to Gazebo
+```
+
+Route attributes and device dependencies are data, not prompt-only prose.
+Dependency severity is derived from separate safety, task, evidence,
+substitution, confidence, freshness, recovery, and phase axes. If no route
+survives the hard checks, planning stops before contacting the executor.
+
+The model chooses a candidate but cannot invent its geometry. A route template
+constrains every `navigate_to_location` ID in order, followed by any required
+approval pair and terminal `safe_stop`. Trusted coordinates stay in the
+map-scoped store. The planning session hashes both requests, both returned
+plans, both provider attestations, the resource change, and the selected final
+round. Gazebo evidence is accepted only if its input plan is byte-canonically
+equal to that final attested plan.
+
 ## Workflow shortcut trust boundary
 
 ```text

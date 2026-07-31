@@ -8,15 +8,15 @@ Flyto2 把臨時任務轉成經原子能力、設備範圍與安全政策驗證�
 
 同一個院內配送任務，依序遇到：
 
-1. AI 從完整能力登錄表縮小候選範圍，並組合 `navigate`、`wait_until_clear`、`ask_human`、`resume`、`safe_stop`。
-2. 機器人在藍色區域使用走廊攝影機 A。
-3. 進入黃色區域後，釋放 A 並綁定攝影機 B。
-4. Gazebo 動態障礙物進入 LiDAR 路徑，機器人安全停止；障礙移除後才恢復。
-5. 進入紫色區域時注入攝影機 B 失聯，資源路由器切換到已宣告的全樓層備援攝影機。
-6. 護理站核准完成後才繼續；重播同一簽章 nonce 會被拒絕。
-7. 抵達後綁定護理站喇叭端點，並保存完整事件、影格、位移與雜湊證據。
+1. 路網先分成黃／橘兩路，匯流後再展開藍／綠／紫／紅四路，形成八條完整候選路徑。
+2. 確定性依賴策略先依距離、設備健康、證據要求與替代條件排序；Flyto AI 只看通過硬條件的候選與原子 shortlist。
+3. 第一輪真實模型選出 `黃→紫`，每個模型回合都有 provider、model、request／plan／schema 雜湊與延遲證據。
+4. 執行前攝影機 B 健康檢查失敗，四條黃線路徑全部被排除；第二輪模型只能從四條橘線路徑重新選擇。
+5. 選定路徑被約束式 Schema 展開為完整語意位置序列、`ask_human`、`resume`、`safe_stop`，不能跳站、混路或直接輸出馬達欄位。
+6. Gazebo 依同一份 attested plan 執行；動態障礙物放到機器人當下路徑前方，LiDAR 觸發安全停止，障礙移除後才恢復。
+7. 護理站核准完成後才繼續；重播同一簽章 nonce 會被拒絕。設備 handoff、喇叭端點與影片影格都留下同一回合的可重播證據。
 
-這不是「多播放幾段影片」。三台攝影機都是 Gazebo 的獨立感測器，切換決策依機器人的 ground-truth 區域與健康狀態產生；障礙物則透過 Gazebo service 實際改變模型位置。
+這不是「多播放幾段影片」。三台攝影機都是 Gazebo 的獨立感測器，切換決策依機器人的 ground-truth 區域與健康狀態產生；障礙物則透過 Gazebo service 實際改變模型位置。語意地圖使用機器人里程計座標，彩色路網使用 Gazebo world 座標；測試固定驗證 `odom_x + (-2.15 m world origin) = route world_x`，避免計畫名稱選橘線、車體卻跑在另一條視覺路徑上的座標框架錯置。
 
 ## AI 與控制責任
 
@@ -72,19 +72,63 @@ Flyto2 不把設備永久標成弱、中或重依賴。依賴屬於「某個工�
 
 ## 執行
 
+先啟動一個 Flyto AI 結構化規劃端點；例如在 `flyto-ai` repository：
+
 ```bash
-make ai4all-showcase
+python3 -m flyto_ai.robotics_planner_server \
+  --model flyto-qwen3:8b
 ```
+
+再執行：
+
+```bash
+FLYTO_ROBOTICS_PLANNER_URL=http://127.0.0.1:8787/v1/robotics/plan \
+  make ai4all-showcase
+```
+
+同一套原子能力也提供「進階安全交付」模式；它保留原本的分叉選路、
+攝影機切換、障礙停止與簽章重播防護，再加入可重播的交付閘門：
+
+```bash
+FLYTO_ROBOTICS_PLANNER_URL=http://127.0.0.1:8787/v1/robotics/plan \
+  make ai4all-medication-showcase
+```
+
+此示範使用明確標示為 synthetic 的 12 號病人、藥袋 `A12` 與錯誤藥袋
+`B13`，不含真實個資。流程先驗證批價，再刻意掃描 `B13`；錯藥事件會被
+拒絕且箱體保持上鎖。掃描 `A12` 後仍不能直接跳到交付，必須從
+`verify_item` checkpoint 恢復。抵達後先以錯誤的 `patient-13` 驗證，
+箱體仍保持上鎖；只有 `patient-12` 通過，控制器才可執行解鎖。每個原子
+都記錄前後狀態、操作者、鎖定狀態與順序。
+
+進階模式不是寫死的藥品機器人。底層使用通用
+`check_precondition`、`scan_item`、`resume_checkpoint`、
+`scan_recipient`、`unlock_container`、`complete` 原子與版本化 policy；
+替換 policy、Adapter 或控制器，就能套用在耗材、文件、檢體或其他需
+受控交付的設備流程。LLM 負責組合已允許的能力，確定性狀態機負責
+fail-closed 安全邊界。
+
+腳本會先取得兩輪真實模型結果並完成獨立驗證，之後才啟動
+Gazebo。規劃端點不可用、模型兩次皆不合格、attestation 不符、
+故障未排除原路線，或最終 plan 與執行 plan 不同時都會直接失敗；
+沒有自動退回預寫 fixture 的路徑。
 
 執行會建立未追蹤的 `results/ai4all-showcase/<run-id>/`，包含：
 
+- `planning-session.json`：八選一、設備失效、四選一的兩輪完整請求、回應與 attestation。
+- `validated-plan.json`：唯一允許交給 Gazebo 的最終原子計畫。
 - `gazebo-active-camera.mp4`：依租約切換的 A、B、備援攝影機真實影格。
 - `gazebo-overhead.mp4`：同一次模擬的全局對照。
-- `mission-result.json`：原子執行結果與 30 筆任務事件。
+- `mission-result.json`：原子執行結果與 22 筆連續任務事件。
 - `facility/showcase-evidence.json`：能力 shortlist、LLM 計畫、設備健康、租約與 handoff。
-- `showcase-report.json`：12 項端到端判定。
-- `lab-report.json`：28 項原有 Gazebo 安全與物理判定。
+- `showcase-report.json`：16 項端到端判定。
+- `lab-report.json`：26 項分叉 Gazebo 安全與物理判定。
 - `videos.sha256`：影片內容雜湊。
+
+進階安全交付回合的 `showcase-report.json` 會增加到 21 項判定；新增的
+五項分別檢查前置條件、錯藥阻擋與 checkpoint、錯誤收件者阻擋、所有
+閘門通過後才解鎖，以及完成交付狀態機後才發布任務核准。簡單模式仍維持
+16 項，不必承擔未使用的設定與畫面複雜度。
 
 使用核准的 Flyto2 Logo 產生中文解說版：
 
@@ -94,10 +138,42 @@ FLYTO2_LOGO_FILE=/absolute/path/to/flyto2-logo.png \
   results/ai4all-showcase/<run-id>
 ```
 
-輸出的 `flyto2-ai4all-showcase.mp4` 保留連續的真實 Gazebo
-感測器影格，只疊加已由報告驗證的 AI shortlist、Validator 邊界、設備
-handoff、故障備援與量測結果；它不是重畫的模擬動畫。
+輸出的 `flyto2-ai4all-showcase.mp4` 同時使用真實全局 Gazebo
+攝影機與目前租用的分區攝影機。淺色證據控制台會依時間顯示兩輪 Qwen
+選路、8→4 候選淘汰、實際 plan hash、LiDAR 停止／恢復、攝影機
+A→B→overhead handoff、核准與 nonce 重播拒絕。結尾保留三秒真實完成影格，
+讓 16/16、26/26、5.526 公尺累積路徑與一次安全停止可以閱讀；所有數值均
+來自同一回合報告，不重畫模擬畫面。
+
+若輸入回合包含 `guarded_handoff.enabled=true`，同一支渲染腳本會自動選擇
+進階安全交付版，輸出 `flyto2-ai4all-medication-showcase.mp4`。錯藥、
+checkpoint、錯誤收件者、正確收件者、解鎖與完成字幕的開始／結束時間，
+都直接讀取該回合 `driver-manifest.json` 的 `at_seconds`，不是依影片長度
+猜測或手工對時。影片同時標示 21 項端到端判定、28 項 Gazebo 驗收、
+實測路徑、LiDAR 停止與 9 筆安全交付事件。
+
+2026-07-31 的進階接受回合是
+`results/ai4all-showcase/medication-handoff-live-v8/`。該回合由
+`flyto-qwen3-8b` 完成兩輪真實規劃（53.087 秒與 33.919 秒），第二輪選定
+`orange-purple`。Gazebo 任務於 28.0 秒完成，量得 5.212 公尺位移與
+5.526 公尺累積路徑；`B13` 與 `patient-13` 均在箱體上鎖時被拒絕，
+27.0 秒才解鎖，27.7 秒完成交付狀態機後才發布核准。端到端與 Gazebo
+報告分別為 21/21、28/28。
+
+2026-07-31 接受的閉環證據回合是
+`results/ai4all-showcase/simple-delivery-qr-live-v7/`。該回合使用
+`flyto-qwen3-8b` 進行兩次真實結構化規劃，Gazebo 任務在 22.4 秒完成，
+產生 22 筆連續任務事件；獨立 world-pose 量得 5.212 公尺位移、5.526
+公尺累積路徑。QR 簽章核准成功，同一 QR nonce 與轉換後人員決策 nonce
+的重播皆被拒絕，原始 QR token 未寫入證據。最終中文證據影片為
+1920×1080、30 fps、25.267 秒，共 758 格。此前 v1、v2、v3 分別暴露
+舊驗收條件、座標框架錯置與終點安全距離問題；後續回合補齊 QR 核准、
+重播防護與影片資訊，只有 v7 是目前接受的完整證據。
 
 ## 誠實邊界
 
-目前 rover、三台攝影機、障礙物與物理位移為真實 Gazebo Harmonic 模擬。攝影機 B 失聯是測試驅動器依實際區域注入的故障；喇叭只驗證端點選擇與租約，尚未宣稱實體播音。實機部署使用相同任務與資源契約，但仍需完成硬體 E-stop、真實網路失聯與場域驗收。
+模型規劃證據來自設定的真實規劃端點；`deterministic_fixture` 不得標成
+`live_llm`。Rover、三台攝影機、障礙物與物理位移來自 Gazebo
+Harmonic 模擬，不是實體醫院或實體機器人。攝影機與障礙故障是受控測試
+注入；喇叭只驗證端點選擇與租約，尚未宣稱實體播音。實機部署使用相同
+任務與資源契約，但仍需完成硬體 E-stop、真實網路失聯與場域驗收。

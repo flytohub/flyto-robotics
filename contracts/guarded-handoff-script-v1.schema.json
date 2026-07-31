@@ -1,0 +1,160 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://flyto2.com/contracts/robotics/guarded-handoff-script-v1.schema.json",
+  "title": "Flyto2 Guarded Handoff Script v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract_version",
+    "script_id",
+    "policy_id",
+    "actions"
+  ],
+  "properties": {
+    "contract_version": {
+      "const": "flyto.robotics.guarded-handoff-script.v1"
+    },
+    "script_id": {
+      "$ref": "#/$defs/identifier"
+    },
+    "policy_id": {
+      "$ref": "#/$defs/identifier"
+    },
+    "actions": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 64,
+      "items": {
+        "oneOf": [
+          {
+            "$ref": "#/$defs/precondition"
+          },
+          {
+            "$ref": "#/$defs/scanItem"
+          },
+          {
+            "$ref": "#/$defs/resumeCheckpoint"
+          },
+          {
+            "$ref": "#/$defs/scanRecipient"
+          },
+          {
+            "$ref": "#/$defs/unlockContainer"
+          },
+          {
+            "$ref": "#/$defs/complete"
+          }
+        ]
+      }
+    }
+  },
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9._-]+$"
+    },
+    "boundedText": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "precondition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "action",
+        "name",
+        "value"
+      ],
+      "properties": {
+        "action": {
+          "const": "check_precondition"
+        },
+        "name": {
+          "$ref": "#/$defs/identifier"
+        },
+        "value": {
+          "$ref": "#/$defs/boundedText"
+        }
+      }
+    },
+    "scanItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "action",
+        "observed_ref"
+      ],
+      "properties": {
+        "action": {
+          "const": "scan_item"
+        },
+        "observed_ref": {
+          "$ref": "#/$defs/boundedText"
+        }
+      }
+    },
+    "resumeCheckpoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "action",
+        "actor_id"
+      ],
+      "properties": {
+        "action": {
+          "const": "resume_checkpoint"
+        },
+        "actor_id": {
+          "$ref": "#/$defs/identifier"
+        }
+      }
+    },
+    "scanRecipient": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "action",
+        "observed_ref"
+      ],
+      "properties": {
+        "action": {
+          "const": "scan_recipient"
+        },
+        "observed_ref": {
+          "$ref": "#/$defs/boundedText"
+        }
+      }
+    },
+    "unlockContainer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "action",
+        "actor_id"
+      ],
+      "properties": {
+        "action": {
+          "const": "unlock_container"
+        },
+        "actor_id": {
+          "$ref": "#/$defs/identifier"
+        }
+      }
+    },
+    "complete": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "action"
+      ],
+      "properties": {
+        "action": {
+          "const": "complete"
+        }
+      }
+    }
+  }
+}

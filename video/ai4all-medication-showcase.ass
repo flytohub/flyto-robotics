@@ -1,0 +1,66 @@
+[Script Info]
+ScriptType: v4.00+
+PlayResX: 1920
+PlayResY: 1080
+ScaledBorderAndShadow: yes
+WrapStyle: 2
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Title,PingFang TC,38,&H0020202A,&H0020202A,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,0,0,7,0,0,0,1
+Style: Subtitle,PingFang TC,22,&H006B6476,&H006B6476,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,0,0,7,0,0,0,1
+Style: Label,PingFang TC,19,&H00574B66,&H00574B66,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,0,0,7,0,0,0,1
+Style: Head,PingFang TC,25,&H0020202A,&H0020202A,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,0,0,7,0,0,0,1
+Style: Body,PingFang TC,20,&H00433C4D,&H00433C4D,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,0,0,7,0,0,0,1
+Style: Mono,PingFang TC,18,&H004A4254,&H004A4254,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,0,0,7,0,0,0,1
+Style: Purple,PingFang TC,21,&H00ED3C7C,&H00ED3C7C,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,0,0,7,0,0,0,1
+Style: Orange,PingFang TC,21,&H00239DFF,&H00239DFF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,0,0,7,0,0,0,1
+Style: Yellow,PingFang TC,21,&H0000B8D7,&H0000B8D7,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,0,0,7,0,0,0,1
+Style: Red,PingFang TC,21,&H004848ED,&H004848ED,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,0,0,7,0,0,0,1
+Style: Green,PingFang TC,21,&H006BAE38,&H006BAE38,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,0,0,7,0,0,0,1
+Style: Metric,PingFang TC,28,&H0020202A,&H0020202A,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,0,0,7,0,0,0,1
+Style: MetricSub,PingFang TC,17,&H006B6476,&H006B6476,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,0,0,7,0,0,0,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+Dialogue: 0,0:00:00.00,__VIDEO_END__,Title,,0,0,0,,{\pos(122,36)}可驗證安全交付 · 真實 Gazebo 證據
+Dialogue: 0,0:00:00.00,__VIDEO_END__,Subtitle,,0,0,0,,{\pos(122,88)}自然語言 → AI 分叉規劃 → 障礙安全停止 → 錯藥／錯病人阻擋 → 才能解鎖
+Dialogue: 0,0:00:00.00,__VIDEO_END__,Label,,0,0,0,,{\pos(60,176)}同一次 Gazebo 回合 · 全局感測畫面
+Dialogue: 0,0:00:00.00,__VIDEO_END__,Label,,0,0,0,,{\pos(790,570)}當下租用攝影機
+Dialogue: 0,0:00:00.00,__VIDEO_END__,Head,,0,0,0,,{\pos(1225,180)}AI 決策與安全責任邊界
+Dialogue: 0,0:00:00.00,__VIDEO_END__,Body,,0,0,0,,{\pos(1225,225)}任務：幫 12 號病人領藥；三項條件通過才交付
+Dialogue: 0,0:00:00.00,__VIDEO_END__,Mono,,0,0,0,,{\pos(1225,268)}Qwen 8B · live_llm · 2 rounds · 1 replan
+Dialogue: 0,0:00:00.00,__VIDEO_END__,Body,,0,0,0,,{\pos(1225,312)}第一層
+Dialogue: 0,0:00:00.00,__VIDEO_END__,Yellow,,0,0,0,,{\pos(1330,312)}黃 ×
+Dialogue: 0,0:00:00.00,__VIDEO_END__,Orange,,0,0,0,,{\pos(1490,312)}橘 ✓
+Dialogue: 0,0:00:00.00,__VIDEO_END__,Body,,0,0,0,,{\pos(1225,354)}第二層
+Dialogue: 0,0:00:00.00,__VIDEO_END__,Body,,0,0,0,,{\pos(1330,354)}藍　綠
+Dialogue: 0,0:00:00.00,__VIDEO_END__,Purple,,0,0,0,,{\pos(1505,354)}紫 ✓
+Dialogue: 0,0:00:00.00,__VIDEO_END__,Body,,0,0,0,,{\pos(1635,354)}紅
+Dialogue: 0,0:00:00.00,0:00:03.00,Mono,,0,0,0,,{\pos(1225,402)}[LLM 第 1 輪] 8 條候選 → 黃—紫
+Dialogue: 0,0:00:03.00,0:00:06.00,Red,,0,0,0,,{\pos(1225,402)}[設備預檢] 攝影機 B 離線
+Dialogue: 0,0:00:06.00,0:00:09.00,Yellow,,0,0,0,,{\pos(1225,402)}[Validator] 排除 4 條黃線路徑
+Dialogue: 0,0:00:09.00,__VIDEO_END__,Green,,0,0,0,,{\pos(1225,402)}[LLM 第 2 輪] 橘—紫 · 驗證通過
+Dialogue: 0,0:00:00.00,__VIDEO_END__,Mono,,0,0,0,,{\pos(1225,448)}LLM 不接馬達 · 計畫 hash 與執行內容一致
+Dialogue: 0,0:00:00.00,__VIDEO_END__,Mono,,0,0,0,,{\pos(1225,482)}ROS 2 控制器負責速度、LiDAR 與零速停止
+Dialogue: 0,0:00:00.00,__VIDEO_END__,Head,,0,0,0,,{\pos(1245,536)}執行中安全閘門
+Dialogue: 0,__ITEM_REJECTED_START__,__ITEM_REJECTED_END__,Red,,0,0,0,,{\pos(1245,574)}B13 不符 → 保持上鎖
+Dialogue: 0,__ITEM_VERIFIED_START__,__ITEM_VERIFIED_END__,Green,,0,0,0,,{\pos(1245,574)}A12 通過 → 等待 checkpoint 核准
+Dialogue: 0,__CHECKPOINT_RESUMED_START__,__CHECKPOINT_RESUMED_END__,Green,,0,0,0,,{\pos(1245,574)}A12 通過 → checkpoint 恢復
+Dialogue: 0,__RECIPIENT_REJECTED_START__,__RECIPIENT_REJECTED_END__,Red,,0,0,0,,{\pos(1245,574)}patient-13 不符 → 保持上鎖
+Dialogue: 0,__RECIPIENT_VERIFIED_START__,__RECIPIENT_VERIFIED_END__,Green,,0,0,0,,{\pos(1245,574)}patient-12 通過 → 等待控制器解鎖
+Dialogue: 0,__CONTAINER_UNLOCKED_START__,__CONTAINER_UNLOCKED_END__,Green,,0,0,0,,{\pos(1245,574)}patient-12 通過 → 才能解鎖
+Dialogue: 0,__HANDOFF_COMPLETED_START__,__HANDOFF_COMPLETED_END__,Green,,0,0,0,,{\pos(1245,574)}交付狀態機完成 → QR 防重放通過
+Dialogue: 0,0:00:00.00,__VIDEO_END__,Mono,,0,0,0,,{\pos(1245,670)}原子：前置條件 · 物件 · checkpoint · 收件者 · 解鎖
+Dialogue: 0,0:00:00.00,__VIDEO_END__,Mono,,0,0,0,,{\pos(1245,708)}換 policy／Adapter，不必重寫整套任務與 UI
+Dialogue: 0,0:00:00.00,__VIDEO_END__,Metric,,0,0,0,,{\pos(85,872)}21 / 21
+Dialogue: 0,0:00:00.00,__VIDEO_END__,MetricSub,,0,0,0,,{\pos(85,920)}端到端證據
+Dialogue: 0,0:00:00.00,__VIDEO_END__,Metric,,0,0,0,,{\pos(435,872)}28 / 28
+Dialogue: 0,0:00:00.00,__VIDEO_END__,MetricSub,,0,0,0,,{\pos(435,920)}Gazebo 安全驗收
+Dialogue: 0,0:00:00.00,__VIDEO_END__,Metric,,0,0,0,,{\pos(790,872)}5.526 m
+Dialogue: 0,0:00:00.00,__VIDEO_END__,MetricSub,,0,0,0,,{\pos(790,920)}Gazebo 累積路徑
+Dialogue: 0,0:00:00.00,__VIDEO_END__,Metric,,0,0,0,,{\pos(1180,872)}1
+Dialogue: 0,0:00:00.00,__VIDEO_END__,MetricSub,,0,0,0,,{\pos(1180,920)}LiDAR 安全停止
+Dialogue: 0,0:00:00.00,__VIDEO_END__,Metric,,0,0,0,,{\pos(1515,872)}9
+Dialogue: 0,0:00:00.00,__VIDEO_END__,MetricSub,,0,0,0,,{\pos(1515,920)}可重播交付事件
+Dialogue: 0,0:00:00.00,__VIDEO_END__,Body,,0,0,0,,{\pos(85,974)}同一平台：自然語言組原子；Validator 驗證每一步；Executor 只執行通過的計畫；事件可暫停、恢復、稽核與重播。

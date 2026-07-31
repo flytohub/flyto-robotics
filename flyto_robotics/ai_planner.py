@@ -100,6 +100,15 @@ class HTTPJsonPlannerTransport:
     timeout_seconds: float = 30.0
 
     def complete(self, request: dict[str, Any]) -> object:
+        plan, _ = self.complete_attested(request)
+        return plan
+
+    def complete_attested(
+        self,
+        request: dict[str, Any],
+    ) -> tuple[object, dict[str, Any] | None]:
+        """Return the candidate plus optional Flyto AI provenance envelope."""
+
         parsed = urlparse(self.url)
         local_hosts = {"localhost", "127.0.0.1", "::1"}
         if parsed.scheme != "https" and not (
@@ -127,7 +136,24 @@ class HTTPJsonPlannerTransport:
         try:
             with urlopen(http_request, timeout=self.timeout_seconds) as response:
                 payload = response.read(MAX_PLAN_BYTES + 1)
-        except (HTTPError, URLError, TimeoutError, OSError) as exc:
+        except HTTPError as exc:
+            detail = ""
+            try:
+                error_payload = exc.read(4097)
+                if len(error_payload) <= 4096:
+                    decoded_error = json.loads(error_payload.decode("utf-8"))
+                    if isinstance(decoded_error, dict) and isinstance(
+                        decoded_error.get("detail"),
+                        str,
+                    ):
+                        detail = decoded_error["detail"][:1000]
+            except (UnicodeError, json.JSONDecodeError, OSError):
+                pass
+            message = "planner service rejected the request"
+            if detail:
+                message = f"{message}: {detail}"
+            raise PlanValidationError(message) from exc
+        except (URLError, TimeoutError, OSError) as exc:
             raise PlanValidationError("planner service request failed") from exc
         if len(payload) > MAX_PLAN_BYTES:
             raise PlanValidationError("planner service response is too large")
@@ -136,8 +162,26 @@ class HTTPJsonPlannerTransport:
         except (UnicodeError, json.JSONDecodeError) as exc:
             raise PlanValidationError("planner service must return UTF-8 JSON") from exc
         if isinstance(decoded, dict) and set(decoded) == {"plan"}:
-            return decoded["plan"]
-        return decoded
+            return decoded["plan"], None
+        if isinstance(decoded, dict) and set(decoded) == {
+            "contract_version",
+            "plan",
+            "attestation",
+        }:
+            if (
+                decoded["contract_version"]
+                != "flyto.ai.robotics-plan-response.v1"
+            ):
+                raise PlanValidationError(
+                    "planner service returned an unsupported response contract"
+                )
+            attestation = decoded["attestation"]
+            if not isinstance(attestation, dict):
+                raise PlanValidationError(
+                    "planner service attestation must be an object"
+                )
+            return decoded["plan"], attestation
+        return decoded, None
 
 
 def _object(value: object, field_name: str) -> dict[str, Any]:

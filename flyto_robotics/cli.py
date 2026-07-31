@@ -23,6 +23,7 @@ from .ai_planner import (
 )
 from .capabilities import GoalFrame, default_capability_registry
 from .contracts import JobValidationError, load_job, write_json_atomic
+from .guarded_handoff import load_policy, load_script
 from .human_approval import (
     HumanDecisionValidationError,
     build_signed_human_decision,
@@ -42,6 +43,13 @@ from .matrix import (
     render_matrix_markdown,
 )
 from .mission import MissionController, Pose2D, normalize_angle
+from .qr_confirmation import (
+    QRConfirmationAuthenticator,
+    QRConfirmationValidationError,
+    build_signed_qr_confirmation,
+    qr_confirmation_to_human_decision,
+    qr_token_sha256,
+)
 from .resource_binding import load_resource_plan
 from .semantic_map import SemanticLocationStore, parse_semantic_location_map
 from .soak import (
@@ -105,6 +113,10 @@ def validate_assets(root: Path = PROJECT_ROOT) -> list[str]:
         root / "contracts/plan-v1.schema.json",
         root / "contracts/input-event-v1.schema.json",
         root / "contracts/human-decision-v1.schema.json",
+        root / "contracts/qr-confirmation-v1.schema.json",
+        root / "contracts/guarded-handoff-policy-v1.schema.json",
+        root / "contracts/guarded-handoff-script-v1.schema.json",
+        root / "contracts/guarded-handoff-evidence-v1.schema.json",
         root / "contracts/capability-manifest-v1.schema.json",
         root / "contracts/capability-route-v1.schema.json",
         root / "contracts/goal-frame-v1.schema.json",
@@ -142,6 +154,16 @@ def validate_assets(root: Path = PROJECT_ROOT) -> list[str]:
     for resource_plan in sorted((root / "examples/resource-plans").glob("*.json")):
         load_resource_plan(resource_plan)
         checked.append(str(resource_plan.relative_to(root)))
+    for policy_path in sorted(
+        (root / "examples/guarded-handoff").glob("*-policy.json")
+    ):
+        load_policy(policy_path)
+        checked.append(str(policy_path.relative_to(root)))
+    for script_path in sorted(
+        (root / "examples/guarded-handoff").glob("*-script.json")
+    ):
+        load_script(script_path)
+        checked.append(str(script_path.relative_to(root)))
 
     bridge = (root / "config/bridge.yaml").read_text(encoding="utf-8")
     for required in (
@@ -163,11 +185,17 @@ def validate_assets(root: Path = PROJECT_ROOT) -> list[str]:
     ai_launch_path = root / "launch/atomic_ai_demo.launch.py"
     lab_launch_path = root / "launch/gazebo_lab.launch.py"
     shortcut_launch_path = root / "launch/shortcut_gazebo_demo.launch.py"
+    showcase_launch_path = root / "launch/ai4all_showcase.launch.py"
+    medication_showcase_launch_path = (
+        root / "launch/ai4all_medication_showcase.launch.py"
+    )
     for path in (
         launch_path,
         ai_launch_path,
         lab_launch_path,
         shortcut_launch_path,
+        showcase_launch_path,
+        medication_showcase_launch_path,
     ):
         compile(path.read_text(encoding="utf-8"), str(path), "exec")
         checked.append(str(path.relative_to(root)))
@@ -437,6 +465,26 @@ def _parser() -> argparse.ArgumentParser:
     sign_decision.add_argument("--ttl-seconds", type=int, default=60)
     sign_decision.add_argument("--output", type=Path)
 
+    sign_qr = subcommands.add_parser(
+        "sign-delivery-qr",
+        help="create a short-lived, signed delivery confirmation QR payload",
+    )
+    sign_qr.add_argument("--job", required=True, type=Path)
+    sign_qr.add_argument("--approval-id", required=True)
+    sign_qr.add_argument("--recipient-ref", required=True)
+    sign_qr.add_argument("--ttl-seconds", type=int, default=120)
+    sign_qr.add_argument("--output", type=Path)
+
+    verify_qr = subcommands.add_parser(
+        "verify-delivery-qr",
+        help="verify a scanned QR and convert it to the existing human gate",
+    )
+    verify_qr.add_argument("--job", required=True, type=Path)
+    verify_qr.add_argument("--approval-id", required=True)
+    verify_qr.add_argument("--recipient-ref")
+    verify_qr.add_argument("--token-file", required=True, type=Path)
+    verify_qr.add_argument("--output", type=Path)
+
     validate_lab = subcommands.add_parser(
         "validate-lab-scenario",
         help="validate a Gazebo lab scenario and every referenced asset",
@@ -594,6 +642,76 @@ def main(argv: Sequence[str] | None = None) -> int:
                 write_json_atomic(args.output, decision)
             print(decision_to_json(decision))
             return 0
+        if args.command == "sign-delivery-qr":
+            secret = os.environ.get("FLYTO_ROBOTICS_QR_SECRET", "")
+            if not secret:
+                raise QRConfirmationValidationError(
+                    "FLYTO_ROBOTICS_QR_SECRET is required"
+                )
+            job = load_job(args.job)
+            token = build_signed_qr_confirmation(
+                job_id=job.job_id,
+                robot_id=job.robot_id,
+                approval_id=args.approval_id,
+                recipient_ref=args.recipient_ref,
+                secret=secret,
+                ttl_seconds=args.ttl_seconds,
+            )
+            if args.output:
+                write_text_atomic(args.output, token + "\n")
+            print(token)
+            return 0
+        if args.command == "verify-delivery-qr":
+            qr_secret = os.environ.get("FLYTO_ROBOTICS_QR_SECRET", "")
+            approval_secret = os.environ.get(
+                "FLYTO_ROBOTICS_APPROVAL_SECRET",
+                "",
+            )
+            if not qr_secret:
+                raise QRConfirmationValidationError(
+                    "FLYTO_ROBOTICS_QR_SECRET is required"
+                )
+            if not approval_secret:
+                raise HumanDecisionValidationError(
+                    "FLYTO_ROBOTICS_APPROVAL_SECRET is required"
+                )
+            if args.token_file.stat().st_size > 16 * 1024:
+                raise QRConfirmationValidationError(
+                    "QR confirmation is too large"
+                )
+            token = args.token_file.read_text(encoding="utf-8").strip()
+            job = load_job(args.job)
+            confirmation = QRConfirmationAuthenticator(qr_secret).verify(
+                token,
+                expected_job_id=job.job_id,
+                expected_robot_id=job.robot_id,
+                expected_approval_id=args.approval_id,
+                expected_recipient_ref=args.recipient_ref,
+            )
+            decision = qr_confirmation_to_human_decision(
+                confirmation,
+                approval_secret=approval_secret,
+            )
+            result = {
+                "ok": True,
+                "confirmation": {
+                    "contract_version": "flyto.robotics.qr-verification.v1",
+                    "confirmation_id": confirmation.confirmation_id,
+                    "job_id": confirmation.job_id,
+                    "robot_id": confirmation.robot_id,
+                    "approval_id": confirmation.approval_id,
+                    "recipient_ref": confirmation.recipient_ref,
+                    "expires_at_epoch_seconds": (
+                        confirmation.expires_at_epoch_seconds
+                    ),
+                    "token_sha256": qr_token_sha256(token),
+                },
+                "human_decision": decision,
+            }
+            if args.output:
+                write_json_atomic(args.output, result)
+            print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+            return 0
         if args.command == "validate-lab-scenario":
             scenario = load_lab_scenario(args.scenario, project_root=PROJECT_ROOT)
             print(
@@ -658,6 +776,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
     except (
         HumanDecisionValidationError,
+        QRConfirmationValidationError,
         JobValidationError,
         PlanValidationError,
         OSError,

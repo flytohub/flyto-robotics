@@ -1,0 +1,11 @@
+{
+  "contract_version": "flyto.robotics.guarded-handoff-policy.v1",
+  "policy_id": "hospital.synthetic-medication-handoff.v1",
+  "container_id": "medicine-box-01",
+  "expected_item_ref": "A12",
+  "expected_recipient_ref": "patient-12",
+  "required_preconditions": {
+    "billing_status": "completed"
+  },
+  "synthetic": true
+}

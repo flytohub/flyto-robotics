@@ -7,6 +7,7 @@ run_id="${FLYTO_ROBOTICS_LAB_RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}"
 run_directory="results/gazebo-lab/${run_id}"
 container_name="flyto-gazebo-lab-${run_id//[^A-Za-z0-9_.-]/-}"
 approval_key_material="$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
+qr_key_material="$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
 record_video="${FLYTO_ROBOTICS_RECORD_VIDEO:-0}"
 video_fps="${FLYTO_ROBOTICS_VIDEO_FPS:-4}"
 video_max_frames="${FLYTO_ROBOTICS_VIDEO_MAX_FRAMES:-600}"
@@ -49,6 +50,7 @@ set +e
 docker run --rm \
   --name "${container_name}" \
   -e "FLYTO_ROBOTICS_APPROVAL_SECRET=${approval_key_material}" \
+  -e "FLYTO_ROBOTICS_QR_SECRET=${qr_key_material}" \
   -v "${repository_root}:/workspace" \
   -w /workspace \
   "${image_name}" \

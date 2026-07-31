@@ -90,6 +90,49 @@
   - Gazebo ground truth measured 4.246827 m in 19.0 simulated seconds;
   - both active-camera and overhead H.264 videos plus SHA-256 evidence were
     generated from the run.
+- The AI4ALL branching planner now exposes a two-stage route graph rather than
+  a single color sequence:
+  - stage one branches to yellow or orange and returns to a shared merge;
+  - stage two branches to blue, green, purple, or red;
+  - the eight complete route candidates carry route-specific resource
+    dependencies, hard exclusions, bounded penalties, and atomic step
+    templates;
+  - Flyto AI chooses only among complete validator-constrained templates, so it
+    cannot omit an intermediate waypoint or splice incompatible branches;
+  - one live `flyto-qwen3:8b` session first selected yellow-purple, excluded
+    all four yellow routes after corridor camera B changed to unhealthy, then
+    selected and strictly validated orange-purple;
+  - request, response, shortlist, plan, and session hashes bind the generated
+    plan to the exact plan consumed by Robotics.
+- The attested branching world completed its accepted live closed-loop run on
+  2026-07-31 under
+  `results/ai4all-showcase/simple-delivery-qr-live-v7/`:
+  - the first real `flyto-qwen3-8b` round selected yellow-purple;
+  - the preflight B-camera health failure excluded all four yellow routes, and
+    the second real model round selected orange-purple;
+  - the byte-equivalent final attested plan entered ROS 2/Gazebo and traversed
+    orange, the shared merge, and the purple branch;
+  - one simulated physical obstacle produced one LiDAR zero-velocity stop at
+    3.3 seconds; `path_clear` at 6.3 seconds was required before motion resumed;
+  - camera routing handed off A → B → overhead, and the purple-zone speaker
+    endpoint was leased only at completion;
+  - signed QR approval succeeded; replay of both the QR nonce and the converted
+    human-decision nonce was rejected without persisting the raw QR token, and
+    the terminal safe-stop completed;
+  - all 16/16 showcase checks and 26/26 Gazebo lab checks passed with 22
+    contiguous mission events in 22.4 seconds;
+  - independent world truth measured 5.211914 m displacement and 5.525736 m
+    cumulative path, ending at odometry x=5.2098, y=0.503 on the visible purple
+    lane;
+  - the final Flyto2 evidence video is 1920×1080 H.264, 30 fps, 25.266667
+    seconds, 758 frames, SHA-256
+    `18b772934f5e9cb413577e1d201b8f104b8b5fb6004192d833d3201056cf7195`.
+- Three earlier branching runs remain rejected evidence rather than being
+  hidden: v1 exposed the obsolete linear evaluator and obstacle placement; v2
+  passed automated checks but visual review caught a world/odometry coordinate
+  mismatch; v3 followed the visible branch but correctly stopped near the
+  counter and timed out. Later runs added QR approval, replay protection, and
+  the final evidence presentation. Only v7 is currently accepted.
 - Deterministic CareFlow soak completed on 2026-07-29:
   - 50/50 runs passed;
   - all runs produced one normalized evidence fingerprint;

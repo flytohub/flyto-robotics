@@ -22,6 +22,7 @@ setup(
         ),
         (f"share/{PACKAGE_NAME}/examples/maps", glob("examples/maps/*.json")),
         (f"share/{PACKAGE_NAME}/examples/plans", glob("examples/plans/*.json")),
+        (f"share/{PACKAGE_NAME}/examples/routes", glob("examples/routes/*.json")),
         (
             f"share/{PACKAGE_NAME}/examples/resource-plans",
             glob("examples/resource-plans/*.json"),
@@ -29,6 +30,10 @@ setup(
         (
             f"share/{PACKAGE_NAME}/examples/facility-resources",
             glob("examples/facility-resources/*.json"),
+        ),
+        (
+            f"share/{PACKAGE_NAME}/examples/guarded-handoff",
+            glob("examples/guarded-handoff/*.json"),
         ),
         (
             f"share/{PACKAGE_NAME}/scenarios/gazebo",
@@ -48,6 +53,7 @@ setup(
             "flyto-robotics = flyto_robotics.cli:main",
             "gazebo_lab_driver = flyto_robotics.gazebo_lab_driver:main",
             "mission_controller = flyto_robotics.ros2_node:main",
+            "robotics_planning_session = flyto_robotics.planning_session:main",
             "shortcut_controller = flyto_robotics.shortcut_ros2_node:main",
             "shortcut_gazebo_driver = flyto_robotics.shortcut_gazebo_driver:main",
             "showcase_gazebo_observer = flyto_robotics.showcase_gazebo_observer:main",

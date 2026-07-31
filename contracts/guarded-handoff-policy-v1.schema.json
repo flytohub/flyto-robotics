@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://flyto2.com/contracts/robotics/guarded-handoff-policy-v1.schema.json",
+  "title": "Flyto2 Guarded Handoff Policy v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract_version",
+    "policy_id",
+    "container_id",
+    "expected_item_ref",
+    "expected_recipient_ref",
+    "required_preconditions",
+    "synthetic"
+  ],
+  "properties": {
+    "contract_version": {
+      "const": "flyto.robotics.guarded-handoff-policy.v1"
+    },
+    "policy_id": {
+      "$ref": "#/$defs/identifier"
+    },
+    "container_id": {
+      "$ref": "#/$defs/identifier"
+    },
+    "expected_item_ref": {
+      "$ref": "#/$defs/boundedText"
+    },
+    "expected_recipient_ref": {
+      "$ref": "#/$defs/boundedText"
+    },
+    "required_preconditions": {
+      "type": "object",
+      "minProperties": 1,
+      "maxProperties": 16,
+      "propertyNames": {
+        "$ref": "#/$defs/identifier"
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/boundedText"
+      }
+    },
+    "synthetic": {
+      "type": "boolean"
+    }
+  },
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9._-]+$"
+    },
+    "boundedText": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    }
+  }
+}

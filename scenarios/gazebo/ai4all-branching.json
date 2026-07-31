@@ -1,0 +1,52 @@
+{
+  "contract_version": "flyto.robotics.lab-scenario.v1",
+  "scenario_id": "gazebo.ai4all.branching.v1",
+  "title": "AI4ALL two-stage branching CareFlow",
+  "description": "Executes the separately attested live Flyto AI plan in the self-contained yellow-or-orange then blue-green-purple-red Gazebo world. The static plan asset is a synthetic schema fixture only. The evidence gate requires a heading-relative LiDAR obstacle stop and recovery, signed delivery QR approval with QR and human-decision nonce replay rejection, trusted semantic navigation, terminal stop, bounded final pose, real camera captures, and Gazebo motion.",
+  "assets": {
+    "world": "worlds/ai4all-branching-route.sdf",
+    "job": "examples/jobs/pharmacy-to-ward.json",
+    "plan": "examples/plans/ai4all-branching-orange-purple.json",
+    "model": "models/flyto_rover/model.sdf",
+    "bridge": "config/bridge.yaml"
+  },
+  "soak_runs": 30,
+  "expectations": {
+    "status": "succeeded",
+    "gazebo_physics": true,
+    "min_safety_stop_count": 1,
+    "max_elapsed_seconds": 120.0,
+    "required_event_kinds": [
+      "mission_accepted",
+      "obstacle_stop",
+      "path_clear",
+      "human_approval_requested",
+      "human_approved",
+      "human_decision_rejected",
+      "resume_authorized",
+      "mission_completed"
+    ],
+    "required_capabilities": [
+      "navigate_to_location",
+      "ask_human",
+      "resume",
+      "safe_stop"
+    ],
+    "required_actor_ids": [
+      "qr.ward-b.receiver"
+    ],
+    "required_capture_labels": [
+      "startup",
+      "obstacle",
+      "approval",
+      "completed"
+    ],
+    "min_world_displacement": 5.1,
+    "final_pose": {
+      "min_x": 5.15,
+      "max_x": 5.65,
+      "min_y": 0.2,
+      "max_y": 0.8
+    }
+  }
+}

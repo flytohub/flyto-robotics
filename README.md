@@ -46,6 +46,8 @@ the example JSON as a device job, but neither project imports the other.
 - a blue/yellow/purple Gazebo route world and AI-plan launch file;
 - an adversarial Gazebo lab with dynamic obstacle injection, signed approval,
   nonce replay attempts, overhead captures, and independent world-pose truth;
+- an eight-route branching showcase with attested live planning, deterministic
+  resource-dependency exclusion, bounded replanning, and exact route templates;
 - strict JSON, Markdown, and JUnit lab reports plus repeated-run aggregation;
 - immutable workflows composed from those primitives;
 - a deterministic controller shared by dry-run and ROS execution;
@@ -101,9 +103,13 @@ python3 -m flyto_robotics.resource_binding \
 It proves the mission state transitions and result envelope; it does not claim
 Gazebo physics evidence.
 
-`make ai4all-showcase` runs the multi-camera hospital story, injects obstacle
-and camera faults, records active-resource handoff video, and fails unless all
-12 Physical AI closure checks pass. See
+`make ai4all-showcase` first requests and verifies an attested initial plan and
+resource-triggered replan, then executes that exact final plan in the
+multi-camera hospital world. It injects obstacle and camera faults, records
+active-resource handoff video, and fails unless all Physical AI closure checks
+pass. A loopback Flyto AI planner must be running and its URL is supplied
+through `FLYTO_ROBOTICS_PLANNER_URL`; the showcase never labels a fixture as a
+live model result. See
 [`docs/AI4ALL_SHOWCASE.md`](docs/AI4ALL_SHOWCASE.md) for the product narrative,
 truth boundary, and evidence layout.
 
@@ -171,10 +177,14 @@ zero-score legacy fallback, so adding them cannot displace an unrelated old
 atom merely because the registry became larger. Goal Frame routing includes
 only positive semantic matches and still pins `safe_stop` for motion.
 
-The LLM decides semantic ordering, route choice, bounded speed and failure
-policy. It cannot emit wheel PWM, arbitrary ROS topics, shell commands, or
-unregistered tools. Steering, speed clamps, lidar stopping, sensor freshness,
-timeouts, and emergency behavior remain deterministic.
+The LLM decides among a bounded set of executable semantic routes. When route
+candidates are present, the structured-output Schema has one complete branch
+per candidate, so a chosen route cannot omit an intermediate semantic
+location, mix two paths, or drop a required approval/stop atom. The independent
+validator still verifies that exact sequence after model output. The model
+cannot emit wheel PWM, arbitrary ROS topics, shell commands, or unregistered
+tools. Steering, speed clamps, lidar stopping, sensor freshness, timeouts, and
+emergency behavior remain deterministic.
 
 Motion plans are rejected unless their final capability is `safe_stop`.
 Shortcut controls resolve only a registered workflow ID. They cannot carry

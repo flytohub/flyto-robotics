@@ -1,5 +1,22 @@
 # Decisions
 
+## 2026-07-30 — AI chooses a complete constrained route, not arbitrary waypoints
+
+Decision: a data-driven route graph first applies deterministic resource
+dependency checks and produces a bounded list of complete semantic-location
+sequences. Flyto AI chooses among those candidates through structured output.
+For route sessions, the JSON Schema contains one exact step template per
+candidate, including the full location order, required human approval pair,
+and terminal safe stop. Robotics independently verifies the provider
+attestation, shortlist, route sequence, hashes, and equality with the plan
+actually given to Gazebo.
+
+Reason: natural-language prompting alone allowed a model to skip intermediate
+locations even after repair feedback. Constraining the choice while keeping
+route feasibility and physical control deterministic preserves useful AI
+decision-making without allowing mixed paths, omitted atoms, or direct motor
+authority.
+
 ## 2026-07-30 — Exact physical resources are bound outside the LLM
 
 Decision: Robotics accepts an `ai-space-resource-plan.v1` document only through

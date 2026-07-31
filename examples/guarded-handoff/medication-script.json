@@ -1,0 +1,39 @@
+{
+  "contract_version": "flyto.robotics.guarded-handoff-script.v1",
+  "script_id": "medication-demo-safe-recovery.v1",
+  "policy_id": "hospital.synthetic-medication-handoff.v1",
+  "actions": [
+    {
+      "action": "check_precondition",
+      "name": "billing_status",
+      "value": "completed"
+    },
+    {
+      "action": "scan_item",
+      "observed_ref": "B13"
+    },
+    {
+      "action": "scan_item",
+      "observed_ref": "A12"
+    },
+    {
+      "action": "resume_checkpoint",
+      "actor_id": "operator.synthetic-01"
+    },
+    {
+      "action": "scan_recipient",
+      "observed_ref": "patient-13"
+    },
+    {
+      "action": "scan_recipient",
+      "observed_ref": "patient-12"
+    },
+    {
+      "action": "unlock_container",
+      "actor_id": "robot.medicine-box-controller"
+    },
+    {
+      "action": "complete"
+    }
+  ]
+}

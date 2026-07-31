@@ -18,7 +18,46 @@ from std_msgs.msg import String
 
 from .contracts import load_job, write_json_atomic
 from .evidence_image import VideoFrameSequence, write_rgb_png_atomic
-from .human_approval import build_signed_human_decision, decision_to_json
+from .guarded_handoff import (
+    GuardedHandoffPolicy,
+    GuardedHandoffScript,
+    GuardedHandoffSession,
+    GuardedHandoffValidationError,
+    load_policy,
+    load_script,
+)
+from .human_approval import decision_to_json
+from .qr_confirmation import (
+    QRConfirmationAuthenticator,
+    QRConfirmationValidationError,
+    build_signed_qr_confirmation,
+    qr_confirmation_to_human_decision,
+    qr_token_sha256,
+)
+
+
+def point_ahead_from_quaternion(
+    *,
+    x: float,
+    y: float,
+    lead_distance: float,
+    orientation: object,
+) -> tuple[float, float, float]:
+    """Return a world point in front of one quaternion pose."""
+
+    qx = float(orientation.x)
+    qy = float(orientation.y)
+    qz = float(orientation.z)
+    qw = float(orientation.w)
+    yaw = math.atan2(
+        2.0 * ((qw * qz) + (qx * qy)),
+        1.0 - (2.0 * ((qy * qy) + (qz * qz))),
+    )
+    return (
+        x + (lead_distance * math.cos(yaw)),
+        y + (lead_distance * math.sin(yaw)),
+        yaw,
+    )
 
 
 class GazeboLabDriver(Node):
@@ -37,8 +76,12 @@ class GazeboLabDriver(Node):
         self.declare_parameter("obstacle_lead_distance", 0.80)
         self.declare_parameter("obstacle_active_y", 0.0)
         self.declare_parameter("obstacle_parked_y", 2.2)
-        self.declare_parameter("approval_actor_id", "evaluator.gazebo")
+        self.declare_parameter("qr_recipient_ref", "ward-b.receiver")
+        self.declare_parameter("guarded_handoff_policy_file", "")
+        self.declare_parameter("guarded_handoff_script_file", "")
+        self.declare_parameter("guarded_handoff_step_delay_seconds", 0.65)
         self.declare_parameter("replay_count", 8)
+        self.declare_parameter("replay_initial_delay_seconds", 0.05)
         self.declare_parameter("video_frames_dir", "")
         self.declare_parameter("video_max_frames", 600)
 
@@ -73,12 +116,60 @@ class GazeboLabDriver(Node):
         self.obstacle_parked_y = float(
             self.get_parameter("obstacle_parked_y").value
         )
-        self.approval_actor_id = str(
-            self.get_parameter("approval_actor_id").value
+        self.qr_recipient_ref = str(
+            self.get_parameter("qr_recipient_ref").value
         )
+        guarded_policy_file = str(
+            self.get_parameter("guarded_handoff_policy_file").value
+        ).strip()
+        guarded_script_file = str(
+            self.get_parameter("guarded_handoff_script_file").value
+        ).strip()
+        if bool(guarded_policy_file) != bool(guarded_script_file):
+            raise ValueError(
+                "guarded handoff policy and script must be configured together"
+            )
+        self.guarded_handoff_policy: GuardedHandoffPolicy | None = (
+            load_policy(guarded_policy_file) if guarded_policy_file else None
+        )
+        self.guarded_handoff_script: GuardedHandoffScript | None = (
+            load_script(guarded_script_file) if guarded_script_file else None
+        )
+        if (
+            self.guarded_handoff_policy is not None
+            and self.guarded_handoff_script is not None
+        ):
+            if (
+                self.guarded_handoff_script.policy_id
+                != self.guarded_handoff_policy.policy_id
+            ):
+                raise ValueError(
+                    "guarded handoff script does not match the selected policy"
+                )
+            if (
+                self.qr_recipient_ref
+                != self.guarded_handoff_policy.expected_recipient_ref
+            ):
+                raise ValueError(
+                    "QR recipient must match the guarded handoff recipient"
+                )
+        self.guarded_handoff_step_delay_seconds = float(
+            self.get_parameter("guarded_handoff_step_delay_seconds").value
+        )
+        if not 0.1 <= self.guarded_handoff_step_delay_seconds <= 5.0:
+            raise ValueError(
+                "guarded_handoff_step_delay_seconds must be between 0.1 and 5.0"
+            )
         self.replay_count = int(self.get_parameter("replay_count").value)
         if not 1 <= self.replay_count <= 20:
             raise ValueError("replay_count must be between 1 and 20")
+        self.replay_initial_delay_seconds = float(
+            self.get_parameter("replay_initial_delay_seconds").value
+        )
+        if not 0.01 <= self.replay_initial_delay_seconds <= 1.0:
+            raise ValueError(
+                "replay_initial_delay_seconds must be between 0.01 and 1.0"
+            )
         video_frames_dir = str(
             self.get_parameter("video_frames_dir").value
         ).strip()
@@ -95,17 +186,30 @@ class GazeboLabDriver(Node):
         )
         if len(self.approval_secret.encode("utf-8")) < 32:
             raise ValueError("a runtime-only approval secret is required")
+        self.qr_secret = os.environ.get("FLYTO_ROBOTICS_QR_SECRET", "")
+        if len(self.qr_secret.encode("utf-8")) < 32:
+            raise ValueError("a runtime-only QR confirmation secret is required")
+        self.qr_authenticator = QRConfirmationAuthenticator(self.qr_secret)
 
         self.started_at = self._now()
         self.obstacle_entered = False
         self.obstacle_exited = False
         self.approval_payload: str | None = None
+        self.pending_approval_id: str | None = None
+        self.guarded_handoff_session: GuardedHandoffSession | None = None
+        self.guarded_handoff_action_index = 0
+        self.guarded_handoff_next_action_at = math.inf
+        self.guarded_handoff_failed = False
+        self.qr_token_fingerprint: str | None = None
+        self.qr_replay_rejected = False
         self.replays_sent = 0
         self.next_replay_at = math.inf
         self.latest_image: Image | None = None
         self.latest_pose: dict[str, float] | None = None
         self.initial_world_pose: dict[str, float] | None = None
         self.latest_world_pose: dict[str, float] | None = None
+        self.previous_world_xy: tuple[float, float] | None = None
+        self.world_path_length = 0.0
         self.minimum_range = math.inf
         self.captured_labels: set[str] = set()
         self.actions: list[dict[str, object]] = []
@@ -159,6 +263,7 @@ class GazeboLabDriver(Node):
             "latest_pose": self.latest_pose,
             "latest_world_pose": self.latest_world_pose,
             "world_displacement": self._world_displacement(),
+            "world_path_length": round(self.world_path_length, 6),
             "minimum_range": (
                 round(self.minimum_range, 4)
                 if math.isfinite(self.minimum_range)
@@ -206,28 +311,68 @@ class GazeboLabDriver(Node):
                 "initial_world_pose": self.initial_world_pose,
                 "latest_world_pose": self.latest_world_pose,
                 "world_displacement": self._world_displacement(),
+                "world_path_length": round(self.world_path_length, 6),
                 "minimum_range": (
                     round(self.minimum_range, 4)
                     if math.isfinite(self.minimum_range)
                     else None
                 ),
+                "qr_confirmation": {
+                    "token_sha256": self.qr_token_fingerprint,
+                    "replay_rejected": self.qr_replay_rejected,
+                    "raw_token_persisted": False,
+                },
+                "guarded_handoff": {
+                    "enabled": self.guarded_handoff_policy is not None,
+                    "pending_approval_id": self.pending_approval_id,
+                    "failed": self.guarded_handoff_failed,
+                    "evidence": (
+                        self.guarded_handoff_session.evidence()
+                        if self.guarded_handoff_session is not None
+                        else None
+                    ),
+                },
             },
         )
 
     def _on_odometry(self, message: Odometry) -> None:
         position = message.pose.pose.position
+        orientation = message.pose.pose.orientation
+        _, _, yaw = point_ahead_from_quaternion(
+            x=float(position.x),
+            y=float(position.y),
+            lead_distance=0.0,
+            orientation=orientation,
+        )
         self.latest_pose = {
             "x": round(float(position.x), 4),
             "y": round(float(position.y), 4),
             "z": round(float(position.z), 4),
+            "yaw": round(yaw, 6),
         }
 
     def _on_world_odometry(self, message: Odometry) -> None:
         position = message.pose.pose.position
+        orientation = message.pose.pose.orientation
+        world_x = float(position.x)
+        world_y = float(position.y)
+        _, _, yaw = point_ahead_from_quaternion(
+            x=world_x,
+            y=world_y,
+            lead_distance=0.0,
+            orientation=orientation,
+        )
+        if self.previous_world_xy is not None:
+            self.world_path_length += math.hypot(
+                world_x - self.previous_world_xy[0],
+                world_y - self.previous_world_xy[1],
+            )
+        self.previous_world_xy = (world_x, world_y)
         pose = {
-            "x": round(float(position.x), 6),
-            "y": round(float(position.y), 6),
+            "x": round(world_x, 6),
+            "y": round(world_y, 6),
             "z": round(float(position.z), 6),
+            "yaw": round(yaw, 6),
         }
         if self.initial_world_pose is None:
             self.initial_world_pose = pose
@@ -302,11 +447,11 @@ class GazeboLabDriver(Node):
         self.captured_labels.add(label)
         self._record("image_captured", label, path=destination.name)
 
-    def _set_obstacle_pose(self, *, y: float, action: str) -> bool:
+    def _set_obstacle_pose(self, *, x: float, y: float, action: str) -> bool:
         service = f"/world/{self.world_name}/set_pose"
         request = (
             f'name: "{self.obstacle_model}" '
-            f"position {{ x: {self.active_obstacle_x:.6f} y: {y:.6f} z: 0.35 }} "
+            f"position {{ x: {x:.6f} y: {y:.6f} z: 0.35 }} "
             "orientation { w: 1.0 }"
         )
         try:
@@ -339,33 +484,164 @@ class GazeboLabDriver(Node):
             action,
             success=success,
             returncode=completed.returncode,
-            obstacle_x=round(self.active_obstacle_x, 4),
+            obstacle_x=round(x, 4),
             obstacle_y=round(y, 4),
             response=completed.stdout.strip()[:128],
         )
         return success
 
     def _publish_approval(self, approval_id: str) -> None:
-        decision = build_signed_human_decision(
+        token = build_signed_qr_confirmation(
             job_id=self.job.job_id,
             robot_id=self.job.robot_id,
             approval_id=approval_id,
-            approved=True,
-            actor_id=self.approval_actor_id,
-            secret=self.approval_secret,
+            recipient_ref=self.qr_recipient_ref,
+            secret=self.qr_secret,
             ttl_seconds=120,
+        )
+        self.qr_token_fingerprint = qr_token_sha256(token)
+        confirmation = self.qr_authenticator.verify(
+            token,
+            expected_job_id=self.job.job_id,
+            expected_robot_id=self.job.robot_id,
+            expected_approval_id=approval_id,
+            expected_recipient_ref=self.qr_recipient_ref,
+        )
+        self._record(
+            "qr_confirmation_verified",
+            approval_id,
+            confirmation_id=confirmation.confirmation_id,
+            recipient_ref=confirmation.recipient_ref,
+            token_sha256=self.qr_token_fingerprint,
+            raw_token_persisted=False,
+        )
+        try:
+            self.qr_authenticator.verify(
+                token,
+                expected_job_id=self.job.job_id,
+                expected_robot_id=self.job.robot_id,
+                expected_approval_id=approval_id,
+                expected_recipient_ref=self.qr_recipient_ref,
+            )
+        except QRConfirmationValidationError as exc:
+            self.qr_replay_rejected = "already used" in str(exc)
+            self._record(
+                "qr_confirmation_replay_rejected",
+                str(exc),
+                token_sha256=self.qr_token_fingerprint,
+            )
+        else:
+            self._record(
+                "qr_confirmation_replay_accepted",
+                "single-use QR nonce was unexpectedly accepted",
+                token_sha256=self.qr_token_fingerprint,
+            )
+        decision = qr_confirmation_to_human_decision(
+            confirmation,
+            approval_secret=self.approval_secret,
         )
         self.approval_payload = decision_to_json(decision)
         message = String()
         message.data = self.approval_payload
         self.decision_publisher.publish(message)
-        self.next_replay_at = self._elapsed() + 0.25
+        self.next_replay_at = (
+            self._elapsed() + self.replay_initial_delay_seconds
+        )
         self._record(
             "approval_published",
             approval_id,
-            actor_id=self.approval_actor_id,
+            actor_id=f"qr.{self.qr_recipient_ref}",
+            source="signed_delivery_qr",
         )
-        self.pending_capture = "approval"
+        self._capture("approval")
+
+    def _start_guarded_handoff(self, approval_id: str) -> None:
+        if (
+            self.guarded_handoff_policy is None
+            or self.guarded_handoff_script is None
+        ):
+            self._publish_approval(approval_id)
+            return
+        if self.guarded_handoff_session is not None:
+            return
+        self.pending_approval_id = approval_id
+        self.guarded_handoff_session = GuardedHandoffSession(
+            self.guarded_handoff_policy,
+            session_id=self.guarded_handoff_script.script_id,
+        )
+        self.guarded_handoff_action_index = 0
+        self.guarded_handoff_next_action_at = (
+            self._elapsed() + self.guarded_handoff_step_delay_seconds
+        )
+        self._record(
+            "guarded_handoff_started",
+            "high-risk delivery gates started before QR approval",
+            policy_id=self.guarded_handoff_policy.policy_id,
+            script_id=self.guarded_handoff_script.script_id,
+        )
+
+    def _advance_guarded_handoff(self, elapsed: float) -> None:
+        session = self.guarded_handoff_session
+        script = self.guarded_handoff_script
+        if (
+            session is None
+            or script is None
+            or self.guarded_handoff_failed
+            or session.terminal
+            or elapsed < self.guarded_handoff_next_action_at
+        ):
+            return
+        if self.guarded_handoff_action_index >= len(script.actions):
+            self.guarded_handoff_failed = True
+            self._record(
+                "guarded_handoff_failed",
+                "script ended before the handoff reached a terminal state",
+            )
+            return
+        action = script.actions[self.guarded_handoff_action_index]
+        try:
+            event = session.apply(action)
+        except GuardedHandoffValidationError as exc:
+            self.guarded_handoff_failed = True
+            self._record(
+                "guarded_handoff_failed",
+                str(exc),
+                action=action.action,
+                action_index=self.guarded_handoff_action_index,
+            )
+            return
+        self.guarded_handoff_action_index += 1
+        self.guarded_handoff_next_action_at = (
+            elapsed + self.guarded_handoff_step_delay_seconds
+        )
+        self._record(
+            str(event["kind"]),
+            str(event["detail"]),
+            handoff_sequence=event["sequence"],
+            handoff_state=event["state"],
+            container_locked=event["container_locked"],
+            expected=event.get("expected"),
+            actual=event.get("actual"),
+            checkpoint=event.get("checkpoint"),
+            actor_id=event.get("actor_id"),
+        )
+        if event["kind"] in {"item_rejected", "recipient_rejected"}:
+            self._capture(str(event["kind"]))
+        if session.terminal:
+            approval_id = self.pending_approval_id
+            if not approval_id:
+                self.guarded_handoff_failed = True
+                self._record(
+                    "guarded_handoff_failed",
+                    "completed handoff has no pending approval",
+                )
+                return
+            self._record(
+                "guarded_handoff_approved",
+                "all high-risk delivery gates passed",
+                approval_id=approval_id,
+            )
+            self._publish_approval(approval_id)
 
     def _on_event(self, message: String) -> None:
         try:
@@ -382,28 +658,47 @@ class GazeboLabDriver(Node):
             marker = "approval requested for "
             approval_id = detail.split(marker, 1)[1].split(";", 1)[0] if marker in detail else ""
             if approval_id:
-                self._publish_approval(approval_id)
+                self._start_guarded_handoff(approval_id)
         if kind == "mission_completed":
             self._capture("completed")
             self._write_manifest()
 
     def _tick(self) -> None:
         elapsed = self._elapsed()
+        self._advance_guarded_handoff(elapsed)
         if not self.obstacle_entered and elapsed >= self.obstacle_enter_seconds:
             self.obstacle_entered = True
-            if self.latest_pose is not None:
-                robot_x = (
-                    float(self.latest_world_pose["x"])
-                    if self.latest_world_pose is not None
-                    else self.robot_world_origin_x + float(self.latest_pose["x"])
-                )
-                self.active_obstacle_x = robot_x + self.obstacle_lead_distance
-            if self._set_obstacle_pose(y=self.obstacle_active_y, action="obstacle_enter"):
+            robot_x = self.robot_world_origin_x
+            robot_y = self.obstacle_active_y
+            robot_yaw = 0.0
+            if self.latest_world_pose is not None:
+                robot_x = float(self.latest_world_pose["x"])
+                robot_y = float(self.latest_world_pose["y"])
+                robot_yaw = float(self.latest_world_pose["yaw"])
+            elif self.latest_pose is not None:
+                robot_x += float(self.latest_pose["x"])
+                robot_y = float(self.latest_pose["y"])
+                robot_yaw = float(self.latest_pose["yaw"])
+            self.active_obstacle_x = robot_x + (
+                self.obstacle_lead_distance * math.cos(robot_yaw)
+            )
+            active_obstacle_y = robot_y + (
+                self.obstacle_lead_distance * math.sin(robot_yaw)
+            )
+            if self._set_obstacle_pose(
+                x=self.active_obstacle_x,
+                y=active_obstacle_y,
+                action="obstacle_enter",
+            ):
                 self.pending_capture = "obstacle"
                 self.pending_capture_not_before = self._now() + 0.4
         if not self.obstacle_exited and elapsed >= self.obstacle_exit_seconds:
             self.obstacle_exited = True
-            self._set_obstacle_pose(y=self.obstacle_parked_y, action="obstacle_exit")
+            self._set_obstacle_pose(
+                x=self.active_obstacle_x,
+                y=self.obstacle_parked_y,
+                action="obstacle_exit",
+            )
         if (
             self.approval_payload is not None
             and self.replays_sent < self.replay_count

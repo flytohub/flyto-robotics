@@ -40,10 +40,10 @@ def _passing_result() -> dict[str, object]:
         ("clearance_window_started", "wait_until_clear", None),
         ("primitive_started", "ask_human", None),
         ("human_approval_requested", "ask_human", None),
-        ("human_approved", "ask_human", "evaluator.gazebo"),
+        ("human_approved", "ask_human", "qr.ward-b.receiver"),
         ("human_decision_rejected", "ask_human", None),
         ("primitive_started", "resume", None),
-        ("resume_authorized", "resume", "evaluator.gazebo"),
+        ("resume_authorized", "resume", "qr.ward-b.receiver"),
         ("primitive_started", "safe_stop", None),
         ("mission_completed", "safe_stop", None),
     ]

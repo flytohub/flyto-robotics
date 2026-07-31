@@ -25,7 +25,9 @@ from launch import LaunchDescription
 def _launch_runtime(context: object) -> list[object]:
     share = Path(get_package_share_directory("flyto_robotics"))
     ros_gz_share = Path(get_package_share_directory("ros_gz_sim"))
-    world = share / "worlds/atomic-color-route-lab.sdf"
+    world = Path(LaunchConfiguration("world_file").perform(context))
+    if world.suffix != ".sdf" or not world.is_file():
+        raise ValueError("world_file must reference a readable local SDF file")
     gz_arguments = ["-r", "-v", "3"]
     if LaunchConfiguration("headless").perform(context).lower() in {
         "1",
@@ -56,6 +58,16 @@ def _launch_runtime(context: object) -> list[object]:
                 "job_file": LaunchConfiguration("job_file"),
                 "evidence_dir": LaunchConfiguration("evidence_dir"),
                 "scenario_id": "gazebo.careflow.adversarial.v1",
+                "qr_recipient_ref": LaunchConfiguration("qr_recipient_ref"),
+                "guarded_handoff_policy_file": LaunchConfiguration(
+                    "guarded_handoff_policy_file"
+                ),
+                "guarded_handoff_script_file": LaunchConfiguration(
+                    "guarded_handoff_script_file"
+                ),
+                "guarded_handoff_step_delay_seconds": LaunchConfiguration(
+                    "guarded_handoff_step_delay_seconds"
+                ),
                 "video_frames_dir": LaunchConfiguration("video_frames_dir"),
                 "video_max_frames": LaunchConfiguration("video_max_frames"),
                 "use_sim_time": True,
@@ -103,6 +115,10 @@ def generate_launch_description() -> LaunchDescription:
                 default_value=str(share / "examples/jobs/pharmacy-to-ward.json"),
             ),
             DeclareLaunchArgument(
+                "world_file",
+                default_value=str(share / "worlds/atomic-color-route-lab.sdf"),
+            ),
+            DeclareLaunchArgument(
                 "plan_file",
                 default_value=str(
                     share / "examples/plans/careflow-waypoints-human-gate.json"
@@ -127,6 +143,22 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument(
                 "semantic_map_id",
                 default_value="gazebo.atomic-color-route.v1",
+            ),
+            DeclareLaunchArgument(
+                "qr_recipient_ref",
+                default_value="ward-b.receiver",
+            ),
+            DeclareLaunchArgument(
+                "guarded_handoff_policy_file",
+                default_value="",
+            ),
+            DeclareLaunchArgument(
+                "guarded_handoff_script_file",
+                default_value="",
+            ),
+            DeclareLaunchArgument(
+                "guarded_handoff_step_delay_seconds",
+                default_value="0.65",
             ),
             DeclareLaunchArgument("headless", default_value="true"),
             OpaqueFunction(function=_launch_runtime),

@@ -1,0 +1,120 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://flyto2.com/contracts/robotics/guarded-handoff-evidence-v1.schema.json",
+  "title": "Flyto2 Guarded Handoff Evidence v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract_version",
+    "session_id",
+    "policy_id",
+    "state",
+    "container_id",
+    "container_locked",
+    "checkpoint",
+    "preconditions_verified",
+    "item_verified",
+    "recipient_verified",
+    "synthetic",
+    "events"
+  ],
+  "properties": {
+    "contract_version": {
+      "const": "flyto.robotics.guarded-handoff-evidence.v1"
+    },
+    "session_id": {
+      "$ref": "#/$defs/identifier"
+    },
+    "policy_id": {
+      "$ref": "#/$defs/identifier"
+    },
+    "state": {
+      "enum": [
+        "awaiting_preconditions",
+        "awaiting_item",
+        "blocked_item",
+        "checkpoint_ready",
+        "awaiting_recipient",
+        "ready_to_unlock",
+        "unlocked",
+        "completed"
+      ]
+    },
+    "container_id": {
+      "$ref": "#/$defs/identifier"
+    },
+    "container_locked": {
+      "type": "boolean"
+    },
+    "checkpoint": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "maxLength": 128
+    },
+    "preconditions_verified": {
+      "type": "array",
+      "maxItems": 16,
+      "items": {
+        "$ref": "#/$defs/identifier"
+      },
+      "uniqueItems": true
+    },
+    "item_verified": {
+      "type": "boolean"
+    },
+    "recipient_verified": {
+      "type": "boolean"
+    },
+    "synthetic": {
+      "type": "boolean"
+    },
+    "events": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 65,
+      "items": {
+        "type": "object",
+        "required": [
+          "sequence",
+          "kind",
+          "detail",
+          "state",
+          "container_locked"
+        ],
+        "properties": {
+          "sequence": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "kind": {
+            "$ref": "#/$defs/identifier"
+          },
+          "detail": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "state": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "container_locked": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": true
+      }
+    }
+  },
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9._-]+$"
+    }
+  }
+}

@@ -1,0 +1,77 @@
+{
+  "contract_version": "flyto.robotics.plan.v1",
+  "plan_id": "ai4all-branching-orange-purple-fixture.v1",
+  "robot_id": "flyto-rover-sim-001",
+  "goal": "合成測試資料：經橘色第一分岔與中央匯流點前往紫區護理站，交付前取得人員確認，最後安全停止。",
+  "generated_by": {
+    "kind": "deterministic_demo",
+    "provider": "flyto-robotics",
+    "model": "scenario-fixture"
+  },
+  "steps": [
+    {
+      "step_id": "route.orange.entry",
+      "capability": "navigate_to_location",
+      "arguments": {
+        "location_id": "route.orange.entry"
+      },
+      "timeout_seconds": 30.0,
+      "on_failure": "request_replan"
+    },
+    {
+      "step_id": "route.merge.center",
+      "capability": "navigate_to_location",
+      "arguments": {
+        "location_id": "route.merge.center"
+      },
+      "timeout_seconds": 30.0,
+      "on_failure": "request_replan"
+    },
+    {
+      "step_id": "route.purple.branch",
+      "capability": "navigate_to_location",
+      "arguments": {
+        "location_id": "route.purple.branch"
+      },
+      "timeout_seconds": 30.0,
+      "on_failure": "request_replan"
+    },
+    {
+      "step_id": "destination.purple",
+      "capability": "navigate_to_location",
+      "arguments": {
+        "location_id": "destination.purple"
+      },
+      "timeout_seconds": 30.0,
+      "on_failure": "request_replan"
+    },
+    {
+      "step_id": "delivery.ask",
+      "capability": "ask_human",
+      "arguments": {
+        "approval_id": "delivery_to_purple_nurse_station",
+        "prompt_key": "confirm_delivery_to_purple_nurse_station"
+      },
+      "timeout_seconds": 30.0,
+      "on_failure": "abort"
+    },
+    {
+      "step_id": "delivery.resume",
+      "capability": "resume",
+      "arguments": {
+        "approval_id": "delivery_to_purple_nurse_station"
+      },
+      "timeout_seconds": 5.0,
+      "on_failure": "abort"
+    },
+    {
+      "step_id": "mission.safe_stop",
+      "capability": "safe_stop",
+      "arguments": {
+        "seconds": 1.0
+      },
+      "timeout_seconds": 2.0,
+      "on_failure": "abort"
+    }
+  ]
+}

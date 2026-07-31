@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import xml.etree.ElementTree as ET
+from copy import deepcopy
 from pathlib import Path
 
 import pytest
 
+from flyto_robotics.ai_planner import PlanValidationError, planner_request
+from flyto_robotics.capabilities import GoalFrame
 from flyto_robotics.facility_resources import (
     DependencyContract,
     FacilityResourceCatalog,
@@ -21,7 +25,7 @@ RESOURCE_FILE = (
     ROOT / "examples/facility-resources/ai4all-showcase-facility.json"
 )
 GOAL_FRAME_FILE = (
-    ROOT / "examples/goal-frames/ai4all-careflow-showcase.json"
+    ROOT / "examples/goal-frames/ai4all-branching-careflow.json"
 )
 PLAN_FILE = ROOT / "examples/plans/careflow-waypoints-human-gate.json"
 
@@ -30,6 +34,132 @@ def load_json(path: Path) -> dict[str, object]:
     value = json.loads(path.read_text(encoding="utf-8"))
     assert isinstance(value, dict)
     return value
+
+
+def snapshot(value: object) -> str:
+    raw = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    return hashlib.sha256(raw).hexdigest()
+
+
+def semantic_showcase_plan() -> dict[str, object]:
+    plan = load_json(PLAN_FILE)
+    locations = [
+        "route.orange.1",
+        "route.merge.1",
+        "route.purple.1",
+    ]
+    location_index = 0
+    for step in plan["steps"]:
+        if not isinstance(step, dict) or step.get("capability") != "navigate":
+            continue
+        step["capability"] = "navigate_to_location"
+        step["arguments"] = {"location_id": locations[location_index]}
+        location_index += 1
+    plan["plan_id"] = "test.semantic.branch.plan"
+    return plan
+
+
+def synthetic_live_session(
+    plan: dict[str, object],
+) -> dict[str, object]:
+    goal = str(plan["goal"])
+    request = planner_request(
+        goal=goal,
+        robot_id="flyto-rover-sim-001",
+        goal_frame=GoalFrame.from_mapping(load_json(GOAL_FRAME_FILE)),
+    )
+    selected_locations = [
+        str(step["arguments"]["location_id"])
+        for step in plan["steps"]
+        if isinstance(step, dict)
+        and step.get("capability") == "navigate_to_location"
+        and isinstance(step.get("arguments"), dict)
+    ]
+    request["observations"] = {
+        "semantic_map": {
+            "locations": [
+                {"location_id": location_id}
+                for location_id in {
+                    *selected_locations,
+                    "route.yellow.1",
+                }
+            ]
+        },
+        "route_candidates": [
+            {
+                "route_id": "route.orange-purple",
+                "location_ids": selected_locations,
+                "score": 80,
+                "reason_codes": ["dependency_healthy"],
+            },
+            {
+                "route_id": "route.yellow-purple",
+                "location_ids": [
+                    "route.yellow.1",
+                    "route.merge.1",
+                    "route.purple.1",
+                ],
+                "score": 90,
+                "reason_codes": ["shorter"],
+            },
+        ],
+    }
+    attestation: dict[str, object] = {
+        "contract_version": "flyto.ai.robotics-planning-attestation.v1",
+        "run_id": "test-live-plan",
+        "mode": "live_llm",
+        "provider": "flyto-ai",
+        "model": "test-model",
+        "transport": "fake-test-provider",
+        "request_sha256": snapshot(request),
+        "plan_sha256": snapshot(plan),
+        "schema_sha256": "a" * 64,
+        "started_at": "2026-07-30T00:00:00+00:00",
+        "finished_at": "2026-07-30T00:00:01+00:00",
+        "latency_ms": 1000.0,
+        "attempt_count": 1,
+        "attempts": [],
+        "selected_route_id": "route.orange-purple",
+    }
+    attestation["snapshot"] = snapshot(attestation)
+    response = {
+        "contract_version": "flyto.ai.robotics-plan-response.v1",
+        "plan": plan,
+        "attestation": attestation,
+    }
+    session: dict[str, object] = {
+        "contract_version": "flyto.robotics.planning-session.v1",
+        "session_id": "planning-session-test",
+        "planning_mode": "live_llm",
+        "goal": goal,
+        "robot_id": "flyto-rover-sim-001",
+        "rounds": [
+            {
+                "sequence": 1,
+                "status": "superseded",
+                "trigger": "initial_goal",
+                "request": request,
+                "response": response,
+                "route_evaluation": {},
+            },
+            {
+                "sequence": 2,
+                "status": "selected",
+                "trigger": "resource_dependency_changed",
+                "request": request,
+                "response": response,
+                "route_evaluation": {},
+            },
+        ],
+        "final_round": 2,
+    }
+    session["snapshot"] = snapshot(session)
+    return session
 
 
 def test_facility_runtime_handoffs_to_local_camera_then_declared_fallback() -> None:
@@ -259,19 +389,19 @@ def test_facility_runtime_fails_closed_without_a_healthy_declared_resource() -> 
 
 
 def test_showcase_planning_proves_shortlist_and_strict_atomic_plan() -> None:
-    plan_payload = load_json(PLAN_FILE)
+    plan_payload = semantic_showcase_plan()
     evidence = build_showcase_planning_evidence(
-        goal=str(plan_payload["goal"]),
+        session=synthetic_live_session(plan_payload),
         goal_frame=load_json(GOAL_FRAME_FILE),
-        plan_file=PLAN_FILE,
+        executed_plan=plan_payload,
         robot_id="flyto-rover-sim-001",
     )
 
     routing = evidence["capability_routing"]
     validated = evidence["validated_plan"]
-    assert routing["confidence"] == 1.0
+    assert routing["confidence"] >= 0.9
     assert set(validated["selected_capabilities"]) == {
-        "navigate",
+        "navigate_to_location",
         "wait_until_clear",
         "ask_human",
         "resume",
@@ -281,6 +411,20 @@ def test_showcase_planning_proves_shortlist_and_strict_atomic_plan() -> None:
     assert validated["strict_validation_passed"] is True
     assert validated["direct_motor_commands_allowed"] is False
     assert validated["source"]["kind"] == "llm"
+
+
+def test_showcase_planning_rejects_goal_frame_drift() -> None:
+    plan_payload = semantic_showcase_plan()
+    goal_frame = load_json(GOAL_FRAME_FILE)
+    goal_frame["constraints"][0]["value"] = "unattested_policy"
+
+    with pytest.raises(PlanValidationError, match="goal frame does not match"):
+        build_showcase_planning_evidence(
+            session=synthetic_live_session(plan_payload),
+            goal_frame=goal_frame,
+            executed_plan=plan_payload,
+            robot_id="flyto-rover-sim-001",
+        )
 
 
 def test_showcase_world_exposes_three_real_gazebo_camera_streams() -> None:
@@ -302,11 +446,11 @@ def test_showcase_world_exposes_three_real_gazebo_camera_streams() -> None:
 
 
 def test_showcase_evaluator_requires_the_whole_multidevice_physical_loop() -> None:
-    plan_payload = load_json(PLAN_FILE)
+    plan_payload = semantic_showcase_plan()
     planning = build_showcase_planning_evidence(
-        goal=str(plan_payload["goal"]),
+        session=synthetic_live_session(plan_payload),
         goal_frame=load_json(GOAL_FRAME_FILE),
-        plan_file=PLAN_FILE,
+        executed_plan=plan_payload,
         robot_id="flyto-rover-sim-001",
     )
     facility_events = [
@@ -370,15 +514,28 @@ def test_showcase_evaluator_requires_the_whole_multidevice_physical_loop() -> No
     }
     driver = {
         "world_displacement": 4.24,
+        "qr_confirmation": {
+            "token_sha256": "a" * 64,
+            "replay_rejected": True,
+            "raw_token_persisted": False,
+        },
         "actions": [
             {"kind": "fault_injection", "success": True},
             {"kind": "fault_injection", "success": True},
+            {
+                "kind": "qr_confirmation_verified",
+                "token_sha256": "a" * 64,
+                "raw_token_persisted": False,
+            },
+            {"kind": "qr_confirmation_replay_rejected"},
         ],
     }
 
     report = evaluate_showcase_evidence(showcase, mission, driver)
     assert report["passed"] is True
     assert report["summary"]["passed_checks"] == report["summary"]["total_checks"]
+    assert report["summary"]["total_checks"] == 16
+    assert report["summary"]["guarded_handoff_enabled"] is False
 
     facility_events.pop(2)
     failed = evaluate_showcase_evidence(showcase, mission, driver)
@@ -388,3 +545,209 @@ def test_showcase_evaluator_requires_the_whole_multidevice_physical_loop() -> No
         for check in failed["checks"]
         if check["id"] == "camera_failure_detected"
     )["passed"] is False
+
+
+def test_showcase_evaluator_proves_guarded_handoff_fail_closed_order() -> None:
+    plan_payload = semantic_showcase_plan()
+    planning = build_showcase_planning_evidence(
+        session=synthetic_live_session(plan_payload),
+        goal_frame=load_json(GOAL_FRAME_FILE),
+        executed_plan=plan_payload,
+        robot_id="flyto-rover-sim-001",
+    )
+    showcase = {
+        "planning": planning,
+        "facility": {
+            "events": [
+                {
+                    "kind": "resource.router_selected",
+                    "resource_id": "camera.corridor.a",
+                },
+                {
+                    "kind": "resource.router_selected",
+                    "resource_id": "camera.corridor.b",
+                },
+                {
+                    "kind": "resource.health_changed",
+                    "resource_id": "camera.corridor.b",
+                    "healthy": False,
+                },
+                {
+                    "kind": "resource.dependency_assessed",
+                    "resource_id": "camera.corridor.b",
+                    "state": "unavailable",
+                    "derived_band": "assistive",
+                    "action": "switch_substitute",
+                    "must_stop": False,
+                },
+                {
+                    "kind": "resource.router_selected",
+                    "resource_id": "camera.floor1.overhead",
+                },
+                {
+                    "kind": "resource.router_selected",
+                    "resource_id": "speaker.nurse_station.b",
+                },
+            ],
+            "seen_streams": [
+                "camera.corridor.a",
+                "camera.corridor.b",
+                "camera.floor1.overhead",
+            ],
+        },
+        "video": {"frame_count": 80},
+    }
+    mission = {
+        "status": "succeeded",
+        "events": [
+            {"kind": "obstacle_stop"},
+            {"kind": "path_clear"},
+            {"kind": "human_approval_requested"},
+            {"kind": "human_approved"},
+            {"kind": "human_decision_rejected"},
+            {"kind": "resume_authorized"},
+            {"kind": "mission_completed"},
+        ],
+    }
+    guarded_events = [
+        {
+            "kind": "handoff_started",
+            "container_locked": True,
+        },
+        {
+            "kind": "precondition_verified",
+            "container_locked": True,
+        },
+        {
+            "kind": "item_rejected",
+            "expected": "A12",
+            "actual": "B13",
+            "container_locked": True,
+        },
+        {
+            "kind": "item_verified",
+            "actual": "A12",
+            "container_locked": True,
+        },
+        {
+            "kind": "checkpoint_resumed",
+            "checkpoint": "verify_item",
+            "container_locked": True,
+        },
+        {
+            "kind": "recipient_rejected",
+            "expected": "patient-12",
+            "actual": "patient-13",
+            "container_locked": True,
+        },
+        {
+            "kind": "recipient_verified",
+            "actual": "patient-12",
+            "container_locked": True,
+        },
+        {
+            "kind": "container_unlocked",
+            "container_locked": False,
+        },
+        {
+            "kind": "handoff_completed",
+            "container_locked": False,
+        },
+    ]
+    driver = {
+        "world_displacement": 4.24,
+        "qr_confirmation": {
+            "token_sha256": "a" * 64,
+            "replay_rejected": True,
+            "raw_token_persisted": False,
+        },
+        "guarded_handoff": {
+            "enabled": True,
+            "failed": False,
+            "evidence": {
+                "state": "completed",
+                "container_locked": False,
+                "checkpoint": None,
+                "preconditions_verified": ["billing_status"],
+                "item_verified": True,
+                "recipient_verified": True,
+                "events": guarded_events,
+            },
+        },
+        "actions": [
+            {"kind": "fault_injection", "success": True},
+            {"kind": "fault_injection", "success": True},
+            *guarded_events,
+            {"kind": "guarded_handoff_approved"},
+            {
+                "kind": "qr_confirmation_verified",
+                "token_sha256": "a" * 64,
+                "raw_token_persisted": False,
+            },
+            {"kind": "qr_confirmation_replay_rejected"},
+            {"kind": "approval_published"},
+        ],
+    }
+
+    report = evaluate_showcase_evidence(showcase, mission, driver)
+    assert report["passed"] is True
+    assert report["summary"]["passed_checks"] == 21
+    assert report["summary"]["total_checks"] == 21
+    assert report["summary"]["guarded_handoff_enabled"] is True
+
+    missing_checkpoint = deepcopy(driver)
+    missing_checkpoint["guarded_handoff"]["evidence"]["events"].pop(4)
+    failed_checkpoint = evaluate_showcase_evidence(
+        showcase,
+        mission,
+        missing_checkpoint,
+    )
+    assert next(
+        check
+        for check in failed_checkpoint["checks"]
+        if check["id"] == "wrong_item_blocked_then_checkpoint_resumed"
+    )["passed"] is False
+
+    unlocked_wrong_item = deepcopy(driver)
+    unlocked_wrong_item["guarded_handoff"]["evidence"]["events"][2][
+        "container_locked"
+    ] = False
+    failed_lock = evaluate_showcase_evidence(
+        showcase,
+        mission,
+        unlocked_wrong_item,
+    )
+    assert next(
+        check
+        for check in failed_lock["checks"]
+        if check["id"] == "wrong_item_blocked_then_checkpoint_resumed"
+    )["passed"] is False
+
+
+def test_branching_semantic_map_is_in_robot_odometry_frame() -> None:
+    semantic_map = load_json(
+        ROOT / "examples/maps/ai4all-branching-route.json"
+    )
+    poses = {
+        item["location_id"]: item["pose"]
+        for item in semantic_map["locations"]
+    }
+    robot_world_origin_x = -2.15
+    expected_world_x = {
+        "route.yellow.entry": -0.35,
+        "route.orange.entry": -0.35,
+        "route.merge.center": 1.1,
+        "route.blue.branch": 2.35,
+        "route.green.branch": 2.35,
+        "route.purple.branch": 2.35,
+        "route.red.branch": 2.35,
+        "destination.blue": 3.25,
+        "destination.green": 3.25,
+        "destination.purple": 3.25,
+        "destination.red": 3.25,
+    }
+
+    assert {
+        location_id: round(pose["x"] + robot_world_origin_x, 2)
+        for location_id, pose in poses.items()
+    } == expected_world_x

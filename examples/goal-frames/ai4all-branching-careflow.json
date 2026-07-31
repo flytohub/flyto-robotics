@@ -1,0 +1,38 @@
+{
+  "contract_version": "flyto.goal-frame.v1",
+  "intent_ids": [
+    "human.approval.request",
+    "human.approval.resume",
+    "route.navigate.location",
+    "safety.stop"
+  ],
+  "required_affordances": [
+    "human.request_decision",
+    "human.resume_after_approval",
+    "motion.navigate.semantic_location",
+    "safety.stop.motion"
+  ],
+  "desired_effects": [
+    "human.decision.requested",
+    "robot.location.reached",
+    "robot.motion.stopped",
+    "workflow.resumed"
+  ],
+  "trigger_events": [
+    "human.approved",
+    "resource.health.changed",
+    "obstacle.detected"
+  ],
+  "constraints": [
+    {
+      "key": "route.candidate.sequence",
+      "operator": "select_one",
+      "value": "highest_scoring_executable"
+    },
+    {
+      "key": "delivery.approval.required",
+      "operator": "equals",
+      "value": true
+    }
+  ]
+}

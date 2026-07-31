@@ -36,29 +36,46 @@ def _load_json(path: str | Path, field_name: str) -> dict[str, object]:
 
 
 class ShowcaseGazeboObserver(Node):
-    """Bind physical zones to cameras, inject one camera fault, and record handoff."""
+    """Join attested planning, physical zones, device handoff, and mission events."""
 
     def __init__(self) -> None:
         super().__init__("flyto_ai4all_showcase_observer")
         self.declare_parameter("resource_file", "")
         self.declare_parameter("goal_frame_file", "")
         self.declare_parameter("plan_file", "")
-        self.declare_parameter("goal", "")
+        self.declare_parameter("planning_session_file", "")
         self.declare_parameter("robot_id", "flyto-rover-sim-001")
         self.declare_parameter("evidence_dir", "results/ai4all-showcase/facility")
         self.declare_parameter("video_frames_dir", "")
         self.declare_parameter("video_max_frames", 900)
         self.declare_parameter("yellow_zone_x", -0.65)
         self.declare_parameter("purple_zone_x", 0.75)
+        self.declare_parameter("fault_enabled", True)
+        self.declare_parameter("fault_zone_id", "zone.purple")
+        self.declare_parameter(
+            "fault_resource_id",
+            "camera.corridor.b",
+        )
 
         resource_file = str(self.get_parameter("resource_file").value).strip()
         goal_frame_file = str(self.get_parameter("goal_frame_file").value).strip()
         plan_file = str(self.get_parameter("plan_file").value).strip()
-        goal = str(self.get_parameter("goal").value).strip()
+        planning_session_file = str(
+            self.get_parameter("planning_session_file").value
+        ).strip()
         robot_id = str(self.get_parameter("robot_id").value).strip()
-        if not all((resource_file, goal_frame_file, plan_file, goal, robot_id)):
+        if not all(
+            (
+                resource_file,
+                goal_frame_file,
+                plan_file,
+                planning_session_file,
+                robot_id,
+            )
+        ):
             raise ValueError(
-                "resource_file, goal_frame_file, plan_file, goal, and robot_id are required"
+                "resource_file, goal_frame_file, plan_file, planning_session_file, "
+                "and robot_id are required"
             )
         self.evidence_dir = Path(str(self.get_parameter("evidence_dir").value))
         self.evidence_dir.mkdir(parents=True, exist_ok=True)
@@ -73,17 +90,35 @@ class ShowcaseGazeboObserver(Node):
         )
         self.yellow_zone_x = float(self.get_parameter("yellow_zone_x").value)
         self.purple_zone_x = float(self.get_parameter("purple_zone_x").value)
+        self.fault_enabled = bool(self.get_parameter("fault_enabled").value)
+        self.fault_zone_id = str(
+            self.get_parameter("fault_zone_id").value
+        ).strip()
+        self.fault_resource_id = str(
+            self.get_parameter("fault_resource_id").value
+        ).strip()
         if not -5.0 <= self.yellow_zone_x < self.purple_zone_x <= 5.0:
             raise ValueError("zone thresholds must be ordered inside the demo world")
+        if self.fault_enabled and not all(
+            (self.fault_zone_id, self.fault_resource_id)
+        ):
+            raise ValueError(
+                "enabled fault injection requires zone and resource identifiers"
+            )
 
         resource_payload = _load_json(resource_file, "resource_file")
         goal_frame = _load_json(goal_frame_file, "goal_frame_file")
+        executed_plan = _load_json(plan_file, "plan_file")
+        planning_session = _load_json(
+            planning_session_file,
+            "planning_session_file",
+        )
         self.catalog = FacilityResourceCatalog.from_mapping(resource_payload)
         self.runtime = FacilityResourceRuntime(self.catalog)
         self.planning = build_showcase_planning_evidence(
-            goal=goal,
+            session=planning_session,
             goal_frame=goal_frame,
-            plan_file=plan_file,
+            executed_plan=executed_plan,
             robot_id=robot_id,
         )
         self.started_at = self._now()
@@ -201,13 +236,15 @@ class ShowcaseGazeboObserver(Node):
             )
             self.pending_capture = f"handoff-{zone.replace('.', '-')}"
         if (
-            zone == "zone.purple"
+            self.fault_enabled
+            and zone == self.fault_zone_id
             and not self.camera_failure_injected
-            and self.runtime.active_by_kind.get("camera") == "camera.corridor.b"
+            and self.runtime.active_by_kind.get("camera")
+            == self.fault_resource_id
         ):
             self.camera_failure_injected = True
             self.runtime.set_health(
-                "camera.corridor.b",
+                self.fault_resource_id,
                 healthy=False,
                 at_seconds=self._elapsed(),
                 reason="showcase_fault_injection",

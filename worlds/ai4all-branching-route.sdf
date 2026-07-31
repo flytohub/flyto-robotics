@@ -1,0 +1,397 @@
+<?xml version="1.0"?>
+<sdf version="1.9">
+  <world name="flyto_atomic_color_route_lab">
+    <physics name="default_physics" type="dart">
+      <max_step_size>0.001</max_step_size>
+      <real_time_factor>1.0</real_time_factor>
+    </physics>
+    <gravity>0 0 -9.80665</gravity>
+
+    <plugin filename="gz-sim-physics-system"
+            name="gz::sim::systems::Physics"/>
+    <plugin filename="gz-sim-user-commands-system"
+            name="gz::sim::systems::UserCommands"/>
+    <plugin filename="gz-sim-scene-broadcaster-system"
+            name="gz::sim::systems::SceneBroadcaster"/>
+    <plugin filename="gz-sim-sensors-system"
+            name="gz::sim::systems::Sensors">
+      <render_engine>ogre2</render_engine>
+    </plugin>
+
+    <scene>
+      <ambient>0.86 0.86 0.86 1</ambient>
+      <background>0.95 0.97 0.98 1</background>
+      <shadows>false</shadows>
+      <grid>true</grid>
+    </scene>
+    <light name="route_light" type="directional">
+      <cast_shadows>false</cast_shadows>
+      <pose>0 0 8 0 0 0</pose>
+      <diffuse>1 1 1 1</diffuse>
+      <specular>0.2 0.2 0.2 1</specular>
+      <direction>0.1 0.1 -1</direction>
+    </light>
+
+    <model name="hospital_floor">
+      <static>true</static>
+      <pose>0.35 0 0 0 0 0</pose>
+      <link name="floor">
+        <collision name="collision">
+          <geometry><box><size>9.4 5.2 0.10</size></box></geometry>
+        </collision>
+        <visual name="visual">
+          <geometry><box><size>9.4 5.2 0.10</size></box></geometry>
+          <material>
+            <ambient>0.73 0.75 0.76 1</ambient>
+            <diffuse>0.88 0.90 0.91 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- Neutral trunk: the route decision begins at the first physical fork. -->
+    <model name="route_trunk_before_first_fork">
+      <static>true</static>
+      <pose>-1.80 0 0.056 0 0 0</pose>
+      <link name="line">
+        <visual name="visual">
+          <geometry><box><size>1.30 0.22 0.012</size></box></geometry>
+          <material>
+            <ambient>0.02 0.45 0.54 1</ambient>
+            <diffuse>0.03 0.70 0.80 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- First fork: yellow or orange. -->
+    <model name="first_fork_yellow_diagonal">
+      <static>true</static>
+      <pose>-0.90 0.35 0.056 0 0 0.7854</pose>
+      <link name="line">
+        <visual name="visual">
+          <geometry><box><size>0.99 0.22 0.012</size></box></geometry>
+          <material>
+            <ambient>0.88 0.68 0.01 1</ambient>
+            <diffuse>1.0 0.90 0.02 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+    <model name="first_fork_yellow_lane">
+      <static>true</static>
+      <pose>-0.225 0.70 0.056 0 0 0</pose>
+      <link name="line">
+        <visual name="visual">
+          <geometry><box><size>0.65 0.22 0.012</size></box></geometry>
+          <material>
+            <ambient>0.88 0.68 0.01 1</ambient>
+            <diffuse>1.0 0.90 0.02 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+    <model name="first_fork_yellow_merge">
+      <static>true</static>
+      <pose>0.55 0.35 0.056 0 0 -0.661</pose>
+      <link name="line">
+        <visual name="visual">
+          <geometry><box><size>1.14 0.22 0.012</size></box></geometry>
+          <material>
+            <ambient>0.88 0.68 0.01 1</ambient>
+            <diffuse>1.0 0.90 0.02 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+    <model name="first_fork_orange_diagonal">
+      <static>true</static>
+      <pose>-0.90 -0.35 0.056 0 0 -0.7854</pose>
+      <link name="line">
+        <visual name="visual">
+          <geometry><box><size>0.99 0.22 0.012</size></box></geometry>
+          <material>
+            <ambient>0.88 0.30 0.01 1</ambient>
+            <diffuse>1.0 0.48 0.02 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+    <model name="first_fork_orange_lane">
+      <static>true</static>
+      <pose>-0.225 -0.70 0.056 0 0 0</pose>
+      <link name="line">
+        <visual name="visual">
+          <geometry><box><size>0.65 0.22 0.012</size></box></geometry>
+          <material>
+            <ambient>0.88 0.30 0.01 1</ambient>
+            <diffuse>1.0 0.48 0.02 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+    <model name="first_fork_orange_merge">
+      <static>true</static>
+      <pose>0.55 -0.35 0.056 0 0 0.661</pose>
+      <link name="line">
+        <visual name="visual">
+          <geometry><box><size>1.14 0.22 0.012</size></box></geometry>
+          <material>
+            <ambient>0.88 0.30 0.01 1</ambient>
+            <diffuse>1.0 0.48 0.02 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <model name="route_merge_trunk">
+      <static>true</static>
+      <pose>1.275 0 0.056 0 0 0</pose>
+      <link name="line">
+        <visual name="visual">
+          <geometry><box><size>0.55 0.22 0.012</size></box></geometry>
+          <material>
+            <ambient>0.22 0.24 0.27 1</ambient>
+            <diffuse>0.36 0.39 0.43 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- Second fork fans into four executable branches. -->
+    <model name="second_fork_blue_diagonal">
+      <static>true</static>
+      <pose>2.05 -0.75 0.056 0 0 -0.9828</pose>
+      <link name="line">
+        <visual name="visual">
+          <geometry><box><size>1.803 0.22 0.012</size></box></geometry>
+          <material>
+            <ambient>0.02 0.12 0.82 1</ambient>
+            <diffuse>0.03 0.20 1.0 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+    <model name="second_fork_blue_lane">
+      <static>true</static>
+      <pose>3.10 -1.50 0.056 0 0 0</pose>
+      <link name="line">
+        <visual name="visual">
+          <geometry><box><size>1.10 0.22 0.012</size></box></geometry>
+          <material>
+            <ambient>0.02 0.12 0.82 1</ambient>
+            <diffuse>0.03 0.20 1.0 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+    <model name="second_fork_green_diagonal">
+      <static>true</static>
+      <pose>2.05 -0.25 0.056 0 0 -0.4636</pose>
+      <link name="line">
+        <visual name="visual">
+          <geometry><box><size>1.118 0.22 0.012</size></box></geometry>
+          <material>
+            <ambient>0.02 0.50 0.20 1</ambient>
+            <diffuse>0.04 0.78 0.31 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+    <model name="second_fork_green_lane">
+      <static>true</static>
+      <pose>3.10 -0.50 0.056 0 0 0</pose>
+      <link name="line">
+        <visual name="visual">
+          <geometry><box><size>1.10 0.22 0.012</size></box></geometry>
+          <material>
+            <ambient>0.02 0.50 0.20 1</ambient>
+            <diffuse>0.04 0.78 0.31 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+    <model name="second_fork_purple_diagonal">
+      <static>true</static>
+      <pose>2.05 0.25 0.056 0 0 0.4636</pose>
+      <link name="line">
+        <visual name="visual">
+          <geometry><box><size>1.118 0.22 0.012</size></box></geometry>
+          <material>
+            <ambient>0.46 0.04 0.68 1</ambient>
+            <diffuse>0.72 0.08 0.96 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+    <model name="second_fork_purple_lane">
+      <static>true</static>
+      <pose>3.10 0.50 0.056 0 0 0</pose>
+      <link name="line">
+        <visual name="visual">
+          <geometry><box><size>1.10 0.22 0.012</size></box></geometry>
+          <material>
+            <ambient>0.46 0.04 0.68 1</ambient>
+            <diffuse>0.72 0.08 0.96 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+    <model name="second_fork_red_diagonal">
+      <static>true</static>
+      <pose>2.05 0.75 0.056 0 0 0.9828</pose>
+      <link name="line">
+        <visual name="visual">
+          <geometry><box><size>1.803 0.22 0.012</size></box></geometry>
+          <material>
+            <ambient>0.72 0.03 0.04 1</ambient>
+            <diffuse>0.96 0.06 0.08 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+    <model name="second_fork_red_lane">
+      <static>true</static>
+      <pose>3.10 1.50 0.056 0 0 0</pose>
+      <link name="line">
+        <visual name="visual">
+          <geometry><box><size>1.10 0.22 0.012</size></box></geometry>
+          <material>
+            <ambient>0.72 0.03 0.04 1</ambient>
+            <diffuse>0.96 0.06 0.08 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <model name="destination_counters">
+      <static>true</static>
+      <link name="blue">
+        <pose>4.15 -1.50 0.45 0 0 0</pose>
+        <collision name="collision">
+          <geometry><box><size>0.55 0.55 0.9</size></box></geometry>
+        </collision>
+        <visual name="visual">
+          <geometry><box><size>0.55 0.55 0.9</size></box></geometry>
+          <material><diffuse>0.03 0.20 1.0 1</diffuse></material>
+        </visual>
+      </link>
+      <link name="green">
+        <pose>4.15 -0.50 0.45 0 0 0</pose>
+        <collision name="collision">
+          <geometry><box><size>0.55 0.55 0.9</size></box></geometry>
+        </collision>
+        <visual name="visual">
+          <geometry><box><size>0.55 0.55 0.9</size></box></geometry>
+          <material><diffuse>0.04 0.78 0.31 1</diffuse></material>
+        </visual>
+      </link>
+      <link name="purple">
+        <pose>4.15 0.50 0.45 0 0 0</pose>
+        <collision name="collision">
+          <geometry><box><size>0.55 0.55 0.9</size></box></geometry>
+        </collision>
+        <visual name="visual">
+          <geometry><box><size>0.55 0.55 0.9</size></box></geometry>
+          <material><diffuse>0.72 0.08 0.96 1</diffuse></material>
+        </visual>
+      </link>
+      <link name="red">
+        <pose>4.15 1.50 0.45 0 0 0</pose>
+        <collision name="collision">
+          <geometry><box><size>0.55 0.55 0.9</size></box></geometry>
+        </collision>
+        <visual name="visual">
+          <geometry><box><size>0.55 0.55 0.9</size></box></geometry>
+          <material><diffuse>0.96 0.06 0.08 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+
+    <model name="lab_obstacle">
+      <static>false</static>
+      <allow_auto_disable>false</allow_auto_disable>
+      <pose>0 2.2 0.35 0 0 0</pose>
+      <link name="obstacle">
+        <inertial>
+          <mass>25.0</mass>
+          <inertia>
+            <ixx>1.4242</ixx><iyy>1.4242</iyy><izz>0.8067</izz>
+            <ixy>0</ixy><ixz>0</ixz><iyz>0</iyz>
+          </inertia>
+        </inertial>
+        <collision name="collision">
+          <geometry><box><size>0.44 0.44 0.70</size></box></geometry>
+        </collision>
+        <visual name="visual">
+          <geometry><box><size>0.44 0.44 0.70</size></box></geometry>
+          <material><diffuse>0.12 0.12 0.13 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+
+    <model name="lab_evidence_camera">
+      <static>true</static>
+      <pose>0.45 0 7.8 0 1.5708 0</pose>
+      <link name="camera_link">
+        <sensor name="overhead_camera" type="camera">
+          <topic>/flyto/evidence/overhead</topic>
+          <update_rate>8</update_rate>
+          <always_on>true</always_on>
+          <visualize>false</visualize>
+          <camera>
+            <horizontal_fov>1.22</horizontal_fov>
+            <image>
+              <width>1280</width><height>720</height><format>R8G8B8</format>
+            </image>
+            <clip><near>0.1</near><far>20.0</far></clip>
+          </camera>
+        </sensor>
+      </link>
+    </model>
+    <model name="corridor_camera_a">
+      <static>true</static>
+      <pose>-0.65 -2.15 2.75 0 1.10 1.5708</pose>
+      <link name="camera_link">
+        <sensor name="zone_a_camera" type="camera">
+          <topic>/flyto/evidence/zone_a</topic>
+          <update_rate>8</update_rate>
+          <always_on>true</always_on>
+          <visualize>false</visualize>
+          <camera>
+            <horizontal_fov>1.50</horizontal_fov>
+            <image>
+              <width>960</width><height>540</height><format>R8G8B8</format>
+            </image>
+            <clip><near>0.1</near><far>12.0</far></clip>
+          </camera>
+        </sensor>
+      </link>
+    </model>
+    <model name="corridor_camera_b">
+      <static>true</static>
+      <pose>2.05 -2.15 2.75 0 1.10 1.5708</pose>
+      <link name="camera_link">
+        <sensor name="zone_b_camera" type="camera">
+          <topic>/flyto/evidence/zone_b</topic>
+          <update_rate>8</update_rate>
+          <always_on>true</always_on>
+          <visualize>false</visualize>
+          <camera>
+            <horizontal_fov>1.50</horizontal_fov>
+            <image>
+              <width>960</width><height>540</height><format>R8G8B8</format>
+            </image>
+            <clip><near>0.1</near><far>12.0</far></clip>
+          </camera>
+        </sensor>
+      </link>
+    </model>
+
+    <include>
+      <uri>model://flyto_rover</uri>
+      <name>flyto_rover</name>
+      <pose>-2.15 0 0 0 0 0</pose>
+    </include>
+  </world>
+</sdf>

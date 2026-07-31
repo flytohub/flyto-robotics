@@ -1,0 +1,366 @@
+{
+  "contract_version": "flyto.robotics.route-scenario.v1",
+  "scenario_id": "ai4all.branching-careflow.v1",
+  "goal_frame": {
+    "contract_version": "flyto.goal-frame.v1",
+    "intent_ids": [
+      "human.approval.request",
+      "human.approval.resume",
+      "route.navigate.location",
+      "safety.stop"
+    ],
+    "required_affordances": [
+      "human.request_decision",
+      "human.resume_after_approval",
+      "motion.navigate.semantic_location",
+      "safety.stop.motion"
+    ],
+    "desired_effects": [
+      "human.decision.requested",
+      "robot.location.reached",
+      "robot.motion.stopped",
+      "workflow.resumed"
+    ],
+    "trigger_events": [
+      "human.approved",
+      "resource.health.changed",
+      "obstacle.detected"
+    ],
+    "constraints": [
+      {
+        "key": "route.candidate.sequence",
+          "operator": "select_one",
+          "value": "highest_scoring_executable"
+        },
+        {
+          "key": "delivery.approval.required",
+          "operator": "equals",
+          "value": true
+        }
+      ]
+  },
+  "routing_context": {
+    "robot_model": "flyto_rover",
+    "available_observations": [
+      "human_decision",
+      "minimum_range",
+      "odometry"
+    ],
+    "available_resources": [
+      "base_controller",
+      "operator_channel",
+      "semantic_map"
+    ],
+    "granted_permissions": ["location.read"],
+    "enabled_capabilities": [
+      "ask_human",
+      "navigate_to_location",
+      "resume",
+      "safe_stop"
+    ]
+  },
+  "graph": {
+    "contract_version": "flyto.robotics.route-graph.v1",
+    "graph_id": "ai4all.yellow-orange.four-way.v1",
+    "revision": 1,
+    "routes": [
+      {
+        "route_id": "yellow-purple",
+        "location_ids": [
+          "route.yellow.entry",
+          "route.merge.center",
+          "route.purple.branch",
+          "destination.purple"
+        ],
+        "base_score": 100,
+        "reason_codes": ["shortest", "destination_match"],
+        "attributes": {
+          "first_branch": "yellow",
+          "second_branch": "purple",
+          "distance_m": 6.1,
+          "expected_seconds": 31
+        },
+        "dependencies": [
+          {
+            "resource_id": "camera.corridor.b",
+            "contract": {
+              "safety_impact": "stop",
+              "task_impact": "invalidate",
+              "evidence_requirement": "required",
+              "substitution_mode": "none",
+              "minimum_confidence": 0.9,
+              "max_age_seconds": 2,
+              "recovery_timeout_seconds": 0,
+              "retry_limit": 0,
+              "active_phases": ["preflight", "runtime"]
+            }
+          }
+        ]
+      },
+      {
+        "route_id": "yellow-green",
+        "location_ids": [
+          "route.yellow.entry",
+          "route.merge.center",
+          "route.green.branch",
+          "destination.green"
+        ],
+        "base_score": 96,
+        "reason_codes": ["short_distance"],
+        "attributes": {
+          "first_branch": "yellow",
+          "second_branch": "green",
+          "distance_m": 5.9,
+          "expected_seconds": 30
+        },
+        "dependencies": [
+          {
+            "resource_id": "camera.corridor.b",
+            "contract": {
+              "safety_impact": "stop",
+              "task_impact": "invalidate",
+              "evidence_requirement": "required",
+              "substitution_mode": "none",
+              "minimum_confidence": 0.9,
+              "max_age_seconds": 2,
+              "recovery_timeout_seconds": 0,
+              "retry_limit": 0,
+              "active_phases": ["preflight", "runtime"]
+            }
+          }
+        ]
+      },
+      {
+        "route_id": "yellow-blue",
+        "location_ids": [
+          "route.yellow.entry",
+          "route.merge.center",
+          "route.blue.branch",
+          "destination.blue"
+        ],
+        "base_score": 93,
+        "reason_codes": ["low_congestion"],
+        "attributes": {
+          "first_branch": "yellow",
+          "second_branch": "blue",
+          "distance_m": 6.4,
+          "expected_seconds": 34
+        },
+        "dependencies": [
+          {
+            "resource_id": "camera.corridor.b",
+            "contract": {
+              "safety_impact": "stop",
+              "task_impact": "invalidate",
+              "evidence_requirement": "required",
+              "substitution_mode": "none",
+              "minimum_confidence": 0.9,
+              "max_age_seconds": 2,
+              "recovery_timeout_seconds": 0,
+              "retry_limit": 0,
+              "active_phases": ["preflight", "runtime"]
+            }
+          }
+        ]
+      },
+      {
+        "route_id": "yellow-red",
+        "location_ids": [
+          "route.yellow.entry",
+          "route.merge.center",
+          "route.red.branch",
+          "destination.red"
+        ],
+        "base_score": 91,
+        "reason_codes": ["isolation_zone"],
+        "attributes": {
+          "first_branch": "yellow",
+          "second_branch": "red",
+          "distance_m": 6.7,
+          "expected_seconds": 36
+        },
+        "dependencies": [
+          {
+            "resource_id": "camera.corridor.b",
+            "contract": {
+              "safety_impact": "stop",
+              "task_impact": "invalidate",
+              "evidence_requirement": "required",
+              "substitution_mode": "none",
+              "minimum_confidence": 0.9,
+              "max_age_seconds": 2,
+              "recovery_timeout_seconds": 0,
+              "retry_limit": 0,
+              "active_phases": ["preflight", "runtime"]
+            }
+          }
+        ]
+      },
+      {
+        "route_id": "orange-purple",
+        "location_ids": [
+          "route.orange.entry",
+          "route.merge.center",
+          "route.purple.branch",
+          "destination.purple"
+        ],
+        "base_score": 92,
+        "reason_codes": ["destination_match", "camera_substitutable"],
+        "attributes": {
+          "first_branch": "orange",
+          "second_branch": "purple",
+          "distance_m": 6.5,
+          "expected_seconds": 34
+        },
+        "dependencies": [
+          {
+            "resource_id": "camera.floor1.overhead",
+            "contract": {
+              "safety_impact": "none",
+              "task_impact": "degrade",
+              "evidence_requirement": "record",
+              "substitution_mode": "any_healthy",
+              "minimum_confidence": 0.5,
+              "max_age_seconds": 10,
+              "recovery_timeout_seconds": 2,
+              "retry_limit": 1,
+              "active_phases": ["preflight", "runtime"]
+            }
+          }
+        ]
+      },
+      {
+        "route_id": "orange-green",
+        "location_ids": [
+          "route.orange.entry",
+          "route.merge.center",
+          "route.green.branch",
+          "destination.green"
+        ],
+        "base_score": 88,
+        "reason_codes": ["camera_substitutable"],
+        "attributes": {
+          "first_branch": "orange",
+          "second_branch": "green",
+          "distance_m": 6.3,
+          "expected_seconds": 33
+        },
+        "dependencies": [
+          {
+            "resource_id": "camera.floor1.overhead",
+            "contract": {
+              "safety_impact": "none",
+              "task_impact": "degrade",
+              "evidence_requirement": "record",
+              "substitution_mode": "any_healthy",
+              "minimum_confidence": 0.5,
+              "max_age_seconds": 10,
+              "recovery_timeout_seconds": 2,
+              "retry_limit": 1,
+              "active_phases": ["preflight", "runtime"]
+            }
+          }
+        ]
+      },
+      {
+        "route_id": "orange-blue",
+        "location_ids": [
+          "route.orange.entry",
+          "route.merge.center",
+          "route.blue.branch",
+          "destination.blue"
+        ],
+        "base_score": 85,
+        "reason_codes": ["low_congestion", "camera_substitutable"],
+        "attributes": {
+          "first_branch": "orange",
+          "second_branch": "blue",
+          "distance_m": 6.8,
+          "expected_seconds": 37
+        },
+        "dependencies": [
+          {
+            "resource_id": "camera.floor1.overhead",
+            "contract": {
+              "safety_impact": "none",
+              "task_impact": "degrade",
+              "evidence_requirement": "record",
+              "substitution_mode": "any_healthy",
+              "minimum_confidence": 0.5,
+              "max_age_seconds": 10,
+              "recovery_timeout_seconds": 2,
+              "retry_limit": 1,
+              "active_phases": ["preflight", "runtime"]
+            }
+          }
+        ]
+      },
+      {
+        "route_id": "orange-red",
+        "location_ids": [
+          "route.orange.entry",
+          "route.merge.center",
+          "route.red.branch",
+          "destination.red"
+        ],
+        "base_score": 83,
+        "reason_codes": ["isolation_zone", "camera_substitutable"],
+        "attributes": {
+          "first_branch": "orange",
+          "second_branch": "red",
+          "distance_m": 7.1,
+          "expected_seconds": 39
+        },
+        "dependencies": [
+          {
+            "resource_id": "camera.floor1.overhead",
+            "contract": {
+              "safety_impact": "none",
+              "task_impact": "degrade",
+              "evidence_requirement": "record",
+              "substitution_mode": "any_healthy",
+              "minimum_confidence": 0.5,
+              "max_age_seconds": 10,
+              "recovery_timeout_seconds": 2,
+              "retry_limit": 1,
+              "active_phases": ["preflight", "runtime"]
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "initial_resource_observations": {
+    "camera.corridor.b": {
+      "healthy": true,
+      "confidence": 0.97,
+      "observation_age_seconds": 0.2,
+      "fallback_available": false,
+      "fallback_equivalent": false,
+      "fallback_validated": false,
+      "evidence_present": true
+    },
+    "camera.floor1.overhead": {
+      "healthy": true,
+      "confidence": 0.91,
+      "observation_age_seconds": 0.4,
+      "fallback_available": true,
+      "fallback_equivalent": false,
+      "fallback_validated": true,
+      "evidence_present": true
+    }
+  },
+  "preflight_change": {
+    "resource_id": "camera.corridor.b",
+    "reason": "camera_b_health_check_failed_before_execution",
+    "observation": {
+      "healthy": false,
+      "confidence": 0.08,
+      "observation_age_seconds": 0.1,
+      "fallback_available": false,
+      "fallback_equivalent": false,
+      "fallback_validated": false,
+      "evidence_present": true
+    }
+  }
+}
