@@ -52,6 +52,11 @@ from .qr_confirmation import (
 )
 from .resource_binding import load_resource_plan
 from .ros2_execution import Ros2ExecutionError, authorize_ros2_execution
+from .ros2_execution_evidence import (
+    Ros2ExecutionEvidenceError,
+    evaluate_closed_loop_evidence,
+    parse_ros2_execution_evidence,
+)
 from .ros2_pairing import (
     Ros2PairingError,
     load_ros2_adapter_manifest,
@@ -108,6 +113,7 @@ def validate_assets(root: Path = PROJECT_ROOT) -> list[str]:
         root / "worlds/hospital-logistics.sdf",
         root / "worlds/atomic-color-route.sdf",
         root / "worlds/atomic-color-route-lab.sdf",
+        root / "worlds/nav2-closed-loop.sdf",
     ]
     for path in xml_paths:
         ET.parse(path)
@@ -136,6 +142,7 @@ def validate_assets(root: Path = PROJECT_ROOT) -> list[str]:
         root / "contracts/ros2-adapter-manifest-v1.schema.json",
         root / "contracts/ros2-runtime-snapshot-v1.schema.json",
         root / "contracts/ros2-execution-grant-v1.schema.json",
+        root / "contracts/ros2-execution-evidence-v1.schema.json",
     ]
     for path in json_paths:
         decoded = _load_json(path)
@@ -203,12 +210,32 @@ def validate_assets(root: Path = PROJECT_ROOT) -> list[str]:
         "/flyto/camera/image",
         "/flyto/evidence/overhead",
         "/flyto/ground_truth",
+        "/tf",
         "ros_type_name",
         "gz_type_name",
     ):
         if required not in bridge:
             raise ValueError(f"bridge.yaml is missing {required}")
     checked.append("config/bridge.yaml")
+
+    nav2_params = (root / "config/nav2_params.yaml").read_text(encoding="utf-8")
+    for required in ("bt_navigator:", "controller_server:", "planner_server:"):
+        if required not in nav2_params:
+            raise ValueError(f"nav2_params.yaml is missing {required}")
+    checked.append("config/nav2_params.yaml")
+    map_yaml = (root / "maps/nav2_lab.yaml").read_text(encoding="utf-8")
+    for required in ("image: nav2_lab.pgm", "resolution:", "origin:"):
+        if required not in map_yaml:
+            raise ValueError(f"nav2_lab.yaml is missing {required}")
+    checked.append("maps/nav2_lab.yaml")
+    pgm_lines = [
+        line for line in (root / "maps/nav2_lab.pgm").read_text().splitlines()
+        if line and not line.startswith("#")
+    ]
+    pgm_tokens = " ".join(pgm_lines).split()
+    if pgm_tokens[:4] != ["P2", "20", "20", "255"] or len(pgm_tokens[4:]) != 400:
+        raise ValueError("nav2_lab.pgm must be a complete 20 by 20 P2 map")
+    checked.append("maps/nav2_lab.pgm")
 
     launch_path = root / "launch/hospital_demo.launch.py"
     ai_launch_path = root / "launch/atomic_ai_demo.launch.py"
@@ -218,6 +245,7 @@ def validate_assets(root: Path = PROJECT_ROOT) -> list[str]:
     medication_showcase_launch_path = (
         root / "launch/ai4all_medication_showcase.launch.py"
     )
+    nav2_closed_loop_launch_path = root / "launch/nav2_closed_loop.launch.py"
     for path in (
         launch_path,
         ai_launch_path,
@@ -225,6 +253,7 @@ def validate_assets(root: Path = PROJECT_ROOT) -> list[str]:
         shortcut_launch_path,
         showcase_launch_path,
         medication_showcase_launch_path,
+        nav2_closed_loop_launch_path,
     ):
         compile(path.read_text(encoding="utf-8"), str(path), "exec")
         checked.append(str(path.relative_to(root)))
@@ -578,6 +607,17 @@ def _parser() -> argparse.ArgumentParser:
     )
     authorize_execution.add_argument("--output", type=Path)
 
+    verify_execution = subcommands.add_parser(
+        "verify-ros2-execution-evidence",
+        help="verify one redacted real-action closed-loop evidence document",
+    )
+    verify_execution.add_argument("--evidence", required=True, type=Path)
+    verify_execution.add_argument(
+        "--scenario",
+        required=True,
+        choices=("success", "cancel", "emergency_stop"),
+    )
+
     ros = subcommands.add_parser("run-ros", help="run the ROS 2 mission adapter")
     ros.add_argument("--job", required=True, type=Path)
     ros.add_argument("--result", required=True, type=Path)
@@ -849,6 +889,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                 write_json_atomic(args.output, grant)
             print(json.dumps(grant, ensure_ascii=False, sort_keys=True))
             return 0
+        if args.command == "verify-ros2-execution-evidence":
+            evidence = parse_ros2_execution_evidence(_load_json(args.evidence))
+            verdict = evaluate_closed_loop_evidence(
+                evidence,
+                expected_scenario=args.scenario,
+            )
+            print(json.dumps(verdict, ensure_ascii=False, sort_keys=True))
+            return 0 if verdict["passed"] is True else 6
         if args.command == "run-ros":
             from .ros2_node import run
 
@@ -864,6 +912,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         QRConfirmationValidationError,
         Ros2PairingError,
         Ros2ExecutionError,
+        Ros2ExecutionEvidenceError,
         JobValidationError,
         PlanValidationError,
         OSError,

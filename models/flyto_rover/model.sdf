@@ -282,6 +282,7 @@
       </visual>
       <sensor name="front_lidar" type="gpu_lidar">
         <topic>/flyto/scan</topic>
+        <gz_frame_id>lidar_link</gz_frame_id>
         <update_rate>10</update_rate>
         <always_on>true</always_on>
         <visualize>true</visualize>

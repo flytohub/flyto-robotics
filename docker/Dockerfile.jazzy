@@ -8,10 +8,13 @@ RUN apt-get update \
         python3-pil \
         ros-jazzy-lifecycle-msgs \
         ros-jazzy-nav2-msgs \
+        ros-jazzy-navigation2 \
+        ros-jazzy-nav2-bringup \
         ros-jazzy-ros-gz-bridge \
         ros-jazzy-ros-gz-sim \
         ros-jazzy-rosidl-runtime-py \
         ros-jazzy-std-srvs \
+        ros-jazzy-tf2-ros \
         xauth \
         xdotool \
         xvfb \

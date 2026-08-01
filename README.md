@@ -319,6 +319,37 @@ python3 -m flyto_robotics.cli authorize-ros2-execution \
   --at 2026-08-01T10:00:00Z
 ```
 
+The final closed loop runs the same semantic contract through a real Nav2
+`NavigateToPose` Action and the Gazebo rover. AI selects only a registered
+location ID. The trusted adapter resolves its pose after checking the live ROS
+graph and issuing the short-lived grant. A separate ROS node owns the latched
+emergency stop and is the only node allowed to publish actuator velocity. It
+forwards authorized Nav2 commands while reset and continuously publishes zero
+velocity while stopped.
+
+```bash
+make nav2-closed-loop
+```
+
+This rebuilds the Jazzy/Harmonic image when full Navigation2 is missing, then
+runs three isolated headless launches: successful navigation, an accepted goal
+that is canceled after measured displacement, and an accepted goal canceled by
+the external emergency-stop service. Every run must observe Action feedback,
+real odometry movement, the expected terminal result, and a content-addressed
+redacted evidence document. Cancellation and emergency-stop runs also wait for
+post-stop odometry and fail if the rover drifts more than 5 cm. Replay one
+document with:
+
+```bash
+python3 -m flyto_robotics.cli verify-ros2-execution-evidence \
+  --evidence results/nav2-closed-loop/<run>/success.json \
+  --scenario success
+```
+
+The evidence binds the resource plan, Space, robot, adapter, capability, live
+runtime and grant snapshots without exposing action names, message types or
+velocity commands.
+
 ```bash
 export FLYTO_ROBOTICS_PLANNER_URL=https://planner.example.com/v1/robot-plan
 export FLYTO_ROBOTICS_PLANNER_TOKEN=...
