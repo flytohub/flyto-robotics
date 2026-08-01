@@ -4,6 +4,13 @@ All notable project changes are recorded here.
 
 ## Unreleased
 
+- Added a monotonic, fail-safe ROS sensor startup gate: odometry, LiDAR, and
+  camera samples must remain fresh for one continuous second before the first
+  control command. Bootstrap samples from an older Gazebo generation now keep
+  velocity at zero; required sensor loss after motion still fails immediately.
+- Upgraded the AI4ALL GUI capture to a self-contained 1920×1080 desktop with a
+  CJK-safe live evidence panel, a hospital trolley obstacle, independent
+  command-velocity stop/resume evidence, and event-bound story narration.
 - Added a detachable Robot MCP stdio adapter with strict protocol negotiation,
   semantic capability discovery, bounded planner requests, plan validation,
   and real deterministic-controller dry runs. No raw actuator, ROS topic,

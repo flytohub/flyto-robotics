@@ -142,6 +142,22 @@
   mismatch; v3 followed the visible branch but correctly stopped near the
   counter and timed out. Later runs added QR approval, replay protection, and
   the final evidence presentation. Only v7 is currently accepted.
+- The final self-contained medication-handoff GUI run completed on 2026-08-01
+  under `results/ai4all-showcase/medication-handoff-gui-v16-final/`:
+  - ROS 2/Gazebo finished with process status 0; the lab report passed and the
+    independent showcase evaluator passed 22/22 checks;
+  - driver evidence v2 independently observed motion before the trolley,
+    LiDAR stop at 0.3686 m with zero commanded velocity, and forward motion
+    resuming after clearance;
+  - the synchronized evidence panel recorded every trolley, item, recipient,
+    unlock, and completion state as true in the same 1920×1080 raw recording;
+  - the raw GUI video is 96.9 seconds and 2,907 frames; the narrated hospital
+    story is 101.533 seconds with H.264 video and AAC audio, and the engineering
+    verification video is 87.533 seconds of H.264;
+  - story and verification SHA-256 values are respectively
+    `cba549cda1c84c00055b9fdbfa75c74a187050948d26fbc9219168888767c7fe`
+    and
+    `386641aae0f96e6837c883b6e44816f9e16373e345bf8cc17b7c447d531dd8f0`.
 - Deterministic CareFlow soak completed on 2026-07-29:
   - 50/50 runs passed;
   - all runs produced one normalized evidence fingerprint;
@@ -160,6 +176,9 @@
 - Headless Gazebo's rendering server may need SIGTERM after the mission node
   finishes and launch begins shutdown. Mission completion, the zero-velocity
   stop, and atomic result write finish before shutdown.
+- A new Gazebo generation can briefly expose bootstrap sensor samples from an
+  older ROS graph. The mission adapter now uses monotonic freshness and a
+  one-second stabilization window before allowing its first nonzero command.
 
 ## Required before a competition field demo
 

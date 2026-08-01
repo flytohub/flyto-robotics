@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 from .capabilities import SAFE_TEXT
 from .contracts import RESULT_CONTRACT_VERSION, DeliveryJob, StationPose
@@ -21,6 +21,36 @@ from .workflow import (
 TERMINAL_STATES = frozenset(
     {MissionState.COMPLETED, MissionState.FAILED, MissionState.CANCELLED}
 )
+
+SensorGateDecision = Literal["wait", "ready", "fail_not_ready", "fail_stale"]
+
+
+def evaluate_sensor_gate(
+    *,
+    samples_present: bool,
+    oldest_sample_age: float,
+    ready_duration: float,
+    startup_elapsed: float,
+    startup_grace: float,
+    freshness_timeout: float,
+    stabilization_seconds: float,
+    control_started: bool,
+) -> SensorGateDecision:
+    """Classify sensor readiness without trusting bootstrap samples.
+
+    A ROS graph can briefly expose samples from a previous Gazebo generation
+    while a new world is still starting.  Before the first control command,
+    require all sensors to remain fresh for a bounded stabilization window.
+    Once control has started, any required sensor loss fails closed.
+    """
+    fresh = samples_present and oldest_sample_age <= freshness_timeout
+    if control_started:
+        return "ready" if fresh else "fail_stale"
+    if fresh and ready_duration >= stabilization_seconds:
+        return "ready"
+    if startup_elapsed > startup_grace:
+        return "fail_not_ready"
+    return "wait"
 
 
 @dataclass(frozen=True)

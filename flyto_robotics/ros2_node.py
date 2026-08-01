@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import time
 from collections.abc import Sequence
 from datetime import datetime, timezone
 from pathlib import Path
@@ -24,7 +25,7 @@ from .human_approval import (
     HumanDecisionValidationError,
 )
 from .line_perception import LineScene, detect_line_scene
-from .mission import MissionController, Pose2D
+from .mission import MissionController, Pose2D, evaluate_sensor_gate
 from .semantic_map import SemanticLocationStore, SemanticMapValidationError
 from .workflow import MissionState, PrimitiveKind
 
@@ -58,7 +59,8 @@ class MissionNode(Node):
         self.declare_parameter("semantic_map_file", "")
         self.declare_parameter("semantic_map_id", "")
         self.declare_parameter("odometry_timeout_seconds", 1.0)
-        self.declare_parameter("sensor_startup_grace_seconds", 5.0)
+        self.declare_parameter("sensor_startup_grace_seconds", 10.0)
+        self.declare_parameter("sensor_stabilization_seconds", 1.0)
         self.declare_parameter("gazebo_physics", False)
         self.declare_parameter("obstacle_injected", False)
         self.declare_parameter("human_approval_injected", False)
@@ -134,11 +136,14 @@ class MissionNode(Node):
                 approval_secret
             )
         self.started_at = self._now()
+        self.started_at_steady = time.monotonic()
         self.last_pose: Pose2D | None = None
         self.odometry_diagnostic_logged = False
         self.last_odometry_at: float | None = None
         self.last_scan_at: float | None = None
         self.last_image_at: float | None = None
+        self.sensors_ready_since_steady: float | None = None
+        self.control_started = False
         self.line_scene: LineScene | None = None
         self.camera_diagnostic_logged = False
         self.last_visible_colors: tuple[str, ...] = ()
@@ -185,7 +190,7 @@ class MissionNode(Node):
                 f"first odometry pose: x={position.x:.3f}, y={position.y:.3f}"
             )
             self.odometry_diagnostic_logged = True
-        self.last_odometry_at = self._now()
+        self.last_odometry_at = time.monotonic()
 
     def _on_scan(self, message: LaserScan) -> None:
         valid = [
@@ -194,7 +199,7 @@ class MissionNode(Node):
             if math.isfinite(value) and message.range_min <= value <= message.range_max
         ]
         self.minimum_range = min(valid, default=math.inf)
-        self.last_scan_at = self._now()
+        self.last_scan_at = time.monotonic()
 
     def _on_image(self, message: Image) -> None:
         try:
@@ -230,7 +235,7 @@ class MissionNode(Node):
                 + (", ".join(visible_colors) or "none")
             )
             self.last_visible_colors = visible_colors
-        self.last_image_at = self._now()
+        self.last_image_at = time.monotonic()
 
     def _on_human_decision(self, message: String) -> None:
         authenticator = self.human_decision_authenticator
@@ -313,37 +318,64 @@ class MissionNode(Node):
 
     def _control_tick(self) -> None:
         now = self._now()
+        steady_now = time.monotonic()
         grace = float(self.get_parameter("sensor_startup_grace_seconds").value)
         timeout = float(self.get_parameter("odometry_timeout_seconds").value)
+        stabilization = float(
+            self.get_parameter("sensor_stabilization_seconds").value
+        )
         camera_missing = self.requires_camera and self.last_image_at is None
-        if (
+        samples_present = not (
             self.last_pose is None
             or self.last_odometry_at is None
             or self.last_scan_at is None
             or camera_missing
-        ):
-            self._publish_stop()
-            if now - self.started_at > grace:
-                self.controller.fail("required_sensor_not_ready", now)
-                self._publish_new_events()
-                self._finish(now)
-            return
-        camera_stale = (
-            self.requires_camera
-            and self.last_image_at is not None
-            and now - self.last_image_at > timeout
         )
-        if (
-            now - self.last_odometry_at > timeout
-            or now - self.last_scan_at > timeout
-            or camera_stale
-        ):
+        sample_times = [self.last_odometry_at, self.last_scan_at]
+        if self.requires_camera:
+            sample_times.append(self.last_image_at)
+        oldest_sample_age = max(
+            (
+                steady_now - sample_time
+                for sample_time in sample_times
+                if sample_time is not None
+            ),
+            default=math.inf,
+        )
+        if not samples_present or oldest_sample_age > timeout:
+            self.sensors_ready_since_steady = None
+        elif self.sensors_ready_since_steady is None:
+            self.sensors_ready_since_steady = steady_now
+        ready_duration = (
+            steady_now - self.sensors_ready_since_steady
+            if self.sensors_ready_since_steady is not None
+            else 0.0
+        )
+        sensor_decision = evaluate_sensor_gate(
+            samples_present=samples_present,
+            oldest_sample_age=oldest_sample_age,
+            ready_duration=ready_duration,
+            startup_elapsed=steady_now - self.started_at_steady,
+            startup_grace=grace,
+            freshness_timeout=timeout,
+            stabilization_seconds=stabilization,
+            control_started=self.control_started,
+        )
+        if sensor_decision != "ready":
             self._publish_stop()
-            self.controller.fail("required_sensor_stale", now)
+            if sensor_decision == "wait":
+                return
+            reason = (
+                "required_sensor_stale"
+                if sensor_decision == "fail_stale"
+                else "required_sensor_not_ready"
+            )
+            self.controller.fail(reason, now)
             self._publish_new_events()
             self._finish(now)
             return
 
+        self.control_started = True
         command = self.controller.tick(
             self.last_pose,
             minimum_range=self.minimum_range,
