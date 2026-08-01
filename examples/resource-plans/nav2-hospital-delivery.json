@@ -1,0 +1,29 @@
+{
+  "schema_version": "ai-space-resource-plan.v1",
+  "request_id": "nav2-hospital-delivery-001",
+  "workflow_id": "hospital_delivery.v1",
+  "target_space_id": "gazebo-nav2-lab",
+  "fail_closed": true,
+  "executable": true,
+  "configured_endpoint_count": 1,
+  "requirement_count": 1,
+  "selected": [
+    {
+      "step": 1,
+      "requirement_id": "navigation",
+      "unit": 1,
+      "capability_id": "robotics.motion.navigate@1",
+      "lease_only": false,
+      "endpoint_id": "nav2-navigate-to-pose",
+      "resource_id": "flyto-rover-sim-001",
+      "adapter_id": "ros2.nav2.navigate_to_pose.v1",
+      "target_space_id": "gazebo-nav2-lab",
+      "score": 100,
+      "observation_sequence": "synthetic-resource:ready:1",
+      "require_confirmation": false
+    }
+  ],
+  "missing": [],
+  "excluded": [],
+  "snapshot": "43a9edfecd3c45fa20e0b73fd965d2f860b6ffc6ae5a8991eaec60c57ea3931f"
+}

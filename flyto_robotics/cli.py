@@ -51,6 +51,7 @@ from .qr_confirmation import (
     qr_token_sha256,
 )
 from .resource_binding import load_resource_plan
+from .ros2_execution import Ros2ExecutionError, authorize_ros2_execution
 from .ros2_pairing import (
     Ros2PairingError,
     load_ros2_adapter_manifest,
@@ -134,6 +135,7 @@ def validate_assets(root: Path = PROJECT_ROOT) -> list[str]:
         root / "contracts/soak-report-v1.schema.json",
         root / "contracts/ros2-adapter-manifest-v1.schema.json",
         root / "contracts/ros2-runtime-snapshot-v1.schema.json",
+        root / "contracts/ros2-execution-grant-v1.schema.json",
     ]
     for path in json_paths:
         decoded = _load_json(path)
@@ -558,6 +560,24 @@ def _parser() -> argparse.ArgumentParser:
         help="UTC observation time used only for deterministic evidence replay",
     )
 
+    authorize_execution = subcommands.add_parser(
+        "authorize-ros2-execution",
+        help="issue a short-lived grant for one exact semantic ROS 2 binding",
+    )
+    authorize_execution.add_argument("--manifest", required=True, type=Path)
+    authorize_execution.add_argument("--runtime", required=True, type=Path)
+    authorize_execution.add_argument("--resource-plan", required=True, type=Path)
+    authorize_execution.add_argument("--workflow", required=True)
+    authorize_execution.add_argument("--resource", required=True)
+    authorize_execution.add_argument("--capability", required=True)
+    authorize_execution.add_argument("--space", required=True)
+    authorize_execution.add_argument("--confirmed", action="store_true")
+    authorize_execution.add_argument(
+        "--at",
+        help="UTC authorization time used only for deterministic evidence replay",
+    )
+    authorize_execution.add_argument("--output", type=Path)
+
     ros = subcommands.add_parser("run-ros", help="run the ROS 2 mission adapter")
     ros.add_argument("--job", required=True, type=Path)
     ros.add_argument("--result", required=True, type=Path)
@@ -813,6 +833,22 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             print(json.dumps(report, ensure_ascii=False, sort_keys=True))
             return 0 if report["passed"] is True else 5
+        if args.command == "authorize-ros2-execution":
+            grant = authorize_ros2_execution(
+                resource_plan=load_resource_plan(args.resource_plan),
+                manifest=load_ros2_adapter_manifest(args.manifest),
+                runtime=load_ros2_runtime_snapshot(args.runtime),
+                workflow_id=args.workflow,
+                resource_id=args.resource,
+                capability_id=args.capability,
+                target_space_id=args.space,
+                confirmed=args.confirmed,
+                observed_at=(parse_observed_at(args.at, "--at") if args.at else None),
+            )
+            if args.output:
+                write_json_atomic(args.output, grant)
+            print(json.dumps(grant, ensure_ascii=False, sort_keys=True))
+            return 0
         if args.command == "run-ros":
             from .ros2_node import run
 
@@ -827,6 +863,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         HumanDecisionValidationError,
         QRConfirmationValidationError,
         Ros2PairingError,
+        Ros2ExecutionError,
         JobValidationError,
         PlanValidationError,
         OSError,

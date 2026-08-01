@@ -16,6 +16,7 @@ from flyto_robotics.mcp_server import (
 ROOT = Path(__file__).resolve().parents[1]
 JOB = ROOT / "examples/jobs/pharmacy-to-ward.json"
 PLAN = ROOT / "examples/plans/blue-yellow-purple.json"
+NAV2_RESOURCE_PLAN = ROOT / "examples/resource-plans/nav2-hospital-delivery.json"
 
 
 def _rpc(request_id: int, method: str, params: dict | None = None) -> dict:
@@ -96,6 +97,7 @@ def test_stdio_handshake_discovery_prepare_and_real_controller_dry_run() -> None
         "robot.mission.dry_run",
         "robot.ros2.profile",
         "robot.ros2.readiness.verify",
+        "robot.ros2.execution.authorize",
     }
     prepared = responses[2]["result"]["structuredContent"]
     assert prepared["request"]["planner_contract"] == "flyto.robotics.planner-request.v1"
@@ -217,3 +219,29 @@ def test_ros2_mcp_profile_is_redacted_and_readiness_is_content_addressed() -> No
         "robotics.motion.navigate@1",
         "robotics.motion.navigate_to_location@1",
     ]
+
+    authorization_response = handle_request(
+        _rpc(
+            12,
+            "tools/call",
+            {
+                "name": "robot.ros2.execution.authorize",
+                "arguments": {
+                    "resource_plan": json.loads(
+                        NAV2_RESOURCE_PLAN.read_text(encoding="utf-8")
+                    ),
+                    "runtime": runtime,
+                    "workflow_id": "hospital_delivery.v1",
+                    "resource_id": "flyto-rover-sim-001",
+                    "capability_id": "robotics.motion.navigate@1",
+                    "target_space_id": "gazebo-nav2-lab",
+                },
+            },
+        )
+    )
+    assert authorization_response is not None
+    grant = authorization_response["result"]["structuredContent"]
+    assert grant["contract_version"] == "flyto.robotics.ros2-execution-grant.v1"
+    encoded_grant = json.dumps(grant, sort_keys=True)
+    assert "/navigate_to_pose" not in encoded_grant
+    assert "nav2_msgs" not in encoded_grant

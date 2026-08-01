@@ -37,6 +37,7 @@ EXPECTED_TOOLS = {
     "robot.mission.dry_run",
     "robot.ros2.profile",
     "robot.ros2.readiness.verify",
+    "robot.ros2.execution.authorize",
 }
 GOALS = (
     "Hold position and finish with a verified safe stop",

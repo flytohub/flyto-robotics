@@ -283,6 +283,42 @@ python3 -m flyto_robotics.cli verify-ros2-pairing \
 the current UTC time. Robot MCP exposes only the redacted profile and readiness
 report through `robot.ros2.profile` and `robot.ros2.readiness.verify`.
 
+The stronger live path uses the `flyto-ros2-readiness-probe` ROS executable. It
+resolves the declared action or service type through ROS 2, waits for the real server,
+queries every managed node through `lifecycle_msgs/GetState`, and requires a
+`std_srvs/Trigger` emergency-stop service owned by a different ROS node. The
+persisted snapshot contains only redacted pass/fail facts and observation
+hashes; ROS graph names stay inside trusted deployment configuration.
+
+```bash
+ros2 run flyto_robotics flyto-ros2-readiness-probe \
+  --manifest examples/ros2-adapters/flyto2-standard.json \
+  --output results/ros2-runtime.json \
+  --deployment-mode hardware \
+  --emergency-stop-node /safety/emergency_supervisor \
+  --emergency-stop-service /safety/emergency_stop
+```
+
+Readiness alone does not authorize motion. `authorize-ros2-execution` also
+requires an immutable AI Space resource plan and binds its workflow, Space,
+robot, endpoint, semantic capability, adapter, graph evidence, and expiry into
+`flyto.robotics.ros2-execution-grant.v1`. The grant is safe to return through
+MCP because it contains no ROS action, service, or actuator values. Only the
+deterministic adapter can resolve the private graph target, and any expired or
+cross-context grant fails closed.
+
+```bash
+python3 -m flyto_robotics.cli authorize-ros2-execution \
+  --manifest examples/ros2-adapters/flyto2-standard.json \
+  --runtime examples/ros2-runtime/ready-sim.json \
+  --resource-plan examples/resource-plans/nav2-hospital-delivery.json \
+  --workflow hospital_delivery.v1 \
+  --resource flyto-rover-sim-001 \
+  --capability robotics.motion.navigate@1 \
+  --space gazebo-nav2-lab \
+  --at 2026-08-01T10:00:00Z
+```
+
 ```bash
 export FLYTO_ROBOTICS_PLANNER_URL=https://planner.example.com/v1/robot-plan
 export FLYTO_ROBOTICS_PLANNER_TOKEN=...

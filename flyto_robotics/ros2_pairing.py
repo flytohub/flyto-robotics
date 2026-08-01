@@ -10,7 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -339,6 +339,41 @@ def load_ros2_runtime_snapshot(path: str | Path) -> dict[str, Any]:
     """Load one bounded UTF-8 runtime snapshot."""
 
     return parse_ros2_runtime_snapshot(_load_json(path, "ROS 2 runtime snapshot"))
+
+
+def build_ros2_runtime_snapshot(
+    manifest: Mapping[str, Any],
+    *,
+    deployment_mode: str,
+    emergency_stop_ready: bool,
+    adapter_states: Sequence[Mapping[str, Any]],
+    observed_at: datetime | None = None,
+    max_age_seconds: int = 30,
+) -> dict[str, Any]:
+    """Build content-addressed runtime evidence from a trusted graph probe."""
+
+    validated_manifest = parse_ros2_adapter_manifest(manifest)
+    if deployment_mode not in PORTABLE_MODES:
+        raise Ros2PairingError("deployment_mode must be simulation or hardware")
+    if type(emergency_stop_ready) is not bool:
+        raise Ros2PairingError("emergency_stop_ready must be boolean")
+    _integer(max_age_seconds, "max_age_seconds", 1, 300)
+    timestamp = observed_at or datetime.now(timezone.utc)
+    if timestamp.tzinfo is None:
+        raise Ros2PairingError("observed_at must include a UTC offset")
+    runtime: dict[str, Any] = {
+        "contract_version": ROS2_RUNTIME_CONTRACT_VERSION,
+        "profile_id": validated_manifest["profile_id"],
+        "profile_snapshot": validated_manifest["snapshot"],
+        "robot_id": validated_manifest["robot_id"],
+        "deployment_mode": deployment_mode,
+        "observed_at": _format_datetime(timestamp),
+        "max_age_seconds": max_age_seconds,
+        "emergency_stop_ready": emergency_stop_ready,
+        "adapters": [dict(state) for state in adapter_states],
+    }
+    runtime["snapshot"] = _snapshot(runtime)
+    return parse_ros2_runtime_snapshot(runtime)
 
 
 def standard_ros2_adapter_manifest(robot_id: str) -> dict[str, Any]:

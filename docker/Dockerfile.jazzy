@@ -6,8 +6,12 @@ RUN apt-get update \
         fonts-noto-cjk \
         openbox \
         python3-pil \
+        ros-jazzy-lifecycle-msgs \
+        ros-jazzy-nav2-msgs \
         ros-jazzy-ros-gz-bridge \
         ros-jazzy-ros-gz-sim \
+        ros-jazzy-rosidl-runtime-py \
+        ros-jazzy-std-srvs \
         xauth \
         xdotool \
         xvfb \

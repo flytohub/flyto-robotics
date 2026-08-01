@@ -1,0 +1,69 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://flyto2.com/contracts/ros2-execution-grant-v1.schema.json",
+  "title": "Flyto2 ROS 2 Execution Grant v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract_version",
+    "grant_id",
+    "issued_at",
+    "expires_at",
+    "profile_id",
+    "robot_id",
+    "deployment_mode",
+    "workflow_id",
+    "target_space_id",
+    "endpoint_id",
+    "resource_id",
+    "adapter_id",
+    "capability_id",
+    "resource_plan_snapshot",
+    "profile_snapshot",
+    "runtime_snapshot",
+    "resource_observation_sequence",
+    "runtime_observation_sequence",
+    "require_confirmation",
+    "snapshot"
+  ],
+  "properties": {
+    "contract_version": {"const": "flyto.robotics.ros2-execution-grant.v1"},
+    "grant_id": {"$ref": "#/$defs/identifier"},
+    "issued_at": {"type": "string", "format": "date-time"},
+    "expires_at": {"type": "string", "format": "date-time"},
+    "profile_id": {"$ref": "#/$defs/identifier"},
+    "robot_id": {"$ref": "#/$defs/identifier"},
+    "deployment_mode": {"enum": ["simulation", "hardware"]},
+    "workflow_id": {"$ref": "#/$defs/identifier"},
+    "target_space_id": {"$ref": "#/$defs/identifier"},
+    "endpoint_id": {"$ref": "#/$defs/identifier"},
+    "resource_id": {"$ref": "#/$defs/identifier"},
+    "adapter_id": {"$ref": "#/$defs/identifier"},
+    "capability_id": {"$ref": "#/$defs/identifier"},
+    "resource_plan_snapshot": {"$ref": "#/$defs/snapshot"},
+    "profile_snapshot": {"$ref": "#/$defs/snapshot"},
+    "runtime_snapshot": {"$ref": "#/$defs/snapshot"},
+    "resource_observation_sequence": {
+      "type": ["string", "null"],
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "runtime_observation_sequence": {
+      "type": ["string", "null"],
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "require_confirmation": {"type": "boolean"},
+    "snapshot": {"$ref": "#/$defs/snapshot"}
+  },
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,191}$"
+    },
+    "snapshot": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  }
+}

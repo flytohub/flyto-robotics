@@ -1,6 +1,6 @@
 PYTHON ?= python3
 
-.PHONY: ai-dry-run ai4all-medication-showcase ai4all-showcase assets benchmark-robot-mcp careflow-dry-run dry-run facility-contract gazebo-lab gazebo-matrix gazebo-shortcut gazebo-video lab-contract lint ros2-pairing soak test verify
+.PHONY: ai-dry-run ai4all-medication-showcase ai4all-showcase assets benchmark-robot-mcp careflow-dry-run dry-run facility-contract gazebo-lab gazebo-matrix gazebo-shortcut gazebo-video lab-contract lint ros2-execution-grant ros2-pairing soak test verify
 
 lint:
 	$(PYTHON) -m ruff check .
@@ -48,6 +48,17 @@ ros2-pairing:
 		--runtime examples/ros2-runtime/ready-sim.json \
 		--at 2026-08-01T10:00:00Z
 
+ros2-execution-grant:
+	$(PYTHON) -m flyto_robotics.cli authorize-ros2-execution \
+		--manifest examples/ros2-adapters/flyto2-standard.json \
+		--runtime examples/ros2-runtime/ready-sim.json \
+		--resource-plan examples/resource-plans/nav2-hospital-delivery.json \
+		--workflow hospital_delivery.v1 \
+		--resource flyto-rover-sim-001 \
+		--capability robotics.motion.navigate@1 \
+		--space gazebo-nav2-lab \
+		--at 2026-08-01T10:00:00Z
+
 soak:
 	$(PYTHON) -m flyto_robotics.cli soak-plan \
 		--job examples/jobs/pharmacy-to-ward.json \
@@ -73,4 +84,4 @@ ai4all-showcase:
 ai4all-medication-showcase:
 	./scripts/run-ai4all-medication-showcase.sh
 
-verify: lint test assets dry-run ai-dry-run careflow-dry-run lab-contract facility-contract ros2-pairing
+verify: lint test assets dry-run ai-dry-run careflow-dry-run lab-contract facility-contract ros2-pairing ros2-execution-grant

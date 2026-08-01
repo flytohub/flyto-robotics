@@ -23,6 +23,7 @@ from .ai_planner import (
 from .capabilities import CapabilityValidationError, default_capability_registry
 from .cli import dry_run_plan
 from .contracts import JobValidationError, parse_job
+from .ros2_execution import authorize_ros2_execution
 from .ros2_pairing import (
     parse_ros2_runtime_snapshot,
     ros2_profile_summary,
@@ -33,7 +34,7 @@ from .semantic_map import SemanticMapValidationError
 
 PROTOCOL_VERSION = "2025-06-18"
 SERVER_NAME = "flyto2-robotics"
-SERVER_VERSION = "0.2.0"
+SERVER_VERSION = "0.3.0"
 MAX_REQUEST_BYTES = 512 * 1024
 MAX_ARGUMENT_BYTES = 384 * 1024
 MAX_OBSERVATION_ITEMS = 64
@@ -102,6 +103,27 @@ def tool_definitions() -> list[dict[str, Any]]:
             "Fail closed unless the standard semantic ROS 2 profile is ready.",
             {"runtime": object_schema},
             ["runtime"],
+        ),
+        _tool(
+            "robot.ros2.execution.authorize",
+            "Issue a short-lived grant for one pre-authorized semantic binding.",
+            {
+                "resource_plan": object_schema,
+                "runtime": object_schema,
+                "workflow_id": {"type": "string", "minLength": 1, "maxLength": 192},
+                "resource_id": {"type": "string", "minLength": 1, "maxLength": 192},
+                "capability_id": {"type": "string", "minLength": 1, "maxLength": 192},
+                "target_space_id": {"type": "string", "minLength": 1, "maxLength": 192},
+                "confirmed": {"type": "boolean"},
+            },
+            [
+                "resource_plan",
+                "runtime",
+                "workflow_id",
+                "resource_id",
+                "capability_id",
+                "target_space_id",
+            ],
         ),
     ]
 
@@ -247,6 +269,44 @@ def _ros2_readiness(arguments: dict[str, Any]) -> dict[str, Any]:
     return verify_ros2_pairing(manifest, runtime)
 
 
+def _ros2_authorize(arguments: dict[str, Any]) -> dict[str, Any]:
+    _exact_fields(
+        arguments,
+        allowed={
+            "resource_plan",
+            "runtime",
+            "workflow_id",
+            "resource_id",
+            "capability_id",
+            "target_space_id",
+            "confirmed",
+        },
+        required={
+            "resource_plan",
+            "runtime",
+            "workflow_id",
+            "resource_id",
+            "capability_id",
+            "target_space_id",
+        },
+    )
+    confirmed = arguments.get("confirmed", False)
+    if type(confirmed) is not bool:
+        raise ValueError("confirmed must be boolean")
+    runtime = parse_ros2_runtime_snapshot(arguments["runtime"])
+    manifest = standard_ros2_adapter_manifest(runtime["robot_id"])
+    return authorize_ros2_execution(
+        resource_plan=arguments["resource_plan"],
+        manifest=manifest,
+        runtime=runtime,
+        workflow_id=arguments["workflow_id"],
+        resource_id=arguments["resource_id"],
+        capability_id=arguments["capability_id"],
+        target_space_id=arguments["target_space_id"],
+        confirmed=confirmed,
+    )
+
+
 TOOLS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     "robot.capabilities.list": _capabilities,
     "robot.plan.prepare": _prepare,
@@ -254,6 +314,7 @@ TOOLS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     "robot.mission.dry_run": _dry_run,
     "robot.ros2.profile": _ros2_profile,
     "robot.ros2.readiness.verify": _ros2_readiness,
+    "robot.ros2.execution.authorize": _ros2_authorize,
 }
 
 
