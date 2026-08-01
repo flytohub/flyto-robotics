@@ -6,6 +6,11 @@ FILTER = ROOT / "video/ai4all-showcase-filter.txt"
 SUBTITLES = ROOT / "video/ai4all-showcase.ass"
 MEDICATION_FILTER = ROOT / "video/ai4all-medication-showcase-filter.txt"
 MEDICATION_SUBTITLES = ROOT / "video/ai4all-medication-showcase.ass"
+GUI_CAPTURE_SCRIPT = ROOT / "scripts/run-ai4all-gui-evidence.sh"
+VERIFICATION_RENDER_SCRIPT = ROOT / "scripts/render-ai4all-verification-video.sh"
+WORLD = ROOT / "worlds/ai4all-branching-route.sdf"
+ROVER = ROOT / "models/flyto_rover/model.sdf"
+SHOWCASE_DOC = ROOT / "docs/AI4ALL_SHOWCASE.md"
 
 
 def test_video_composes_both_real_gazebo_camera_streams() -> None:
@@ -57,3 +62,85 @@ def test_medication_video_exposes_fail_closed_handoff_proof() -> None:
     assert "patient-12 通過 → 才能解鎖" in copy
     assert "21 / 21" in copy
     assert "28 / 28" in copy
+
+
+def test_gui_evidence_records_a_real_gazebo_window_with_the_same_contract() -> None:
+    script = GUI_CAPTURE_SCRIPT.read_text(encoding="utf-8")
+
+    assert "gazebo-gui.mp4" in script
+    assert "x11grab" in script
+    assert "Xvfb" in script
+    assert "headless:=false" in script
+    assert "validated-plan.json" in script
+    assert "planning-session.json" in script
+    assert "driver-manifest.json" in script
+    assert "mission-result.json" in script
+    assert "gazebo-window-geometry.env" in script
+    assert "ffprobe" in script
+    assert "sha256sum" in script
+
+
+def test_verification_video_keeps_one_continuous_gazebo_timeline() -> None:
+    script = VERIFICATION_RENDER_SCRIPT.read_text(encoding="utf-8")
+
+    assert "gazebo-gui.mp4" in script
+    assert "driver-manifest.json" in script
+    assert "mission-result.json" in script
+    assert "planning-session.json" in script
+    assert "validated-plan.json" in script
+    assert "verification-events.ass" in script
+    assert "gazebo-window-geometry.env" in script
+    assert "verification-video-probe.json" in script
+    assert "ffprobe" in script
+    assert "sha256" in script
+    assert "xfade" not in script
+    assert "zoompan" not in script
+    assert "-loop 1" not in script
+
+
+def test_verification_video_exposes_actual_evidence_log_not_only_narration() -> None:
+    script = VERIFICATION_RENDER_SCRIPT.read_text(encoding="utf-8")
+
+    assert "Style: EvidenceLog" in script
+    assert "實際規劃 LOG" in script
+    assert "實際安全 LOG" in script
+    assert "實際交付 LOG" in script
+    assert "mission-result.json + driver-manifest.json" in script
+    assert "minimum_range" in script
+    assert "container_locked" in script
+    assert "原始未裁切 Gazebo GUI" in script
+
+
+def test_hospital_scene_is_self_contained_and_visually_explains_the_mission() -> None:
+    world = WORLD.read_text(encoding="utf-8")
+    rover = ROVER.read_text(encoding="utf-8")
+
+    required_world_models = (
+        'name="hospital_corridor_shell"',
+        'name="nurse_station"',
+        'name="camera_a_marker"',
+        'name="camera_b_marker"',
+        'name="medication_handoff_zone"',
+        'name="Flyto2 Gazebo 3D View"',
+        "<camera_pose>0.45 -6.5 6.2 0 0.72 1.5708</camera_pose>",
+    )
+    required_rover_visuals = (
+        'name="locked_medication_container"',
+        'name="status_light"',
+        'name="camera_housing"',
+    )
+    assert all(marker in world for marker in required_world_models)
+    assert all(marker in rover for marker in required_rover_visuals)
+    assert "http://" not in world
+    assert "https://" not in world
+    assert "http://" not in rover
+    assert "https://" not in rover
+
+
+def test_showcase_documentation_distinguishes_verification_from_promotion() -> None:
+    documentation = SHOWCASE_DOC.read_text(encoding="utf-8")
+
+    assert "run-ai4all-gui-evidence.sh" in documentation
+    assert "render-ai4all-verification-video.sh" in documentation
+    assert "連續時間線" in documentation
+    assert "不使用生成式影像" in documentation

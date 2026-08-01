@@ -170,6 +170,48 @@ checkpoint、錯誤收件者、正確收件者、解鎖與完成字幕的開始�
 舊驗收條件、座標框架錯置與終點安全距離問題；後續回合補齊 QR 核准、
 重播防護與影片資訊，只有 v7 是目前接受的完整證據。
 
+## 連續 Gazebo GUI 驗證影片
+
+評審用驗證片以真實 Gazebo Sim 視窗為主畫面，保留場景、機器人、動態
+障礙、時間與 Gazebo GUI 的同一段連續時間線。它不使用生成式影像，也
+不以投影片、重畫路線或交叉轉場代替模擬。字幕只從該回合的
+`planning-session.json`、`validated-plan.json`、`mission-result.json` 與
+`driver-manifest.json` 產生，因此顯示的模型、候選數、路線、plan hash、
+障礙停止、交付拒絕與解鎖時間都有原始 JSON 可核對。
+
+先用已通過完整驗收的回合作為不可變規劃輸入，再啟動一次有視窗的相同
+Gazebo 任務：
+
+```bash
+scripts/run-ai4all-gui-evidence.sh \
+  results/ai4all-showcase/medication-handoff-live-v8
+```
+
+腳本使用 Xvfb 錄製完整 Gazebo GUI，不抓取預先輸出的圖片序列。它會將
+原回合的 attested plan 與 planning session 複製到新的未追蹤回合，重新
+執行 ROS 2／Gazebo，產生新的 mission、driver、lab 與 showcase 報告；
+任何必要檔案缺失、GUI 沒有出現或驗收失敗都會結束為非零狀態。
+`gui-capture-metadata.json` 以任務完成時間與實測 elapsed time 計算 GUI
+錄影中的任務起點，使事件字幕與同一回合的模擬時間對齊。
+
+再以核准 Logo 產生單一連續的中文驗證片：
+
+```bash
+FLYTO2_LOGO_FILE=/absolute/path/to/flyto2-logo.png \
+  scripts/render-ai4all-verification-video.sh \
+  results/ai4all-showcase/<gui-capture-run-id>
+```
+
+輸出 `flyto2-gazebo-verification.mp4`。右上角持續顯示真實模型名稱、
+8→4 候選排除、原路線與重規劃路線、plan hash；下方事件列只在因果狀態
+改變時更新。觀眾會在同一畫面中看到障礙進入、車體零速停止、障礙移除、
+沿橘—紫路線恢復、錯藥與錯誤收件者保持上鎖，以及所有條件成立後才解鎖。
+右上角保留原始未裁切 Gazebo GUI，旁邊的實際事件 LOG 則由
+`planning-session.json`、`mission-result.json` 與 `driver-manifest.json`
+直接產生，可在同一幀核對 AI 規劃、感測距離、checkpoint 與箱體鎖定狀態。
+`verification-video-probe.json` 與 `verification-video.sha256` 可供第三方核對
+編碼規格與影片／計畫／任務／driver 證據鏈。
+
 ## 誠實邊界
 
 模型規劃證據來自設定的真實規劃端點；`deterministic_fixture` 不得標成

@@ -48,6 +48,72 @@
           <diffuse>0.82 0.85 0.88 1</diffuse>
         </material>
       </visual>
+      <visual name="locked_medication_container">
+        <pose>-0.035 0 0.245 0 0 0</pose>
+        <geometry>
+          <box>
+            <size>0.28 0.23 0.18</size>
+          </box>
+        </geometry>
+        <material>
+          <ambient>0.70 0.72 0.74 1</ambient>
+          <diffuse>0.90 0.92 0.93 1</diffuse>
+          <specular>0.35 0.35 0.35 1</specular>
+        </material>
+      </visual>
+      <visual name="container_lock_band">
+        <pose>0.035 0 0.245 0 0 0</pose>
+        <geometry>
+          <box>
+            <size>0.035 0.238 0.19</size>
+          </box>
+        </geometry>
+        <material>
+          <ambient>0.65 0.03 0.04 1</ambient>
+          <diffuse>0.92 0.05 0.06 1</diffuse>
+        </material>
+      </visual>
+      <visual name="status_light">
+        <pose>0.075 0 0.357 0 0 0</pose>
+        <geometry>
+          <cylinder>
+            <radius>0.038</radius>
+            <length>0.035</length>
+          </cylinder>
+        </geometry>
+        <material>
+          <ambient>0.02 0.58 0.24 1</ambient>
+          <diffuse>0.03 0.82 0.34 1</diffuse>
+          <emissive>0.01 0.36 0.12 1</emissive>
+        </material>
+      </visual>
+      <visual name="camera_housing">
+        <pose>0.235 0 0.075 0 0 0</pose>
+        <geometry>
+          <box>
+            <size>0.07 0.16 0.105</size>
+          </box>
+        </geometry>
+        <material>
+          <ambient>0.025 0.035 0.045 1</ambient>
+          <diffuse>0.06 0.08 0.10 1</diffuse>
+          <specular>0.55 0.55 0.55 1</specular>
+        </material>
+      </visual>
+      <visual name="camera_lens">
+        <pose>0.273 0 0.075 0 1.5708 0</pose>
+        <geometry>
+          <cylinder>
+            <radius>0.042</radius>
+            <length>0.018</length>
+          </cylinder>
+        </geometry>
+        <material>
+          <ambient>0.01 0.03 0.07 1</ambient>
+          <diffuse>0.02 0.08 0.18 1</diffuse>
+          <specular>0.8 0.8 0.8 1</specular>
+        </material>
+      </visual>
       <visual name="direction_marker">
         <pose>0.19 0 0.105 0 0 0</pose>
         <geometry>
