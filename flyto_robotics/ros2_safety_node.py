@@ -30,6 +30,7 @@ class SafetyWatchdog:
         self.clock = clock
         self.goal_active = False
         self.goal_started_at: float | None = None
+        self.command_observed_during_goal = False
         self.latched_reason: str | None = None
         self.receipts: dict[str, float | None] = {
             "odometry": None,
@@ -45,13 +46,17 @@ class SafetyWatchdog:
         if source not in self.receipts:
             raise ValueError("watchdog source is unsupported")
         self.receipts[source] = self.clock()
+        if source == "command" and self.goal_active:
+            self.command_observed_during_goal = True
 
     def update_goal_active(self, active: bool) -> None:
         active = bool(active)
         if active and not self.goal_active:
             self.goal_started_at = self.clock()
+            self.command_observed_during_goal = False
         if not active:
             self.goal_started_at = None
+            self.command_observed_during_goal = False
         self.goal_active = active
 
     def latch(self, reason: str) -> str:
@@ -63,6 +68,7 @@ class SafetyWatchdog:
         self.latched_reason = None
         self.goal_active = False
         self.goal_started_at = None
+        self.command_observed_during_goal = False
 
     def evaluate(self) -> str | None:
         if self.latched or not self.goal_active:
@@ -73,6 +79,8 @@ class SafetyWatchdog:
             ("lidar", self.sensor_timeout_seconds, "lidar_stale"),
             ("command", self.command_timeout_seconds, "command_stale"),
         ):
+            if source == "command" and not self.command_observed_during_goal:
+                continue
             receipt = self.receipts[source]
             if receipt is None:
                 receipt = self.goal_started_at

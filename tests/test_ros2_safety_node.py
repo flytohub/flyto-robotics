@@ -47,3 +47,25 @@ def test_watchdog_reset_and_sensor_reason_are_deterministic() -> None:
     watchdog.reset()
     assert watchdog.latched is False
     assert watchdog.evaluate() is None
+
+
+def test_command_watchdog_arms_only_after_this_goal_receives_a_command() -> None:
+    now = [0.0]
+    watchdog = SafetyWatchdog(
+        sensor_timeout_seconds=0.4,
+        command_timeout_seconds=0.3,
+        clock=lambda: now[0],
+    )
+    watchdog.observe("command")
+    watchdog.update_goal_active(True)
+
+    now[0] = 0.35
+    watchdog.observe("odometry")
+    watchdog.observe("lidar")
+    assert watchdog.evaluate() is None
+
+    watchdog.observe("command")
+    now[0] = 0.66
+    watchdog.observe("odometry")
+    watchdog.observe("lidar")
+    assert watchdog.evaluate_transition() == ("command_stale", True)
