@@ -170,7 +170,34 @@ checkpoint、錯誤收件者、正確收件者、解鎖與完成字幕的開始�
 舊驗收條件、座標框架錯置與終點安全距離問題；後續回合補齊 QR 核准、
 重播防護與影片資訊，只有 v7 是目前接受的完整證據。
 
-## 連續 Gazebo GUI 驗證影片
+## 一般觀眾版與工程驗證版
+
+同一回合提供兩種不同用途的影片，避免把工程證據直接當成產品故事：
+
+- `flyto2-hospital-story.mp4` 給第一次接觸 Flyto2 的觀眾。它用大字章節、
+  繁體中文旁白與紅綠結果卡，先說明「替 12 號病人送 A12 藥袋」，再依序
+  解釋攝影機故障改道、障礙安全停止、錯藥拒絕、錯人拒絕與正確後解鎖。
+- `flyto2-gazebo-verification.mp4` 給評審與工程人員核對模型、候選路線、
+  感測數值、事件 LOG、checkpoint、plan hash 與證據鏈。
+
+一般觀眾版仍只使用同一回合的 Gazebo GUI 與 JSON 證據，不用生成式畫面
+代替模擬。開頭與結尾會停格，讓觀眾有時間理解任務與結論；中段保留原始
+任務順序。影片也明確區分：AI 負責理解任務與選路，固定的安全規則負責
+決定動作能不能執行。
+
+```bash
+FLYTO2_LOGO_FILE=/absolute/path/to/flyto2-logo.png \
+  scripts/render-ai4all-story-video.sh \
+  results/ai4all-showcase/<gui-capture-run-id>
+```
+
+macOS 預設使用 `Meijia` 產生繁體中文旁白；可用
+`FLYTO2_NARRATION_VOICE`、`FLYTO2_NARRATION_RATE` 調整，或以
+`STORY_NARRATION=0` 產生只有燒錄字幕的版本。輸出的
+`hospital-story-video-probe.json` 與 `hospital-story-video.sha256` 分別
+保留影音規格與來源證據雜湊。
+
+## 連續 Gazebo GUI 工程驗證影片
 
 評審用驗證片以真實 Gazebo Sim 視窗為主畫面，保留場景、機器人、動態
 障礙、時間與 Gazebo GUI 的同一段連續時間線。它不使用生成式影像，也

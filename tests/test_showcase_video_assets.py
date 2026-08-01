@@ -8,6 +8,7 @@ MEDICATION_FILTER = ROOT / "video/ai4all-medication-showcase-filter.txt"
 MEDICATION_SUBTITLES = ROOT / "video/ai4all-medication-showcase.ass"
 GUI_CAPTURE_SCRIPT = ROOT / "scripts/run-ai4all-gui-evidence.sh"
 VERIFICATION_RENDER_SCRIPT = ROOT / "scripts/render-ai4all-verification-video.sh"
+STORY_RENDER_SCRIPT = ROOT / "scripts/render-ai4all-story-video.sh"
 WORLD = ROOT / "worlds/ai4all-branching-route.sdf"
 ROVER = ROOT / "models/flyto_rover/model.sdf"
 SHOWCASE_DOC = ROOT / "docs/AI4ALL_SHOWCASE.md"
@@ -109,6 +110,35 @@ def test_verification_video_exposes_actual_evidence_log_not_only_narration() -> 
     assert "minimum_range" in script
     assert "container_locked" in script
     assert "原始未裁切 Gazebo GUI" in script
+
+
+def test_story_video_explains_the_mission_without_engineering_jargon() -> None:
+    script = STORY_RENDER_SCRIPT.read_text(encoding="utf-8")
+
+    required_plain_language = (
+        "這是一台醫院送藥機器人",
+        "幫 12 號病人送 A12 藥袋",
+        "攝影機故障，AI 改走安全路線",
+        "有人擋路，機器人自己停下來",
+        "錯的藥、不對的人，都不會開鎖",
+        "藥袋正確 + 病人正確 = 才能解鎖",
+        "這是 Gazebo 模擬，不是實體醫院",
+    )
+    assert all(copy in script for copy in required_plain_language)
+    assert "say -v" in script
+    assert "flyto2-hospital-story.mp4" in script
+
+
+def test_story_video_preserves_source_evidence_and_separates_ai_from_safety() -> None:
+    script = STORY_RENDER_SCRIPT.read_text(encoding="utf-8")
+
+    assert "gazebo-gui.mp4" in script
+    assert "planning-session.json" in script
+    assert "mission-result.json" in script
+    assert "driver-manifest.json" in script
+    assert "AI 負責理解任務與選路" in script
+    assert "安全規則負責決定能不能執行" in script
+    assert "不是生成式影片" in script
 
 
 def test_hospital_scene_is_self_contained_and_visually_explains_the_mission() -> None:
