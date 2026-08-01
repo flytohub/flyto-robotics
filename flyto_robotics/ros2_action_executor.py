@@ -117,23 +117,43 @@ class NavigationExecutionMonitor:
         self.safety_stop_reason: str | None = None
         self.fault_injection_observed = False
         self.safety_stop_latency_ms: float | None = None
+        self._pending_feedback: list[float] = []
         self.event_codes: list[str] = ["authority_validated", "server_available"]
 
-    def accept_goal(self) -> None:
+    def begin_goal_submission(self) -> None:
         if self.state != "prepared":
+            raise Ros2ActionExecutionError("goal submission is out of order")
+        self.state = "awaiting_acceptance"
+
+    def accept_goal(self) -> None:
+        if self.state not in {"prepared", "awaiting_acceptance"}:
             raise Ros2ActionExecutionError("goal acceptance is out of order")
         self.state = "executing"
         self.event_codes.append("goal_accepted")
+        pending = tuple(self._pending_feedback)
+        self._pending_feedback.clear()
+        for distance_remaining in pending:
+            self._record_feedback(distance_remaining)
 
     def reject_goal(self) -> None:
-        if self.state != "prepared":
+        if self.state not in {"prepared", "awaiting_acceptance"}:
             raise Ros2ActionExecutionError("goal rejection is out of order")
         self.state = "rejected"
+        self._pending_feedback.clear()
         self.event_codes.append("goal_rejected")
 
     def feedback(self, distance_remaining: float) -> None:
+        parsed = _finite(distance_remaining, "distance_remaining", minimum=0.0)
+        if self.state == "awaiting_acceptance":
+            if len(self._pending_feedback) >= 256:
+                raise Ros2ActionExecutionError("pre-accept feedback limit exceeded")
+            self._pending_feedback.append(parsed)
+            return
         if self.state not in {"executing", "canceling"}:
             raise Ros2ActionExecutionError("feedback arrived outside execution")
+        self._record_feedback(parsed)
+
+    def _record_feedback(self, distance_remaining: float) -> None:
         _finite(distance_remaining, "distance_remaining", minimum=0.0)
         self.feedback_count += 1
         if self.feedback_count == 1:
@@ -428,6 +448,7 @@ def execute_rclpy_navigation(
         def on_feedback(message: Any) -> None:
             monitor.feedback(float(message.feedback.distance_remaining))
 
+        monitor.begin_goal_submission()
         send_future = action_client.send_goal_async(
             goal,
             feedback_callback=on_feedback,

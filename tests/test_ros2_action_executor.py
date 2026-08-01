@@ -100,6 +100,25 @@ def test_monitor_requires_acceptance_feedback_and_physical_terminal_pose() -> No
         )
 
 
+def test_feedback_before_local_acceptance_is_bounded_and_replayed_in_order() -> None:
+    prepared, _grant = _prepared()
+    monitor = NavigationExecutionMonitor(
+        prepared,
+        StationPose("robot.current", 0.0, 0.0, 0.0),
+        started_at=AT,
+    )
+    monitor.begin_goal_submission()
+    monitor.feedback(1.4)
+
+    assert monitor.feedback_count == 0
+    assert monitor.event_codes[-1] == "server_available"
+
+    monitor.accept_goal()
+
+    assert monitor.feedback_count == 1
+    assert monitor.event_codes[-2:] == ["goal_accepted", "feedback_observed"]
+
+
 @pytest.mark.parametrize(
     ("reason", "expected_status", "safety"),
     [
