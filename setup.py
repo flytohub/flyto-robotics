@@ -28,6 +28,14 @@ setup(
             glob("examples/resource-plans/*.json"),
         ),
         (
+            f"share/{PACKAGE_NAME}/examples/ros2-adapters",
+            glob("examples/ros2-adapters/*.json"),
+        ),
+        (
+            f"share/{PACKAGE_NAME}/examples/ros2-runtime",
+            glob("examples/ros2-runtime/*.json"),
+        ),
+        (
             f"share/{PACKAGE_NAME}/examples/facility-resources",
             glob("examples/facility-resources/*.json"),
         ),

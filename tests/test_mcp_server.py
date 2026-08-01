@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 from flyto_robotics.mcp_server import (
@@ -92,6 +94,8 @@ def test_stdio_handshake_discovery_prepare_and_real_controller_dry_run() -> None
         "robot.plan.prepare",
         "robot.plan.validate",
         "robot.mission.dry_run",
+        "robot.ros2.profile",
+        "robot.ros2.readiness.verify",
     }
     prepared = responses[2]["result"]["structuredContent"]
     assert prepared["request"]["planner_contract"] == "flyto.robotics.planner-request.v1"
@@ -152,3 +156,64 @@ def test_protocol_and_tool_contract_fail_closed_without_paths_or_network() -> No
     assert "url" not in encoded.lower()
     assert "shell" not in encoded.lower()
     assert "ros_topic" not in encoded.lower()
+
+
+def test_ros2_mcp_profile_is_redacted_and_readiness_is_content_addressed() -> None:
+    profile_response = handle_request(
+        _rpc(
+            10,
+            "tools/call",
+            {
+                "name": "robot.ros2.profile",
+                "arguments": {"robot_id": "flyto-rover-sim-001"},
+            },
+        )
+    )
+    assert profile_response is not None
+    profile = profile_response["result"]["structuredContent"]
+    encoded_profile = json.dumps(profile, sort_keys=True)
+    assert "nav2_msgs" not in encoded_profile
+    assert "/navigate_to_pose" not in encoded_profile
+    assert "interface" not in encoded_profile
+
+    observed_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    runtime = {
+        "contract_version": "flyto.robotics.ros2-runtime-snapshot.v1",
+        "profile_id": profile["profile_id"],
+        "profile_snapshot": profile["profile_snapshot"],
+        "robot_id": profile["robot_id"],
+        "deployment_mode": "simulation",
+        "observed_at": observed_at,
+        "max_age_seconds": 60,
+        "emergency_stop_ready": True,
+        "adapters": [
+            {
+                "adapter_id": profile["adapters"][0]["adapter_id"],
+                "status": "ready",
+                "interface_available": True,
+                "lifecycle_state": "active",
+                "observation_sequence": "mcp-test:ready:1",
+            }
+        ],
+    }
+    runtime["snapshot"] = hashlib.sha256(
+        json.dumps(runtime, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    ).hexdigest()
+    readiness_response = handle_request(
+        _rpc(
+            11,
+            "tools/call",
+            {
+                "name": "robot.ros2.readiness.verify",
+                "arguments": {"runtime": runtime},
+            },
+        )
+    )
+
+    assert readiness_response is not None
+    readiness = readiness_response["result"]["structuredContent"]
+    assert readiness["passed"] is True
+    assert readiness["ready_capability_ids"] == [
+        "robotics.motion.navigate@1",
+        "robotics.motion.navigate_to_location@1",
+    ]

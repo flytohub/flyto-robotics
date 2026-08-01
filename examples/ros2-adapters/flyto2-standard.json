@@ -1,0 +1,37 @@
+{
+  "contract_version": "flyto.robotics.ros2-adapter-manifest.v1",
+  "profile_id": "flyto2.ros2.standard.v1",
+  "robot_id": "flyto-rover-sim-001",
+  "ros_version": 2,
+  "fail_closed": true,
+  "direct_actuation": false,
+  "emergency_stop_required": true,
+  "adapters": [
+    {
+      "adapter_id": "ros2.nav2.navigate_to_pose.v1",
+      "capability_ids": [
+        "robotics.motion.navigate@1",
+        "robotics.motion.navigate_to_location@1"
+      ],
+      "stack": "nav2",
+      "interface": {
+        "kind": "action",
+        "name": "/navigate_to_pose",
+        "type": "nav2_msgs/action/NavigateToPose"
+      },
+      "managed_nodes": [
+        "/bt_navigator",
+        "/controller_server",
+        "/planner_server"
+      ],
+      "required_observations": ["minimum_range", "odometry"],
+      "timeout_seconds": 300.0,
+      "supported_modes": ["hardware", "simulation"],
+      "feedback_required": true,
+      "cancel_on_timeout": true,
+      "lifecycle_required": true,
+      "goal_policy": "semantic_only"
+    }
+  ],
+  "snapshot": "517dd9426508784c53d07d51dbb6b5e79f7c11578aa49b499a14a60e8a8184b0"
+}

@@ -240,6 +240,10 @@ The stable external API is file-based and language-neutral:
   map-scoped ID/label/pose store;
 - `contracts/semantic-location-catalog-v1.schema.json` defines the
   coordinate-free view exposed to planning;
+- `contracts/ros2-adapter-manifest-v1.schema.json` binds registered semantic
+  capabilities to cancellable ROS 2 actions without exposing that graph to AI;
+- `contracts/ros2-runtime-snapshot-v1.schema.json` carries content-addressed
+  action availability, lifecycle, freshness, and emergency-stop evidence;
 - `contracts/result-v1.schema.json` validates terminal evidence;
 - `contracts/human-decision-v1.schema.json` validates signed approval envelopes;
 - `flyto-robotics validate-job` validates before motion;
@@ -247,6 +251,37 @@ The stable external API is file-based and language-neutral:
 - `flyto-robotics run-ros` starts the ROS adapter for one job.
 - `flyto-robotics plan-ai` calls an HTTPS planner, then validates and atomically
   writes its returned plan.
+
+### Flyto2 + ROS 2 semantic pairing
+
+Flyto2 owns language understanding, capability planning, resource policy, and
+audit evidence. ROS 2 owns deterministic execution, feedback, cancellation,
+lifecycle, and the emergency stop. The model never receives ROS graph names or
+actuator values.
+
+The standard profile maps the existing executable navigation atoms to Nav2's
+cancellable `NavigateToPose` action. Every adapter must declare both simulation
+and hardware support, so the mission contract cannot fork between Gazebo and a
+physical robot. MoveIt 2 and ros2_control action types are allowlisted for later
+adapters, but a manifest is rejected until its Flyto capability is actually
+registered; the pairing report therefore cannot claim an integration that the
+runtime cannot execute.
+
+Before execution, the readiness gate requires an exact profile snapshot, robot
+identity, fresh evidence, an available interface, active lifecycle nodes, and
+an independent emergency stop. One failed check removes all execution
+authority.
+
+```bash
+python3 -m flyto_robotics.cli verify-ros2-pairing \
+  --manifest examples/ros2-adapters/flyto2-standard.json \
+  --runtime examples/ros2-runtime/ready-sim.json \
+  --at 2026-08-01T10:00:00Z
+```
+
+`--at` exists for deterministic evidence replay. Live checks omit it and use
+the current UTC time. Robot MCP exposes only the redacted profile and readiness
+report through `robot.ros2.profile` and `robot.ros2.readiness.verify`.
 
 ```bash
 export FLYTO_ROBOTICS_PLANNER_URL=https://planner.example.com/v1/robot-plan

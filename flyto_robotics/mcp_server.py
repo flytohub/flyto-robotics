@@ -23,11 +23,17 @@ from .ai_planner import (
 from .capabilities import CapabilityValidationError, default_capability_registry
 from .cli import dry_run_plan
 from .contracts import JobValidationError, parse_job
+from .ros2_pairing import (
+    parse_ros2_runtime_snapshot,
+    ros2_profile_summary,
+    standard_ros2_adapter_manifest,
+    verify_ros2_pairing,
+)
 from .semantic_map import SemanticMapValidationError
 
 PROTOCOL_VERSION = "2025-06-18"
 SERVER_NAME = "flyto2-robotics"
-SERVER_VERSION = "0.1.0"
+SERVER_VERSION = "0.2.0"
 MAX_REQUEST_BYTES = 512 * 1024
 MAX_ARGUMENT_BYTES = 384 * 1024
 MAX_OBSERVATION_ITEMS = 64
@@ -82,6 +88,20 @@ def tool_definitions() -> list[dict[str, Any]]:
             "Run a validated job and plan through the real deterministic mission controller.",
             {"job": object_schema, "plan": object_schema},
             ["job", "plan"],
+        ),
+        _tool(
+            "robot.ros2.profile",
+            "Return the safe public view of the standard semantic ROS 2 profile.",
+            {
+                "robot_id": {"type": "string", "minLength": 1, "maxLength": 128},
+            },
+            ["robot_id"],
+        ),
+        _tool(
+            "robot.ros2.readiness.verify",
+            "Fail closed unless the standard semantic ROS 2 profile is ready.",
+            {"runtime": object_schema},
+            ["runtime"],
         ),
     ]
 
@@ -213,11 +233,27 @@ def _dry_run(arguments: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _ros2_profile(arguments: dict[str, Any]) -> dict[str, Any]:
+    _exact_fields(arguments, allowed={"robot_id"}, required={"robot_id"})
+    return ros2_profile_summary(
+        standard_ros2_adapter_manifest(arguments["robot_id"])
+    )
+
+
+def _ros2_readiness(arguments: dict[str, Any]) -> dict[str, Any]:
+    _exact_fields(arguments, allowed={"runtime"}, required={"runtime"})
+    runtime = parse_ros2_runtime_snapshot(arguments["runtime"])
+    manifest = standard_ros2_adapter_manifest(runtime["robot_id"])
+    return verify_ros2_pairing(manifest, runtime)
+
+
 TOOLS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     "robot.capabilities.list": _capabilities,
     "robot.plan.prepare": _prepare,
     "robot.plan.validate": _validate,
     "robot.mission.dry_run": _dry_run,
+    "robot.ros2.profile": _ros2_profile,
+    "robot.ros2.readiness.verify": _ros2_readiness,
 }
 
 

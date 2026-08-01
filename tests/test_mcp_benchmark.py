@@ -31,6 +31,7 @@ def test_real_mcp_benchmark_runs_distinct_tiers_and_verifies_digest(
     assert report["real_execution"]["transport"] == "production-stdio-subprocess"
     assert report["distinct_case_count"] == 6
     assert report["successes"] == 6
+    assert set(report["tools"]) == benchmark.EXPECTED_TOOLS
     assert set(report["tiers"]) == {"standard", "intermediate", "advanced"}
     assert all(tier["passed"] for tier in report["tiers"].values())
     assert evidence_digest == benchmark._digest(report)

@@ -51,6 +51,13 @@ from .qr_confirmation import (
     qr_token_sha256,
 )
 from .resource_binding import load_resource_plan
+from .ros2_pairing import (
+    Ros2PairingError,
+    load_ros2_adapter_manifest,
+    load_ros2_runtime_snapshot,
+    parse_observed_at,
+    verify_ros2_pairing,
+)
 from .semantic_map import SemanticLocationStore, parse_semantic_location_map
 from .soak import (
     render_soak_junit,
@@ -125,6 +132,8 @@ def validate_assets(root: Path = PROJECT_ROOT) -> list[str]:
         root / "contracts/lab-scenario-v1.schema.json",
         root / "contracts/lab-matrix-v1.schema.json",
         root / "contracts/soak-report-v1.schema.json",
+        root / "contracts/ros2-adapter-manifest-v1.schema.json",
+        root / "contracts/ros2-runtime-snapshot-v1.schema.json",
     ]
     for path in json_paths:
         decoded = _load_json(path)
@@ -154,6 +163,24 @@ def validate_assets(root: Path = PROJECT_ROOT) -> list[str]:
     for resource_plan in sorted((root / "examples/resource-plans").glob("*.json")):
         load_resource_plan(resource_plan)
         checked.append(str(resource_plan.relative_to(root)))
+    ros2_manifests: dict[tuple[str, str], dict[str, object]] = {}
+    for manifest_path in sorted((root / "examples/ros2-adapters").glob("*.json")):
+        manifest = load_ros2_adapter_manifest(manifest_path)
+        ros2_manifests[(manifest["profile_id"], manifest["robot_id"])] = manifest
+        checked.append(str(manifest_path.relative_to(root)))
+    for runtime_path in sorted((root / "examples/ros2-runtime").glob("*.json")):
+        runtime = load_ros2_runtime_snapshot(runtime_path)
+        manifest = ros2_manifests.get((runtime["profile_id"], runtime["robot_id"]))
+        if manifest is None:
+            raise ValueError(f"{runtime_path.name} has no matching ROS 2 manifest")
+        report = verify_ros2_pairing(
+            manifest,
+            runtime,
+            observed_at=parse_observed_at(runtime["observed_at"]),
+        )
+        if report["passed"] is not True:
+            raise ValueError(f"{runtime_path.name} does not pass ROS 2 pairing")
+        checked.append(str(runtime_path.relative_to(root)))
     for policy_path in sorted(
         (root / "examples/guarded-handoff").glob("*-policy.json")
     ):
@@ -520,6 +547,17 @@ def _parser() -> argparse.ArgumentParser:
     aggregate_lab.add_argument("--markdown", required=True, type=Path)
     aggregate_lab.add_argument("--junit", required=True, type=Path)
 
+    verify_pairing = subcommands.add_parser(
+        "verify-ros2-pairing",
+        help="verify a semantic ROS 2 adapter profile against live readiness evidence",
+    )
+    verify_pairing.add_argument("--manifest", required=True, type=Path)
+    verify_pairing.add_argument("--runtime", required=True, type=Path)
+    verify_pairing.add_argument(
+        "--at",
+        help="UTC observation time used only for deterministic evidence replay",
+    )
+
     ros = subcommands.add_parser("run-ros", help="run the ROS 2 mission adapter")
     ros.add_argument("--job", required=True, type=Path)
     ros.add_argument("--result", required=True, type=Path)
@@ -764,6 +802,17 @@ def main(argv: Sequence[str] | None = None) -> int:
             write_text_atomic(args.junit, render_matrix_junit(report))
             print(json.dumps(report, ensure_ascii=False, sort_keys=True))
             return 0 if report["passed"] is True else 4
+        if args.command == "verify-ros2-pairing":
+            manifest = load_ros2_adapter_manifest(args.manifest)
+            runtime = load_ros2_runtime_snapshot(args.runtime)
+            observed_at = parse_observed_at(args.at, "--at") if args.at else None
+            report = verify_ros2_pairing(
+                manifest,
+                runtime,
+                observed_at=observed_at,
+            )
+            print(json.dumps(report, ensure_ascii=False, sort_keys=True))
+            return 0 if report["passed"] is True else 5
         if args.command == "run-ros":
             from .ros2_node import run
 
@@ -777,6 +826,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     except (
         HumanDecisionValidationError,
         QRConfirmationValidationError,
+        Ros2PairingError,
         JobValidationError,
         PlanValidationError,
         OSError,

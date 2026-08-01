@@ -1,0 +1,79 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://flyto2.com/contracts/ros2-runtime-snapshot-v1.schema.json",
+  "title": "Flyto2 ROS 2 Runtime Snapshot v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract_version",
+    "profile_id",
+    "profile_snapshot",
+    "robot_id",
+    "deployment_mode",
+    "observed_at",
+    "max_age_seconds",
+    "emergency_stop_ready",
+    "adapters",
+    "snapshot"
+  ],
+  "properties": {
+    "contract_version": {
+      "const": "flyto.robotics.ros2-runtime-snapshot.v1"
+    },
+    "profile_id": {"$ref": "#/$defs/identifier"},
+    "profile_snapshot": {"$ref": "#/$defs/snapshot"},
+    "robot_id": {"$ref": "#/$defs/identifier"},
+    "deployment_mode": {"enum": ["simulation", "hardware"]},
+    "observed_at": {"type": "string", "format": "date-time", "maxLength": 64},
+    "max_age_seconds": {"type": "integer", "minimum": 1, "maximum": 300},
+    "emergency_stop_ready": {"type": "boolean"},
+    "adapters": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 64,
+      "items": {"$ref": "#/$defs/adapter"}
+    },
+    "snapshot": {"$ref": "#/$defs/snapshot"}
+  },
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,191}$"
+    },
+    "snapshot": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "adapter": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "adapter_id",
+        "status",
+        "interface_available",
+        "lifecycle_state",
+        "observation_sequence"
+      ],
+      "properties": {
+        "adapter_id": {"$ref": "#/$defs/identifier"},
+        "status": {"enum": ["ready", "degraded", "unavailable"]},
+        "interface_available": {"type": "boolean"},
+        "lifecycle_state": {
+          "enum": [
+            "active",
+            "inactive",
+            "unconfigured",
+            "finalized",
+            "error",
+            "unknown"
+          ]
+        },
+        "observation_sequence": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        }
+      }
+    }
+  }
+}

@@ -1,6 +1,6 @@
 PYTHON ?= python3
 
-.PHONY: ai-dry-run ai4all-medication-showcase ai4all-showcase assets benchmark-robot-mcp careflow-dry-run dry-run facility-contract gazebo-lab gazebo-matrix gazebo-shortcut gazebo-video lab-contract lint soak test verify
+.PHONY: ai-dry-run ai4all-medication-showcase ai4all-showcase assets benchmark-robot-mcp careflow-dry-run dry-run facility-contract gazebo-lab gazebo-matrix gazebo-shortcut gazebo-video lab-contract lint ros2-pairing soak test verify
 
 lint:
 	$(PYTHON) -m ruff check .
@@ -42,6 +42,12 @@ facility-contract:
 		--adapter robotics.gazebo \
 		--space gazebo-lab
 
+ros2-pairing:
+	$(PYTHON) -m flyto_robotics.cli verify-ros2-pairing \
+		--manifest examples/ros2-adapters/flyto2-standard.json \
+		--runtime examples/ros2-runtime/ready-sim.json \
+		--at 2026-08-01T10:00:00Z
+
 soak:
 	$(PYTHON) -m flyto_robotics.cli soak-plan \
 		--job examples/jobs/pharmacy-to-ward.json \
@@ -67,4 +73,4 @@ ai4all-showcase:
 ai4all-medication-showcase:
 	./scripts/run-ai4all-medication-showcase.sh
 
-verify: lint test assets dry-run ai-dry-run careflow-dry-run lab-contract facility-contract
+verify: lint test assets dry-run ai-dry-run careflow-dry-run lab-contract facility-contract ros2-pairing
