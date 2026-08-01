@@ -655,7 +655,13 @@ def test_showcase_evaluator_proves_guarded_handoff_fail_closed_order() -> None:
         },
     ]
     driver = {
+        "contract_version": "flyto.robotics.lab-driver-evidence.v2",
         "world_displacement": 4.24,
+        "observed_motion": {
+            "before_obstacle": True,
+            "safety_stop": True,
+            "resumed_after_clear": True,
+        },
         "qr_confirmation": {
             "token_sha256": "a" * 64,
             "replay_rejected": True,
@@ -676,7 +682,25 @@ def test_showcase_evaluator_proves_guarded_handoff_fail_closed_order() -> None:
         },
         "actions": [
             {"kind": "fault_injection", "success": True},
+            {
+                "kind": "safety_stop_observed",
+                "minimum_range": 0.4,
+                "configured_stop_distance": 0.55,
+                "latest_command_velocity": {
+                    "linear_x": 0.0,
+                    "angular_z": 0.0,
+                    "is_zero": True,
+                },
+            },
             {"kind": "fault_injection", "success": True},
+            {
+                "kind": "motion_resumed_observed",
+                "latest_command_velocity": {
+                    "linear_x": 0.2,
+                    "angular_z": 0.0,
+                    "is_zero": False,
+                },
+            },
             *guarded_events,
             {"kind": "guarded_handoff_approved"},
             {
@@ -691,9 +715,22 @@ def test_showcase_evaluator_proves_guarded_handoff_fail_closed_order() -> None:
 
     report = evaluate_showcase_evidence(showcase, mission, driver)
     assert report["passed"] is True
-    assert report["summary"]["passed_checks"] == 21
-    assert report["summary"]["total_checks"] == 21
+    assert report["summary"]["passed_checks"] == 22
+    assert report["summary"]["total_checks"] == 22
     assert report["summary"]["guarded_handoff_enabled"] is True
+
+    missing_independent_stop = deepcopy(driver)
+    missing_independent_stop["observed_motion"]["safety_stop"] = False
+    failed_stop = evaluate_showcase_evidence(
+        showcase,
+        mission,
+        missing_independent_stop,
+    )
+    assert next(
+        check
+        for check in failed_stop["checks"]
+        if check["id"] == "independent_command_stop_and_resume_observed"
+    )["passed"] is False
 
     missing_checkpoint = deepcopy(driver)
     missing_checkpoint["guarded_handoff"]["evidence"]["events"].pop(4)

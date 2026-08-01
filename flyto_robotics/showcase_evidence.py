@@ -223,6 +223,73 @@ def evaluate_showcase_evidence(
         },
         "LiDAR stop followed by path-clear recovery",
     )
+    if driver.get("contract_version") == "flyto.robotics.lab-driver-evidence.v2":
+        observed_motion = driver.get("observed_motion", {})
+        if not isinstance(observed_motion, Mapping):
+            raise ValueError("driver.observed_motion must be an object")
+        safety_stop = next(
+            (
+                item
+                for item in driver_actions
+                if item.get("kind") == "safety_stop_observed"
+            ),
+            None,
+        )
+        motion_resumed = next(
+            (
+                item
+                for item in driver_actions
+                if item.get("kind") == "motion_resumed_observed"
+            ),
+            None,
+        )
+        stop_command = (
+            safety_stop.get("latest_command_velocity", {})
+            if safety_stop is not None
+            else {}
+        )
+        resume_command = (
+            motion_resumed.get("latest_command_velocity", {})
+            if motion_resumed is not None
+            else {}
+        )
+        stop_range = safety_stop.get("minimum_range") if safety_stop else None
+        stop_limit = (
+            safety_stop.get("configured_stop_distance")
+            if safety_stop
+            else None
+        )
+        stop_index = (
+            driver_actions.index(safety_stop) if safety_stop is not None else -1
+        )
+        resume_index = (
+            driver_actions.index(motion_resumed)
+            if motion_resumed is not None
+            else -1
+        )
+        _check(
+            checks,
+            "independent_command_stop_and_resume_observed",
+            observed_motion.get("before_obstacle") is True
+            and observed_motion.get("safety_stop") is True
+            and observed_motion.get("resumed_after_clear") is True
+            and isinstance(stop_command, Mapping)
+            and stop_command.get("is_zero") is True
+            and isinstance(stop_range, (int, float))
+            and isinstance(stop_limit, (int, float))
+            and float(stop_range) < float(stop_limit)
+            and isinstance(resume_command, Mapping)
+            and abs(float(resume_command.get("linear_x", 0.0))) > 0.01
+            and 0 <= stop_index < resume_index,
+            {
+                "observed_motion": observed_motion,
+                "safety_stop": safety_stop,
+                "motion_resumed": motion_resumed,
+            },
+            "independent /flyto/cmd_vel observation proves motion, a zero "
+            "command below the LiDAR stop threshold, and forward motion only "
+            "after the obstacle clears",
+        )
     _check(
         checks,
         "human_gate_and_replay_defense",

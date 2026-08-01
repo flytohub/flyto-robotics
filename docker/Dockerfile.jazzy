@@ -3,8 +3,14 @@ FROM ros:jazzy-ros-base
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ffmpeg \
+        fonts-noto-cjk \
+        openbox \
+        python3-pil \
         ros-jazzy-ros-gz-bridge \
         ros-jazzy-ros-gz-sim \
+        xauth \
+        xdotool \
+        xvfb \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /workspace

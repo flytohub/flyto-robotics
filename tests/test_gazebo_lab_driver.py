@@ -59,6 +59,19 @@ def test_tick_uses_live_world_yaw_and_records_path_length() -> None:
     assert "self.world_path_length += math.hypot" in source
 
 
+def test_driver_independently_observes_stop_and_resume_commands() -> None:
+    source = DRIVER_FILE.read_text(encoding="utf-8")
+
+    assert "flyto.robotics.lab-driver-evidence.v2" in source
+    assert 'Twist,\n            "/flyto/cmd_vel"' in source
+    assert "self.motion_before_obstacle_seen" in source
+    assert "self.minimum_range < stop_distance" in source
+    assert 'command["is_zero"] is True' in source
+    assert '"safety_stop_observed"' in source
+    assert '"motion_resumed_observed"' in source
+    assert '"latest_command_velocity": self.latest_command_velocity' in source
+
+
 def test_replay_delay_is_short_but_configurable() -> None:
     source = DRIVER_FILE.read_text(encoding="utf-8")
 

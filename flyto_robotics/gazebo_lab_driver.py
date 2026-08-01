@@ -10,6 +10,7 @@ import subprocess
 from pathlib import Path
 
 import rclpy
+from geometry_msgs.msg import Twist
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
@@ -211,10 +212,15 @@ class GazeboLabDriver(Node):
         self.previous_world_xy: tuple[float, float] | None = None
         self.world_path_length = 0.0
         self.minimum_range = math.inf
+        self.latest_command_velocity: dict[str, float | bool] | None = None
+        self.motion_before_obstacle_seen = False
+        self.safety_stop_observed = False
+        self.motion_resumed_observed = False
         self.captured_labels: set[str] = set()
         self.actions: list[dict[str, object]] = []
-        self.pending_capture: str | None = "startup"
-        self.pending_capture_not_before = self.started_at
+        self.pending_captures: list[tuple[str, float]] = [
+            ("startup", self.started_at)
+        ]
         self.active_obstacle_x = self.robot_world_origin_x + self.obstacle_lead_distance
 
         self.decision_publisher = self.create_publisher(
@@ -245,6 +251,12 @@ class GazeboLabDriver(Node):
             self._on_scan,
             qos_profile_sensor_data,
         )
+        self.create_subscription(
+            Twist,
+            "/flyto/cmd_vel",
+            self._on_command_velocity,
+            10,
+        )
         self.create_timer(0.1, self._tick)
         self._write_manifest()
 
@@ -269,6 +281,7 @@ class GazeboLabDriver(Node):
                 if math.isfinite(self.minimum_range)
                 else None
             ),
+            "latest_command_velocity": self.latest_command_velocity,
         }
         action.update(fields)
         self.actions.append(action)
@@ -278,7 +291,7 @@ class GazeboLabDriver(Node):
         write_json_atomic(
             self.evidence_dir / "driver-manifest.json",
             {
-                "contract_version": "flyto.robotics.lab-driver-evidence.v1",
+                "contract_version": "flyto.robotics.lab-driver-evidence.v2",
                 "scenario_id": self.scenario_id,
                 "job_id": self.job.job_id,
                 "robot_id": self.job.robot_id,
@@ -317,6 +330,12 @@ class GazeboLabDriver(Node):
                     if math.isfinite(self.minimum_range)
                     else None
                 ),
+                "latest_command_velocity": self.latest_command_velocity,
+                "observed_motion": {
+                    "before_obstacle": self.motion_before_obstacle_seen,
+                    "safety_stop": self.safety_stop_observed,
+                    "resumed_after_clear": self.motion_resumed_observed,
+                },
                 "qr_confirmation": {
                     "token_sha256": self.qr_token_fingerprint,
                     "replay_rejected": self.qr_replay_rejected,
@@ -396,6 +415,56 @@ class GazeboLabDriver(Node):
             if math.isfinite(value) and message.range_min <= value <= message.range_max
         ]
         self.minimum_range = min(valid, default=math.inf)
+        self._observe_safety_motion()
+
+    def _on_command_velocity(self, message: Twist) -> None:
+        linear_x = float(message.linear.x)
+        angular_z = float(message.angular.z)
+        is_zero = abs(linear_x) <= 0.001 and abs(angular_z) <= 0.001
+        self.latest_command_velocity = {
+            "linear_x": round(linear_x, 6),
+            "angular_z": round(angular_z, 6),
+            "is_zero": is_zero,
+        }
+        if not self.obstacle_entered and abs(linear_x) > 0.01:
+            self.motion_before_obstacle_seen = True
+        self._observe_safety_motion()
+
+    def _observe_safety_motion(self) -> None:
+        command = self.latest_command_velocity
+        if command is None:
+            return
+        stop_distance = float(self.job.safety.obstacle_stop_distance)
+        if (
+            self.obstacle_entered
+            and not self.safety_stop_observed
+            and self.motion_before_obstacle_seen
+            and math.isfinite(self.minimum_range)
+            and self.minimum_range < stop_distance
+            and command["is_zero"] is True
+        ):
+            self.safety_stop_observed = True
+            self._record(
+                "safety_stop_observed",
+                "LiDAR range crossed the configured threshold and commanded motion reached zero",
+                configured_stop_distance=round(stop_distance, 4),
+                pre_obstacle_motion_observed=True,
+            )
+            return
+        if (
+            self.safety_stop_observed
+            and self.obstacle_exited
+            and not self.motion_resumed_observed
+            and math.isfinite(self.minimum_range)
+            and self.minimum_range >= stop_distance
+            and abs(float(command["linear_x"])) > 0.01
+        ):
+            self.motion_resumed_observed = True
+            self._record(
+                "motion_resumed_observed",
+                "LiDAR range recovered and forward commanded motion resumed",
+                configured_stop_distance=round(stop_distance, 4),
+            )
 
     def _on_image(self, message: Image) -> None:
         self.latest_image = message
@@ -414,20 +483,34 @@ class GazeboLabDriver(Node):
             else:
                 if written is not None and self.video_sequence.frame_count % 16 == 0:
                     self._write_manifest()
-        if (
-            self.pending_capture is not None
-            and self._now() >= self.pending_capture_not_before
-        ):
-            label = self.pending_capture
-            self.pending_capture = None
+        eligible_capture = next(
+            (
+                (index, label)
+                for index, (label, not_before) in enumerate(self.pending_captures)
+                if self._now() >= not_before
+            ),
+            None,
+        )
+        if eligible_capture is not None:
+            index, label = eligible_capture
+            self.pending_captures.pop(index)
             self._capture(label, message)
+
+    def _queue_capture(self, label: str, *, not_before: float | None = None) -> None:
+        if label in self.captured_labels or any(
+            pending_label == label for pending_label, _ in self.pending_captures
+        ):
+            return
+        self.pending_captures.append(
+            (label, self._now() if not_before is None else not_before)
+        )
 
     def _capture(self, label: str, message: Image | None = None) -> None:
         if label in self.captured_labels:
             return
         frame = message or self.latest_image
         if frame is None:
-            self.pending_capture = label
+            self._queue_capture(label)
             return
         destination = self.evidence_dir / (
             f"gazebo-{label}-{self._elapsed():06.2f}.png"
@@ -666,6 +749,7 @@ class GazeboLabDriver(Node):
     def _tick(self) -> None:
         elapsed = self._elapsed()
         self._advance_guarded_handoff(elapsed)
+        self._observe_safety_motion()
         if not self.obstacle_entered and elapsed >= self.obstacle_enter_seconds:
             self.obstacle_entered = True
             robot_x = self.robot_world_origin_x
@@ -690,8 +774,7 @@ class GazeboLabDriver(Node):
                 y=active_obstacle_y,
                 action="obstacle_enter",
             ):
-                self.pending_capture = "obstacle"
-                self.pending_capture_not_before = self._now() + 0.4
+                self._queue_capture("obstacle", not_before=self._now() + 0.4)
         if not self.obstacle_exited and elapsed >= self.obstacle_exit_seconds:
             self.obstacle_exited = True
             self._set_obstacle_pose(

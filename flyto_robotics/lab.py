@@ -17,6 +17,12 @@ from .contracts import load_job
 
 LAB_SCENARIO_CONTRACT_VERSION = "flyto.robotics.lab-scenario.v1"
 LAB_REPORT_CONTRACT_VERSION = "flyto.robotics.lab-report.v1"
+LAB_DRIVER_EVIDENCE_CONTRACT_VERSIONS = frozenset(
+    {
+        "flyto.robotics.lab-driver-evidence.v1",
+        "flyto.robotics.lab-driver-evidence.v2",
+    }
+)
 IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 MAX_SCENARIO_BYTES = 128 * 1024
 MAX_REQUIRED_ITEMS = 64
@@ -443,7 +449,7 @@ def evaluate_lab_result(
         checks,
         "driver_evidence_contract",
         driver_evidence.get("contract_version")
-        == "flyto.robotics.lab-driver-evidence.v1",
+        in LAB_DRIVER_EVIDENCE_CONTRACT_VERSIONS,
         str(driver_evidence.get("contract_version")),
     )
     displacement_raw = driver_evidence.get("world_displacement")

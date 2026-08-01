@@ -175,15 +175,18 @@ checkpoint、錯誤收件者、正確收件者、解鎖與完成字幕的開始�
 同一回合提供兩種不同用途的影片，避免把工程證據直接當成產品故事：
 
 - `flyto2-hospital-story.mp4` 給第一次接觸 Flyto2 的觀眾。它用大字章節、
-  繁體中文旁白與紅綠結果卡，先說明「替 12 號病人送 A12 藥袋」，再依序
-  解釋攝影機故障改道、障礙安全停止、錯藥拒絕、錯人拒絕與正確後解鎖。
+  五句短旁白與紅綠結果卡，先說明「替 12 號病人送 A12 藥袋」，再依序
+  解釋攝影機故障改道、醫療推車前安全停止、錯藥拒絕、錯人拒絕與正確後
+  解鎖。五句旁白分別綁定規劃、停止、拒絕與解鎖的原始事件時間，不使用
+  手工固定秒數。
 - `flyto2-gazebo-verification.mp4` 給評審與工程人員核對模型、候選路線、
   感測數值、事件 LOG、checkpoint、plan hash 與證據鏈。
 
-一般觀眾版仍只使用同一回合的 Gazebo GUI 與 JSON 證據，不用生成式畫面
+一般觀眾版仍只使用同一回合的 Gazebo GUI 與 JSON 證據，不用生成式影像
 代替模擬。開頭與結尾會停格，讓觀眾有時間理解任務與結論；中段保留原始
-任務順序。影片也明確區分：AI 負責理解任務與選路，固定的安全規則負責
-決定動作能不能執行。
+任務順序。`hospital-story-narration-sync.json` 列出每一句旁白所依據的
+事件與實際開始秒數。影片也明確區分：AI 負責理解任務與選路，固定的安全
+規則負責決定動作能不能執行。
 
 ```bash
 FLYTO2_LOGO_FILE=/absolute/path/to/flyto2-logo.png \
@@ -214,12 +217,27 @@ scripts/run-ai4all-gui-evidence.sh \
   results/ai4all-showcase/medication-handoff-live-v8
 ```
 
-腳本使用 Xvfb 錄製完整 Gazebo GUI，不抓取預先輸出的圖片序列。它會將
+腳本使用 Xvfb 錄製完整桌面，不抓取預先輸出的圖片序列。左側是 Gazebo
+GUI，右側是同一段原始錄影內的同步證據面板；面板把「執行前已完成的 AI
+規劃」與「本次 Gazebo 即時衍生事件」分區顯示，避免把後製字幕誤認成
+即時因果。黑色方塊障礙也改為由 SDF primitive 組成的醫療推車。腳本會將
 原回合的 attested plan 與 planning session 複製到新的未追蹤回合，重新
 執行 ROS 2／Gazebo，產生新的 mission、driver、lab 與 showcase 報告；
 任何必要檔案缺失、GUI 沒有出現或驗收失敗都會結束為非零狀態。
 `gui-capture-metadata.json` 以任務完成時間與實測 elapsed time 計算 GUI
 錄影中的任務起點，使事件字幕與同一回合的模擬時間對齊。
+`live-evidence-panel-events.jsonl` 逐筆保留面板讀到的 driver sequence、
+觀察時間、LiDAR、速度與箱體鎖定狀態；原始 `gazebo-gui.mp4` 不加旁白。
+控制器同時以 monotonic 時鐘要求 odometry、LiDAR、camera 連續新鮮一秒後
+才允許第一個動作；新 Gazebo world 啟動時若短暫看到舊樣本，只會維持零速
+等待，不會把它當成可用感測。開始行駛後若感測逾時，仍會立即安全失敗。
+
+2026-08-01 的最終可重現回合是
+`results/ai4all-showcase/medication-handoff-gui-v16-final/`。原始桌面錄影為
+1920×1080、30 fps、96.9 秒、2,907 格；lab 與 showcase 分別全數通過，
+showcase 為 22/22。driver v2 證明推車前已有位移、0.3686 m 時速度指令歸
+零、清空後再恢復前進。一般觀眾版含 H.264/AAC 與五句事件綁定旁白，工程
+版保留同一段 Gazebo 時間線；兩支影片 SHA-256 已記錄於 `STATE.md`。
 
 再以核准 Logo 產生單一連續的中文驗證片：
 

@@ -124,12 +124,22 @@ def test_lab_scenario_fails_closed(
         parse_lab_scenario(value)
 
 
-def test_lab_report_requires_every_safety_and_image_assertion(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "driver_contract",
+    [
+        "flyto.robotics.lab-driver-evidence.v1",
+        "flyto.robotics.lab-driver-evidence.v2",
+    ],
+)
+def test_lab_report_requires_every_safety_and_image_assertion(
+    tmp_path: Path,
+    driver_contract: str,
+) -> None:
     scenario = load_lab_scenario(SCENARIO, project_root=PROJECT_ROOT)
     (tmp_path / "driver-manifest.json").write_text(
         json.dumps(
             {
-                "contract_version": "flyto.robotics.lab-driver-evidence.v1",
+                "contract_version": driver_contract,
                 "world_displacement": 4.2,
             }
         ),

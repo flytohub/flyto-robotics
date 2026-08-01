@@ -7,8 +7,10 @@ SUBTITLES = ROOT / "video/ai4all-showcase.ass"
 MEDICATION_FILTER = ROOT / "video/ai4all-medication-showcase-filter.txt"
 MEDICATION_SUBTITLES = ROOT / "video/ai4all-medication-showcase.ass"
 GUI_CAPTURE_SCRIPT = ROOT / "scripts/run-ai4all-gui-evidence.sh"
+LIVE_PANEL_SCRIPT = ROOT / "scripts/ai4all-live-evidence-panel.py"
 VERIFICATION_RENDER_SCRIPT = ROOT / "scripts/render-ai4all-verification-video.sh"
 STORY_RENDER_SCRIPT = ROOT / "scripts/render-ai4all-story-video.sh"
+DOCKERFILE = ROOT / "docker/Dockerfile.jazzy"
 WORLD = ROOT / "worlds/ai4all-branching-route.sdf"
 ROVER = ROOT / "models/flyto_rover/model.sdf"
 SHOWCASE_DOC = ROOT / "docs/AI4ALL_SHOWCASE.md"
@@ -77,8 +79,32 @@ def test_gui_evidence_records_a_real_gazebo_window_with_the_same_contract() -> N
     assert "driver-manifest.json" in script
     assert "mission-result.json" in script
     assert "gazebo-window-geometry.env" in script
+    assert "Flyto2 Live Evidence" in script
+    assert "ffplay" in script
+    assert "live-evidence-panel-events.jsonl" in script
+    assert "live-panel-window-geometry.env" in script
+    assert "flyto.robotics.gui-capture.v2" in script
+    assert "live-evidence-panel.png" in script
+    assert "-f image2pipe" in script
+    assert "-fflags nobuffer" in script
+    assert "NotoSansCJK-Regular.ttc" in script
+    assert "fonts-noto-cjk" in DOCKERFILE.read_text(encoding="utf-8")
+    assert "python3-pil" in DOCKERFILE.read_text(encoding="utf-8")
     assert "ffprobe" in script
     assert "sha256sum" in script
+
+
+def test_live_panel_separates_pre_run_planning_from_same_run_gazebo_evidence() -> None:
+    script = LIVE_PANEL_SCRIPT.read_text(encoding="utf-8")
+
+    assert "規劃證據｜執行前已產生" in script
+    assert "Gazebo 證據｜同回合即時" in script
+    assert "planning-session.json" in script
+    assert "images/driver-manifest.json" in script
+    assert "safety_stop_observed" in script
+    assert "motion_resumed_observed" in script
+    assert "latest_command_velocity" in script
+    assert "observed_at_epoch" in script
 
 
 def test_verification_video_keeps_one_continuous_gazebo_timeline() -> None:
@@ -119,10 +145,10 @@ def test_story_video_explains_the_mission_without_engineering_jargon() -> None:
         "這是一台醫院送藥機器人",
         "幫 12 號病人送 A12 藥袋",
         "攝影機故障，AI 改走安全路線",
-        "有人擋路，機器人自己停下來",
+        "醫療推車進入路線，機器人自己停下來",
         "錯的藥、不對的人，都不會開鎖",
         "藥袋正確 + 病人正確 = 才能解鎖",
-        "這是 Gazebo 模擬，不是實體醫院",
+        "主畫面是 Gazebo 即時模擬錄影，不是生成式影像",
     )
     assert all(copy in script for copy in required_plain_language)
     assert "say -v" in script
@@ -138,7 +164,11 @@ def test_story_video_preserves_source_evidence_and_separates_ai_from_safety() ->
     assert "driver-manifest.json" in script
     assert "AI 負責理解任務與選路" in script
     assert "安全規則負責決定能不能執行" in script
-    assert "不是生成式影片" in script
+    assert "hospital-story-narration-sync.json" in script
+    assert "driver.safety_stop_observed" in script
+    assert '"cue_count": len(narration)' in script
+    assert "不是生成式影像" in script
+    assert "有人擋路" not in script
 
 
 def test_hospital_scene_is_self_contained_and_visually_explains_the_mission() -> None:
@@ -151,6 +181,9 @@ def test_hospital_scene_is_self_contained_and_visually_explains_the_mission() ->
         'name="camera_a_marker"',
         'name="camera_b_marker"',
         'name="medication_handoff_zone"',
+        'name="hospital_trolley_body"',
+        'name="hospital_trolley_cross_vertical"',
+        'name="hospital_trolley_wheel_front_left"',
         'name="Flyto2 Gazebo 3D View"',
         "<camera_pose>0.45 -6.5 6.2 0 0.72 1.5708</camera_pose>",
     )

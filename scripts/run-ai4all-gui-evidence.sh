@@ -101,6 +101,62 @@ docker run --rm \
     openbox_pid=\$!
     sleep 1
 
+    python3 /workspace/scripts/ai4all-live-evidence-panel.py \
+      --planning-session /workspace/${relative_capture_run}/planning-session.json \
+      --driver-manifest /workspace/${relative_capture_run}/images/driver-manifest.json \
+      --panel-text /workspace/${relative_capture_run}/live-evidence-panel.txt \
+      --panel-image /workspace/${relative_capture_run}/live-evidence-panel.png \
+      --font-file /usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc \
+      --font-index 3 \
+      --state-output /workspace/${relative_capture_run}/live-evidence-panel-state.json \
+      --events-output /workspace/${relative_capture_run}/live-evidence-panel-events.jsonl \
+      --ready-file /workspace/${relative_capture_run}/live-evidence-panel-ready.txt \
+      --stop-file /workspace/${relative_capture_run}/live-evidence-panel-stop.txt \
+      > /workspace/${relative_capture_run}/live-evidence-panel.log 2>&1 &
+    panel_writer_pid=\$!
+    for attempt in \$(seq 1 30); do
+      [[ -s /workspace/${relative_capture_run}/live-evidence-panel-ready.txt ]] && break
+      sleep 0.2
+    done
+    if [[ ! -s /workspace/${relative_capture_run}/live-evidence-panel-ready.txt ]]; then
+      echo 'Live evidence panel writer did not become ready' >&2
+      exit 4
+    fi
+
+    (
+      while [[ ! -e /workspace/${relative_capture_run}/live-evidence-panel-stop.txt ]]; do
+        if [[ -s /workspace/${relative_capture_run}/live-evidence-panel.png ]]; then
+          /bin/cat /workspace/${relative_capture_run}/live-evidence-panel.png
+        fi
+        sleep 0.2
+      done
+    ) | ffplay -hide_banner -loglevel error -nostats -an \
+      -fflags nobuffer -flags low_delay -framedrop \
+      -probesize 32 -analyzeduration 0 \
+      -f image2pipe -framerate 5 -vcodec png -i - \
+      -window_title 'Flyto2 Live Evidence' -noborder \
+      > /workspace/${relative_capture_run}/ffplay-evidence-panel.log 2>&1 &
+    panel_window_pid=\$!
+    panel_window_id=''
+    for attempt in \$(seq 1 30); do
+      panel_window_id=\$(xdotool search --name 'Flyto2 Live Evidence' 2>/dev/null | tail -n 1 || true)
+      [[ -n \"\${panel_window_id}\" ]] && break
+      sleep 0.2
+    done
+    if [[ -z \"\${panel_window_id}\" ]]; then
+      echo 'Live evidence panel window did not become visible' >&2
+      exit 4
+    fi
+    python3 -c 'import time; print(time.time())' \
+      > /workspace/${relative_capture_run}/live-panel-window-visible-epoch.txt
+    xdotool windowmap \"\${panel_window_id}\" || true
+    xdotool windowsize \"\${panel_window_id}\" 520 1040 || true
+    xdotool windowmove \"\${panel_window_id}\" 1400 20 || true
+    xdotool windowraise \"\${panel_window_id}\" || true
+    sleep 1
+    xdotool getwindowgeometry --shell \"\${panel_window_id}\" \
+      > /workspace/${relative_capture_run}/live-panel-window-geometry.env
+
     capture_started_epoch=\$(python3 -c 'import time; print(time.time())')
     printf '%s\\n' \"\${capture_started_epoch}\" \
       > /workspace/${relative_capture_run}/capture-started-epoch.txt
@@ -122,7 +178,9 @@ docker run --rm \
             > /workspace/${relative_capture_run}/gazebo-window-visible-epoch.txt
           xdotool windowmap \"\${window_id}\" || true
           xdotool windowactivate --sync \"\${window_id}\" || true
-          xdotool key alt+F10 || true
+          xdotool windowsize \"\${window_id}\" 1380 1040 || true
+          xdotool windowmove \"\${window_id}\" 0 20 || true
+          xdotool windowraise \"\${window_id}\" || true
           sleep 2
           xdotool getwindowgeometry --shell \"\${window_id}\" \
             > /workspace/${relative_capture_run}/gazebo-window-geometry.env
@@ -145,9 +203,12 @@ docker run --rm \
     launch_status=\$?
     set -e
     wait \"\${framing_pid}\" || framing_status=\$?
+    touch /workspace/${relative_capture_run}/live-evidence-panel-stop.txt
+    wait \"\${panel_writer_pid}\" || panel_writer_status=\$?
     sleep 3
     kill -INT \"\${recorder_pid}\" 2>/dev/null || true
     wait \"\${recorder_pid}\" || true
+    kill \"\${panel_window_pid}\" 2>/dev/null || true
     kill \"\${openbox_pid}\" \"\${xvfb_pid}\" 2>/dev/null || true
 
     required_files=(
@@ -157,11 +218,16 @@ docker run --rm \
       /workspace/${relative_capture_run}/facility/showcase-evidence.json
       /workspace/${relative_capture_run}/planning-session.json
       /workspace/${relative_capture_run}/validated-plan.json
+      /workspace/${relative_capture_run}/live-evidence-panel.txt
+      /workspace/${relative_capture_run}/live-evidence-panel.png
+      /workspace/${relative_capture_run}/live-evidence-panel-state.json
+      /workspace/${relative_capture_run}/live-evidence-panel-events.jsonl
+      /workspace/${relative_capture_run}/live-panel-window-geometry.env
     )
     for required_file in \"\${required_files[@]}\"; do
       if [[ ! -s \"\${required_file}\" ]]; then
         echo \"GUI Gazebo run did not produce \${required_file}\" >&2
-        exit \${launch_status:-3}
+        exit 3
       fi
     done
     if [[ ! -s /workspace/${relative_capture_run}/gazebo-window-visible-epoch.txt ]]; then
@@ -197,8 +263,15 @@ docker run --rm \
       /workspace/${relative_capture_run}/validated-plan.json \
       /workspace/${relative_capture_run}/mission-result.json \
       /workspace/${relative_capture_run}/images/driver-manifest.json \
+      /workspace/${relative_capture_run}/live-evidence-panel-state.json \
+      /workspace/${relative_capture_run}/live-evidence-panel-events.jsonl \
+      /workspace/${relative_capture_run}/live-evidence-panel.png \
       > /workspace/${relative_capture_run}/gui-evidence.sha256
-    exit \"\${launch_status}\"
+    if ((launch_status != 0)); then
+      echo \"Gazebo launch exited with status \${launch_status}\" >&2
+      exit 3
+    fi
+    exit 0
   "
 status=$?
 set -e
@@ -217,6 +290,9 @@ output = Path(sys.argv[1])
 capture_started = float((output / "capture-started-epoch.txt").read_text().strip())
 window_visible = float(
     (output / "gazebo-window-visible-epoch.txt").read_text().strip()
+)
+panel_visible = float(
+    (output / "live-panel-window-visible-epoch.txt").read_text().strip()
 )
 mission = json.loads(
     (output / "mission-result.json").read_text(encoding="utf-8")
@@ -241,7 +317,7 @@ mission_started = first_odometry_epoch - (
     sim_anchor_seconds * simulation_time_scale
 )
 metadata = {
-    "contract_version": "flyto.robotics.gui-capture.v1",
+    "contract_version": "flyto.robotics.gui-capture.v2",
     "capture_started_epoch": capture_started,
     "gazebo_window_visible_seconds": round(
         max(0.0, window_visible - capture_started), 3
@@ -250,6 +326,15 @@ metadata = {
         max(0.0, mission_started - capture_started), 3
     ),
     "simulation_time_scale": round(simulation_time_scale, 6),
+    "live_evidence_panel": {
+        "visible_seconds": round(max(0.0, panel_visible - capture_started), 3),
+        "geometry_file": "live-panel-window-geometry.env",
+        "state_file": "live-evidence-panel-state.json",
+        "events_file": "live-evidence-panel-events.jsonl",
+        "image_file": "live-evidence-panel.png",
+        "planning_source": "planning-session.json",
+        "runtime_source": "images/driver-manifest.json",
+    },
     "source_plan": "validated-plan.json",
     "source_planning_session": "planning-session.json",
 }

@@ -15,17 +15,19 @@ mission_result="${run_directory}/mission-result.json"
 driver_manifest="${run_directory}/images/driver-manifest.json"
 capture_metadata="${run_directory}/gui-capture-metadata.json"
 window_geometry="${run_directory}/gazebo-window-geometry.env"
+live_panel_state="${run_directory}/live-evidence-panel-state.json"
 subtitle_file="${run_directory}/hospital-story.ass"
 narration_schedule="${run_directory}/hospital-story-narration.tsv"
+narration_sync="${run_directory}/hospital-story-narration-sync.json"
 output_video="${run_directory}/flyto2-hospital-story.mp4"
 logo_file="${FLYTO2_LOGO_FILE:-}"
 font_file="${FLYTO2_CJK_FONT_FILE:-/System/Library/Fonts/PingFang.ttc}"
 narration_voice="${FLYTO2_NARRATION_VOICE:-Meijia}"
-narration_rate="${FLYTO2_NARRATION_RATE:-185}"
+narration_rate="${FLYTO2_NARRATION_RATE:-172}"
 narration_enabled="${STORY_NARRATION:-1}"
 image_name="${FLYTO_ROBOTICS_IMAGE:-flyto-robotics:jazzy-harmonic}"
-intro_duration="8.0"
-outro_duration="12.0"
+intro_duration="6.0"
+outro_duration="8.0"
 render_assets=""
 
 cleanup() {
@@ -66,7 +68,9 @@ read -r trim_start source_duration story_duration outro_start <<< "$(python3 -c 
   'import json, sys; m=json.load(open(sys.argv[1], encoding="utf-8")); c=json.load(open(sys.argv[2], encoding="utf-8")); intro=float(sys.argv[3]); outro=float(sys.argv[4]); source=float(m["elapsed_seconds"])*float(c.get("simulation_time_scale", 1.0))+3.0; print("{:.3f} {:.3f} {:.3f} {:.3f}".format(float(c["mission_offset_seconds"]), source, intro+source+outro, intro+source))' \
   "${mission_result}" "${capture_metadata}" "${intro_duration}" "${outro_duration}")"
 
-read -r main_x main_y main_width main_height <<< "$(python3 - "${window_geometry}" <<'PY'
+scene_transform="scale=1920:1080"
+if [[ ! -s "${live_panel_state}" ]]; then
+  read -r main_x main_y main_width main_height <<< "$(python3 - "${window_geometry}" <<'PY'
 import re
 import sys
 from pathlib import Path
@@ -86,6 +90,8 @@ if main_x + main_width > 1920 or main_y + main_height > 1080:
 print(main_x, main_y, main_width, main_height)
 PY
 )"
+  scene_transform="crop=${main_width}:${main_height}:${main_x}:${main_y},scale=1920:1080"
+fi
 
 python3 - "${planning_session}" "${mission_result}" "${driver_manifest}" \
   "${capture_metadata}" "${subtitle_file}" "${narration_schedule}" \
@@ -137,6 +143,7 @@ def event_time(kind: str, source: dict[str, dict], fallback: float) -> float:
 
 obstacle_in = event_time("fault_injection", driver_events, 3.0)
 obstacle_stop = event_time("obstacle_stop", mission_events, 3.3)
+safety_stop = event_time("safety_stop_observed", driver_events, 3.3)
 path_clear = event_time("path_clear", mission_events, 6.2)
 destination = next(
     (
@@ -158,14 +165,14 @@ lines = [
     "[V4+ Styles]",
     "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding",
     "Style: Brand,PingFang TC,25,&H00FFFFFF,&H00FFFFFF,&H00101820,&H95101820,-1,0,0,0,100,100,0,0,3,1,0,7,120,120,34,1",
-    "Style: Stage,PingFang TC,31,&H00FFFFFF,&H00FFFFFF,&H00101820,&HBC101820,-1,0,0,0,100,100,0,0,3,1,0,9,120,120,36,1",
+    "Style: Stage,PingFang TC,31,&H00FFFFFF,&H00FFFFFF,&H00101820,&HBC101820,-1,0,0,0,100,100,0,0,3,1,0,9,120,570,36,1",
     "Style: Title,PingFang TC,74,&H00FFFFFF,&H00FFFFFF,&H00101820,&H00101820,-1,0,0,0,100,100,0,0,1,3,0,5,110,110,60,1",
     "Style: Subtitle,PingFang TC,43,&H00FFFFFF,&H00FFFFFF,&H00101820,&H00101820,-1,0,0,0,100,100,0,0,1,2,0,5,150,150,60,1",
     "Style: Boundary,PingFang TC,25,&H00D8E6EF,&H00FFFFFF,&H00101820,&H95101820,0,0,0,0,100,100,0,0,3,1,0,2,120,120,38,1",
-    "Style: Event,PingFang TC,43,&H00FFFFFF,&H00FFFFFF,&H00101820,&HCD101820,-1,0,0,0,100,100,0,0,3,1,0,2,115,115,70,1",
-    "Style: Danger,PingFang TC,47,&H006B6BFF,&H00FFFFFF,&H00101820,&HDE161C28,-1,0,0,0,100,100,0,0,3,2,0,5,130,130,80,1",
-    "Style: Success,PingFang TC,47,&H0087D155,&H00FFFFFF,&H00101820,&HDE14251E,-1,0,0,0,100,100,0,0,3,2,0,5,130,130,80,1",
-    "Style: Explain,PingFang TC,31,&H00FFFFFF,&H00FFFFFF,&H00101820,&HBD101820,-1,0,0,0,100,100,0,0,3,1,0,2,160,160,45,1",
+    "Style: Event,PingFang TC,43,&H00FFFFFF,&H00FFFFFF,&H00101820,&HCD101820,-1,0,0,0,100,100,0,0,3,1,0,2,115,570,70,1",
+    "Style: Danger,PingFang TC,47,&H006B6BFF,&H00FFFFFF,&H00101820,&HDE161C28,-1,0,0,0,100,100,0,0,3,2,0,5,130,570,80,1",
+    "Style: Success,PingFang TC,47,&H0087D155,&H00FFFFFF,&H00101820,&HDE14251E,-1,0,0,0,100,100,0,0,3,2,0,5,130,570,80,1",
+    "Style: Explain,PingFang TC,31,&H00FFFFFF,&H00FFFFFF,&H00101820,&HBD101820,-1,0,0,0,100,100,0,0,3,1,0,2,160,570,45,1",
     "Style: Label,PingFang TC,29,&H00FFFFFF,&H00FFFFFF,&H00101820,&HD0101820,-1,0,0,0,100,100,0,0,3,1,0,5,40,40,30,1",
     "Style: OutroTitle,PingFang TC,58,&H00FFFFFF,&H00FFFFFF,&H00101820,&H00101820,-1,0,0,0,100,100,0,0,1,3,0,5,120,120,45,1",
     "Style: OutroLine,PingFang TC,39,&H00FFFFFF,&H00FFFFFF,&H00101820,&H00101820,-1,0,0,0,100,100,0,0,1,2,0,5,130,130,50,1",
@@ -196,15 +203,12 @@ add(1.8, intro, "Subtitle", "任務：幫 12 號病人送 A12 藥袋", 5)
 add(0.0, intro, "Boundary", "真實 Gazebo 模擬畫面｜所有人物與藥品資料皆為合成測試", 5)
 
 add(intro, obstacle_stop, "Stage", "步驟 1／4　AI 先挑一條仍然安全、看得到的路線", 3)
-add_positioned(intro, obstacle_in, "Label", 520, 455, "送藥機器人\n↓")
-add_positioned(intro, obstacle_in, "Label", 1450, 415, "護理站（目的地）\n↓")
 add(intro, obstacle_in, "Event", "攝影機故障，AI 改走安全路線", 4)
 add(intro, obstacle_in, "Explain", "原本路線無法可靠確認 → 改走橘線接紫線", 4)
 
 add(obstacle_in, path_clear, "Stage", "步驟 2／4　行駛中持續檢查前方距離", 3)
-add_positioned(obstacle_in, path_clear, "Label", 800, 420, "突然出現的障礙物\n↓")
-add(obstacle_in, path_clear, "Danger", "有人擋路，機器人自己停下來", 4)
-add(obstacle_stop, path_clear, "Explain", "安全規則：距離太近 = 速度立刻歸零", 4)
+add(obstacle_in, path_clear, "Danger", "醫療推車進入路線，機器人自己停下來", 4)
+add(safety_stop, path_clear, "Explain", "實測：LiDAR 低於門檻，速度指令歸零", 4)
 
 resume_explanation_end = min(destination, path_clear + 8.0)
 add(path_clear, destination, "Stage", "步驟 2／4　確認前方安全後再繼續", 3)
@@ -242,24 +246,40 @@ add(outro_start, story_end, "OutroTitle", "看懂 Flyto2 的一句話", 6)
 add(outro_start + 1.8, story_end, "OutroLine", "AI 負責理解任務與選路", 6)
 add(outro_start + 4.2, story_end, "OutroLine", "安全規則負責決定能不能執行", 6)
 add(outro_start + 6.8, story_end, "Success", "錯藥 ✕　錯人 ✕　兩者正確才解鎖 ✓", 6)
-add(outro_start, story_end, "Boundary", "這是 Gazebo 模擬，不是實體醫院｜不是生成式影片", 6)
+add(outro_start, story_end, "Boundary", "這是合成醫院案例｜主畫面是 Gazebo 即時模擬錄影，不是生成式影像", 6)
 
 subtitle_output.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 narration = [
-    (0.6, "這是一台醫院送藥機器人。它的任務，是把 A 十二藥袋，安全交給十二號病人。"),
-    (8.3, "先看 AI 做什麼。它理解任務、比較路線。出發前發現 B 攝影機故障，就改走仍然看得到、也能驗證的路線。"),
-    (18.0, "路上突然有人擋住。安全規則立刻讓機器人停下來。這個停止不靠 AI 猜測，也不能被 AI 略過。"),
-    (26.5, "障礙移開後，機器人從原本進度繼續，不會跳過前面的安全步驟。"),
-    (40.0, "它沿著重新選好的路線前往護理站。AI 負責選路，實際移動仍由固定規則逐步執行。"),
-    (64.5, "抵達後還不能打開藥箱。系統先確認藥袋，再確認病人。"),
-    (70.0, "藥袋 B 十三錯誤，拒絕並保持上鎖；換成 A 十二，第一關通過。"),
-    (75.8, "十三號病人不符合任務，仍不開鎖；確認十二號病人後，第二關通過。"),
-    (82.2, "兩關都正確，藥箱才解鎖，送藥完成。"),
-    (outro_start + 1.3, "重點是，AI 負責理解任務與選路；安全規則負責決定能不能執行。這是 Gazebo 模擬，不是實體醫院，也不是生成式影片。"),
+    (0.6, "story.intro", "任務是把 A 十二藥袋，安全交給十二號病人。"),
+    (intro + 0.4, "planning-session.resource_change", "B 攝影機故障，系統改走可驗證的橘紫路線。"),
+    (safety_stop + 0.1, "driver.safety_stop_observed", "醫療推車進入路線，安全規則讓速度歸零。"),
+    (event_time("item_rejected", driver_events, 23.4) + 0.1, "driver.item_rejected", "錯藥、錯人，都不開鎖。"),
+    (event_time("container_unlocked", driver_events, 26.9) + 0.1, "driver.container_unlocked", "兩項正確，才解鎖交付。"),
 ]
 narration_output.write_text(
-    "".join(f"{start:.3f}\t{text}\n" for start, text in narration), encoding="utf-8"
+    "".join(
+        f"{start:.3f}\t{source}\t{text}\n"
+        for start, source, text in narration
+    ),
+    encoding="utf-8",
+)
+narration_output.with_name("hospital-story-narration-sync.json").write_text(
+    json.dumps(
+        {
+            "contract_version": "flyto.robotics.story-narration-sync.v1",
+            "cue_count": len(narration),
+            "time_basis": "gui-capture-metadata simulation_time_scale",
+            "cues": [
+                {"start_seconds": start, "source_event": source, "text": text}
+                for start, source, text in narration
+            ],
+        },
+        ensure_ascii=False,
+        indent=2,
+    )
+    + "\n",
+    encoding="utf-8",
 )
 PY
 
@@ -274,17 +294,17 @@ if [[ "${narration_enabled}" != "0" ]]; then
   audio_filters=""
   audio_mix_inputs=""
   narration_count=0
-  while IFS=$'\t' read -r narration_start narration_text; do
+  while IFS=$'\t' read -r narration_start narration_source narration_text; do
     clip_file="${render_assets}/narration-${narration_count}.aiff"
     say -v "${narration_voice}" -r "${narration_rate}" \
       -o "${clip_file}" "${narration_text}"
     narration_delay_ms="$(python3 -c 'import sys; print(round(float(sys.argv[1]) * 1000))' "${narration_start}")"
     audio_inputs+=( -i "/assets/$(basename "${clip_file}")" )
-    audio_filters="${audio_filters}[${narration_count}:a]adelay=${narration_delay_ms}:all=1[n${narration_count}];"
+    audio_filters="${audio_filters}[${narration_count}:a]highpass=f=70,lowpass=f=12000,acompressor=threshold=0.12:ratio=2:attack=20:release=250:makeup=1.4,adelay=${narration_delay_ms}:all=1[n${narration_count}];"
     audio_mix_inputs="${audio_mix_inputs}[n${narration_count}]"
     narration_count=$((narration_count + 1))
   done < "${narration_schedule}"
-  audio_filters="${audio_filters}${audio_mix_inputs}amix=inputs=${narration_count}:normalize=0,alimiter=limit=0.95,apad=whole_dur=${story_duration}[narration]"
+  audio_filters="${audio_filters}${audio_mix_inputs}amix=inputs=${narration_count}:normalize=0,alimiter=limit=0.95,loudnorm=I=-16:TP=-1.5:LRA=7,apad=whole_dur=${story_duration}[narration]"
   docker run --rm \
     -v "${render_assets}:/assets" \
     "${image_name}" \
@@ -314,7 +334,7 @@ docker run --rm \
     -i /assets/flyto2-logo.png \
     -i /assets/story-narration.m4a \
     -filter_complex \
-      "[0:v]crop=${main_width}:${main_height}:${main_x}:${main_y},scale=1920:1080,tpad=start_mode=clone:start_duration=${intro_duration}:stop_mode=clone:stop_duration=${outro_duration},setpts=PTS-STARTPTS,drawbox=x=0:y=0:w=iw:h=ih:color=0x071018@0.72:t=fill:enable='lt(t,${intro_duration})+gte(t,${outro_start})'[scene];[1:v]scale=78:-1,format=rgba,loop=loop=-1:size=1:start=0,setpts=N/30/TB[logo];[scene][logo]overlay=34:27:shortest=1,subtitles=/assets/hospital-story.ass:fontsdir=/assets/fonts[out]" \
+      "[0:v]${scene_transform},tpad=start_mode=clone:start_duration=${intro_duration}:stop_mode=clone:stop_duration=${outro_duration},setpts=PTS-STARTPTS,drawbox=x=0:y=0:w=iw:h=ih:color=0x071018@0.72:t=fill:enable='lt(t,${intro_duration})+gte(t,${outro_start})'[scene];[1:v]scale=78:-1,format=rgba,loop=loop=-1:size=1:start=0,setpts=N/30/TB[logo];[scene][logo]overlay=34:27:shortest=1,subtitles=/assets/hospital-story.ass:fontsdir=/assets/fonts[out]" \
     -map "[out]" -map 2:a \
     -t "${story_duration}" -r 30 \
     -c:v libx264 -preset medium -crf 18 -pix_fmt yuv420p \
@@ -335,6 +355,7 @@ shasum -a 256 \
   "${planning_session}" \
   "${mission_result}" \
   "${driver_manifest}" \
+  "${narration_sync}" \
   > "${run_directory}/hospital-story-video.sha256"
 
 echo "Flyto2 layperson hospital story video: ${output_video}"

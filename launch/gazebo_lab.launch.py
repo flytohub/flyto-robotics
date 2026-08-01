@@ -86,6 +86,12 @@ def _launch_runtime(context: object) -> list[object]:
                 "result_file": LaunchConfiguration("result_file"),
                 "semantic_map_file": LaunchConfiguration("semantic_map_file"),
                 "semantic_map_id": LaunchConfiguration("semantic_map_id"),
+                "odometry_timeout_seconds": LaunchConfiguration(
+                    "odometry_timeout_seconds"
+                ),
+                "sensor_startup_grace_seconds": LaunchConfiguration(
+                    "sensor_startup_grace_seconds"
+                ),
                 "use_sim_time": True,
                 "gazebo_physics": True,
                 "obstacle_injected": True,
@@ -143,6 +149,16 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument(
                 "semantic_map_id",
                 default_value="gazebo.atomic-color-route.v1",
+            ),
+            DeclareLaunchArgument(
+                "odometry_timeout_seconds",
+                default_value="2.0",
+                description="Simulator sensor freshness window",
+            ),
+            DeclareLaunchArgument(
+                "sensor_startup_grace_seconds",
+                default_value="30.0",
+                description="Simulator startup grace measured on the Gazebo clock",
             ),
             DeclareLaunchArgument(
                 "qr_recipient_ref",

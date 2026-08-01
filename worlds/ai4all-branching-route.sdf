@@ -550,9 +550,60 @@
         <collision name="collision">
           <geometry><box><size>0.44 0.44 0.70</size></box></geometry>
         </collision>
-        <visual name="visual">
-          <geometry><box><size>0.44 0.44 0.70</size></box></geometry>
-          <material><diffuse>0.12 0.12 0.13 1</diffuse></material>
+        <visual name="hospital_trolley_body">
+          <pose>0 0 0.02 0 0 0</pose>
+          <geometry><box><size>0.38 0.34 0.38</size></box></geometry>
+          <material><diffuse>0.78 0.86 0.91 1</diffuse></material>
+        </visual>
+        <visual name="hospital_trolley_top_shelf">
+          <pose>0 0 0.25 0 0 0</pose>
+          <geometry><box><size>0.48 0.42 0.055</size></box></geometry>
+          <material><diffuse>0.10 0.53 0.78 1</diffuse></material>
+        </visual>
+        <visual name="hospital_trolley_lower_shelf">
+          <pose>0 0 -0.19 0 0 0</pose>
+          <geometry><box><size>0.45 0.39 0.045</size></box></geometry>
+          <material><diffuse>0.22 0.31 0.38 1</diffuse></material>
+        </visual>
+        <visual name="hospital_trolley_handle_left">
+          <pose>-0.21 0 0.39 1.5708 0 0</pose>
+          <geometry><cylinder><radius>0.018</radius><length>0.40</length></cylinder></geometry>
+          <material><diffuse>0.15 0.20 0.24 1</diffuse></material>
+        </visual>
+        <visual name="hospital_trolley_handle_right">
+          <pose>0.21 0 0.39 1.5708 0 0</pose>
+          <geometry><cylinder><radius>0.018</radius><length>0.40</length></cylinder></geometry>
+          <material><diffuse>0.15 0.20 0.24 1</diffuse></material>
+        </visual>
+        <visual name="hospital_trolley_cross_vertical">
+          <pose>0 -0.173 0.02 1.5708 0 0</pose>
+          <geometry><box><size>0.07 0.012 0.22</size></box></geometry>
+          <material><diffuse>0.92 0.08 0.10 1</diffuse></material>
+        </visual>
+        <visual name="hospital_trolley_cross_horizontal">
+          <pose>0 -0.18 0.02 1.5708 0 0</pose>
+          <geometry><box><size>0.20 0.012 0.07</size></box></geometry>
+          <material><diffuse>0.92 0.08 0.10 1</diffuse></material>
+        </visual>
+        <visual name="hospital_trolley_wheel_front_left">
+          <pose>-0.17 -0.17 -0.29 1.5708 0 0</pose>
+          <geometry><cylinder><radius>0.06</radius><length>0.045</length></cylinder></geometry>
+          <material><diffuse>0.05 0.05 0.06 1</diffuse></material>
+        </visual>
+        <visual name="hospital_trolley_wheel_front_right">
+          <pose>0.17 -0.17 -0.29 1.5708 0 0</pose>
+          <geometry><cylinder><radius>0.06</radius><length>0.045</length></cylinder></geometry>
+          <material><diffuse>0.05 0.05 0.06 1</diffuse></material>
+        </visual>
+        <visual name="hospital_trolley_wheel_rear_left">
+          <pose>-0.17 0.17 -0.29 1.5708 0 0</pose>
+          <geometry><cylinder><radius>0.06</radius><length>0.045</length></cylinder></geometry>
+          <material><diffuse>0.05 0.05 0.06 1</diffuse></material>
+        </visual>
+        <visual name="hospital_trolley_wheel_rear_right">
+          <pose>0.17 0.17 -0.29 1.5708 0 0</pose>
+          <geometry><cylinder><radius>0.06</radius><length>0.045</length></cylinder></geometry>
+          <material><diffuse>0.05 0.05 0.06 1</diffuse></material>
         </visual>
       </link>
     </model>
