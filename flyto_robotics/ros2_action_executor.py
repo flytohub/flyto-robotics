@@ -12,6 +12,13 @@ from .contracts import StationPose
 from .ros2_execution import resolve_ros2_execution_target
 from .semantic_map import parse_semantic_location_map
 
+FAULT_SCENARIOS = {
+    "lidar_dropout": "lidar_stale",
+    "odometry_freeze": "odometry_stale",
+    "nav2_lifecycle_failure": "command_stale",
+}
+SAFETY_STOP_REASONS = {"emergency_stop", *FAULT_SCENARIOS.values()}
+
 
 class Ros2ActionExecutionError(RuntimeError):
     """Raised when an authorized action cannot complete safely."""
@@ -45,6 +52,9 @@ class NavigationOutcome:
     cancel_requested: bool
     cancel_reason: str | None
     safety_stop_observed: bool
+    safety_stop_reason: str | None
+    fault_injection_observed: bool
+    safety_stop_latency_ms: float | None
     event_codes: tuple[str, ...]
 
 
@@ -104,6 +114,9 @@ class NavigationExecutionMonitor:
         self.state = "prepared"
         self.feedback_count = 0
         self.cancel_reason: str | None = None
+        self.safety_stop_reason: str | None = None
+        self.fault_injection_observed = False
+        self.safety_stop_latency_ms: float | None = None
         self.event_codes: list[str] = ["authority_validated", "server_available"]
 
     def accept_goal(self) -> None:
@@ -126,14 +139,70 @@ class NavigationExecutionMonitor:
         if self.feedback_count == 1:
             self.event_codes.append("feedback_observed")
 
-    def request_cancel(self, reason: str) -> None:
+    def request_cancel(
+        self,
+        reason: str,
+        *,
+        fault_injection_observed: bool = False,
+        safety_stop_latency_ms: float | None = None,
+    ) -> None:
         if self.state != "executing":
             raise Ros2ActionExecutionError("cancel requires an executing goal")
-        if reason not in {"operator_cancel", "emergency_stop", "timeout"}:
+        if reason not in {
+            "operator_cancel",
+            "emergency_stop",
+            "timeout",
+            *FAULT_SCENARIOS.values(),
+        }:
             raise Ros2ActionExecutionError("cancel reason is unsupported")
         self.cancel_reason = reason
+        if reason in SAFETY_STOP_REASONS:
+            self._record_safety_stop(
+                reason,
+                fault_injection_observed=fault_injection_observed,
+                safety_stop_latency_ms=safety_stop_latency_ms,
+            )
         self.state = "canceling"
         self.event_codes.append(reason + "_requested")
+
+    def observe_safety_stop(
+        self,
+        reason: str,
+        *,
+        fault_injection_observed: bool,
+        safety_stop_latency_ms: float | None,
+    ) -> None:
+        """Record an independent stop even if Nav2 already aborted the action."""
+
+        if self.state not in {"executing", "canceling"}:
+            raise Ros2ActionExecutionError("safety stop arrived outside execution")
+        self._record_safety_stop(
+            reason,
+            fault_injection_observed=fault_injection_observed,
+            safety_stop_latency_ms=safety_stop_latency_ms,
+        )
+
+    def _record_safety_stop(
+        self,
+        reason: str,
+        *,
+        fault_injection_observed: bool,
+        safety_stop_latency_ms: float | None,
+    ) -> None:
+        if reason not in SAFETY_STOP_REASONS:
+            raise Ros2ActionExecutionError("safety stop reason is unsupported")
+        if safety_stop_latency_ms is not None:
+            _finite(
+                safety_stop_latency_ms,
+                "safety_stop_latency_ms",
+                minimum=0.0,
+                maximum=10_000.0,
+            )
+        self.safety_stop_reason = reason
+        self.fault_injection_observed = bool(fault_injection_observed)
+        self.safety_stop_latency_ms = safety_stop_latency_ms
+        if "safety_stop_observed" not in self.event_codes:
+            self.event_codes.append("safety_stop_observed")
 
     def finish(
         self,
@@ -165,13 +234,19 @@ class NavigationExecutionMonitor:
                     )
                 status = "succeeded"
             elif result_code == "canceled" and self.cancel_reason is not None:
-                status = {
-                    "operator_cancel": "canceled",
-                    "emergency_stop": "safety_stopped",
-                    "timeout": "timed_out",
-                }[self.cancel_reason]
+                if self.cancel_reason in SAFETY_STOP_REASONS:
+                    status = "safety_stopped"
+                else:
+                    status = {
+                        "operator_cancel": "canceled",
+                        "timeout": "timed_out",
+                    }[self.cancel_reason]
             elif result_code == "aborted":
-                status = "aborted"
+                status = (
+                    "safety_stopped"
+                    if self.safety_stop_reason is not None
+                    else "aborted"
+                )
             else:
                 raise Ros2ActionExecutionError("terminal action result is inconsistent")
         self.event_codes.append("execution_" + status)
@@ -201,7 +276,14 @@ class NavigationExecutionMonitor:
             duration_seconds=round(duration, 6),
             cancel_requested=self.cancel_reason is not None,
             cancel_reason=self.cancel_reason,
-            safety_stop_observed=self.cancel_reason == "emergency_stop",
+            safety_stop_observed=self.safety_stop_reason is not None,
+            safety_stop_reason=self.safety_stop_reason,
+            fault_injection_observed=self.fault_injection_observed,
+            safety_stop_latency_ms=(
+                round(self.safety_stop_latency_ms, 3)
+                if self.safety_stop_latency_ms is not None
+                else None
+            ),
             event_codes=tuple(self.event_codes),
         )
 
@@ -212,6 +294,9 @@ def execute_rclpy_navigation(
     *,
     odometry_topic: str,
     safety_state_topic: str,
+    safety_reason_topic: str,
+    fault_state_topic: str,
+    execution_state_topic: str,
     emergency_stop_service: str,
     scenario: str,
     cancel_after_displacement_m: float = 0.25,
@@ -224,10 +309,15 @@ def execute_rclpy_navigation(
     from nav_msgs.msg import Odometry
     from rclpy.action import ActionClient
     from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
-    from std_msgs.msg import Bool
+    from std_msgs.msg import Bool, String
     from std_srvs.srv import Trigger
 
-    if scenario not in {"success", "cancel", "emergency_stop"}:
+    if scenario not in {
+        "success",
+        "cancel",
+        "emergency_stop",
+        *FAULT_SCENARIOS,
+    }:
         raise Ros2ActionExecutionError("scenario is unsupported")
     _finite(
         cancel_after_displacement_m,
@@ -235,13 +325,33 @@ def execute_rclpy_navigation(
         minimum=0.05,
         maximum=10.0,
     )
-    latest: dict[str, Any] = {"pose": None, "safety": None}
+    latest: dict[str, Any] = {
+        "pose": None,
+        "safety": None,
+        "safety_reason": None,
+        "safety_seen_at": None,
+        "fault": None,
+        "fault_seen_at": None,
+    }
 
     def on_odometry(message: Any) -> None:
         latest["pose"] = _station_from_odometry(message)
 
     def on_safety(message: Any) -> None:
         latest["safety"] = bool(message.data)
+        if message.data and latest["safety_seen_at"] is None:
+            latest["safety_seen_at"] = time.monotonic()
+
+    def on_safety_reason(message: Any) -> None:
+        reason = str(message.data)
+        latest["safety_reason"] = None if reason == "reset" else reason
+
+    def on_fault(message: Any) -> None:
+        state = str(message.data)
+        expected = f"{scenario}:active"
+        if state == expected and latest["fault_seen_at"] is None:
+            latest["fault"] = scenario
+            latest["fault_seen_at"] = time.monotonic()
 
     odom_sub = node.create_subscription(Odometry, odometry_topic, on_odometry, 20)
     safety_qos = QoSProfile(
@@ -255,6 +365,30 @@ def execute_rclpy_navigation(
         on_safety,
         safety_qos,
     )
+    reason_sub = node.create_subscription(
+        String,
+        safety_reason_topic,
+        on_safety_reason,
+        safety_qos,
+    )
+    fault_sub = node.create_subscription(
+        String,
+        fault_state_topic,
+        on_fault,
+        safety_qos,
+    )
+    execution_publisher = node.create_publisher(
+        Bool,
+        execution_state_topic,
+        safety_qos,
+    )
+
+    def publish_execution_state(active: bool) -> None:
+        message = Bool()
+        message.data = active
+        execution_publisher.publish(message)
+
+    publish_execution_state(False)
     action_client = ActionClient(
         node,
         NavigateToPose,
@@ -308,6 +442,7 @@ def execute_rclpy_navigation(
                 finished_at=datetime.now(timezone.utc),
             )
         monitor.accept_goal()
+        publish_execution_state(True)
         result_future = goal_handle.get_result_async()
         deadline = time.monotonic() + prepared.target.timeout_seconds
         cancel_future: Any | None = None
@@ -319,8 +454,17 @@ def execute_rclpy_navigation(
                 pose.x - initial_pose.x,
                 pose.y - initial_pose.y,
             )
-            if latest["safety"] is True and monitor.state == "executing":
-                monitor.request_cancel("emergency_stop")
+            if (
+                latest["safety"] is True
+                and latest["safety_reason"] is not None
+                and monitor.state == "executing"
+            ):
+                latency = _stop_latency_ms(latest)
+                monitor.request_cancel(
+                    latest["safety_reason"],
+                    fault_injection_observed=latest["fault"] == scenario,
+                    safety_stop_latency_ms=latency,
+                )
                 cancel_future = goal_handle.cancel_goal_async()
             elif (
                 scenario == "cancel"
@@ -350,10 +494,22 @@ def execute_rclpy_navigation(
             GoalStatus.STATUS_CANCELED: "canceled",
             GoalStatus.STATUS_ABORTED: "aborted",
         }.get(wrapped.status, "aborted")
+        if scenario not in FAULT_SCENARIOS:
+            publish_execution_state(False)
         terminal_pose = latest["pose"]
         settle_deadline = time.monotonic() + 0.75
         while time.monotonic() < settle_deadline:
             rclpy.spin_once(node, timeout_sec=0.05)
+        if (
+            latest["safety"] is True
+            and latest["safety_reason"] is not None
+            and monitor.safety_stop_reason is None
+        ):
+            monitor.observe_safety_stop(
+                latest["safety_reason"],
+                fault_injection_observed=latest["fault"] == scenario,
+                safety_stop_latency_ms=_stop_latency_ms(latest),
+            )
         return monitor.finish(
             result_code,
             terminal_pose,
@@ -361,10 +517,22 @@ def execute_rclpy_navigation(
             finished_at=datetime.now(timezone.utc),
         )
     finally:
+        publish_execution_state(False)
         action_client.destroy()
         node.destroy_client(stop_client)
         node.destroy_subscription(odom_sub)
         node.destroy_subscription(safety_sub)
+        node.destroy_subscription(reason_sub)
+        node.destroy_subscription(fault_sub)
+        node.destroy_publisher(execution_publisher)
+
+
+def _stop_latency_ms(latest: dict[str, Any]) -> float | None:
+    fault_at = latest.get("fault_seen_at")
+    stopped_at = latest.get("safety_seen_at")
+    if fault_at is None or stopped_at is None:
+        return None
+    return max(0.0, (float(stopped_at) - float(fault_at)) * 1000.0)
 
 
 def _spin_future(node: Any, future: Any, *, timeout_seconds: float) -> None:

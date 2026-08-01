@@ -64,6 +64,7 @@ setup(
             "flyto-ros2-readiness-probe = flyto_robotics.ros2_probe_node:main",
             "ros2_closed_loop_lab = flyto_robotics.ros2_closed_loop_lab:main",
             "ros2_safety_supervisor = flyto_robotics.ros2_safety_node:main",
+            "ros2_sensor_guard = flyto_robotics.ros2_sensor_guard:main",
             "gazebo_lab_driver = flyto_robotics.gazebo_lab_driver:main",
             "mission_controller = flyto_robotics.ros2_node:main",
             "robotics_planning_session = flyto_robotics.planning_session:main",

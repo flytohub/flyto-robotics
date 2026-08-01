@@ -38,6 +38,9 @@ class FakeNode:
         ("success", "hospital.route.blue_end"),
         ("cancel", "hospital.route.yellow_end"),
         ("emergency_stop", "hospital.route.yellow_end"),
+        ("lidar_dropout", "hospital.route.yellow_end"),
+        ("odometry_freeze", "hospital.route.yellow_end"),
+        ("nav2_lifecycle_failure", "hospital.route.yellow_end"),
     ],
 )
 def test_lab_closes_probe_authority_action_evidence_and_verdict(

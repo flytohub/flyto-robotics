@@ -1,6 +1,6 @@
 PYTHON ?= python3
 
-.PHONY: ai-dry-run ai4all-medication-showcase ai4all-showcase assets benchmark-robot-mcp careflow-dry-run dry-run facility-contract gazebo-lab gazebo-matrix gazebo-shortcut gazebo-video lab-contract lint nav2-closed-loop ros2-execution-grant ros2-pairing soak test verify
+.PHONY: ai-dry-run ai4all-medication-showcase ai4all-showcase assets benchmark-robot-mcp careflow-dry-run dry-run facility-contract gazebo-lab gazebo-matrix gazebo-shortcut gazebo-video lab-contract lint nav2-closed-loop nav2-stress ros2-execution-grant ros2-pairing soak test verify
 
 lint:
 	$(PYTHON) -m ruff check .
@@ -80,6 +80,9 @@ gazebo-video:
 
 nav2-closed-loop:
 	./scripts/run_nav2_closed_loop.sh
+
+nav2-stress:
+	./scripts/run_nav2_stress.sh
 
 ai4all-showcase:
 	./scripts/run-ai4all-showcase.sh

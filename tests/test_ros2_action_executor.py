@@ -132,7 +132,37 @@ def test_cancel_paths_are_explicit_and_fail_closed(
     assert outcome.status == expected_status
     assert outcome.cancel_requested is True
     assert outcome.safety_stop_observed is safety
+    assert outcome.safety_stop_reason == ("emergency_stop" if safety else None)
     assert outcome.post_stop_drift_m == 0.01
+
+
+def test_fault_stop_records_exact_reason_latency_and_independent_abort() -> None:
+    prepared, _grant = _prepared()
+    monitor = NavigationExecutionMonitor(
+        prepared,
+        StationPose("robot.current", 0.0, 0.0, 0.0),
+        started_at=AT,
+    )
+    monitor.accept_goal()
+    monitor.feedback(4.0)
+    monitor.observe_safety_stop(
+        "lidar_stale",
+        fault_injection_observed=True,
+        safety_stop_latency_ms=412.5,
+    )
+    outcome = monitor.finish(
+        "aborted",
+        StationPose("robot.current", 0.2, 0.0, 0.0),
+        settled_pose=StationPose("robot.current", 0.201, 0.0, 0.0),
+        finished_at=AT + timedelta(seconds=2),
+    )
+
+    assert outcome.status == "safety_stopped"
+    assert outcome.result_code == "aborted"
+    assert outcome.cancel_requested is False
+    assert outcome.safety_stop_reason == "lidar_stale"
+    assert outcome.fault_injection_observed is True
+    assert outcome.safety_stop_latency_ms == 412.5
 
 
 def test_invalid_goal_frame_and_out_of_order_cancel_are_rejected() -> None:

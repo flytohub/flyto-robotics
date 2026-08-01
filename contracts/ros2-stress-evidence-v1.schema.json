@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://flyto2.com/contracts/robotics/ros2-stress-evidence-v1.schema.json",
+  "title": "Flyto ROS 2 Stress Evidence v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract_version", "report_id", "robot_id", "requested_soak_runs",
+    "completed_soak_runs", "fault_scenarios", "evidence_snapshots",
+    "grant_expiry_probe_snapshot", "grant_expiry_rejected",
+    "max_safety_stop_latency_ms", "max_post_stop_drift_m", "checks",
+    "passed", "snapshot"
+  ],
+  "properties": {
+    "contract_version": {"const": "flyto.robotics.ros2-stress-report.v1"},
+    "report_id": {"type": "string", "pattern": "^ros2-stress-[0-9a-f]{24}$"},
+    "robot_id": {"$ref": "#/$defs/id"},
+    "requested_soak_runs": {"type": "integer", "minimum": 1, "maximum": 100},
+    "completed_soak_runs": {"type": "integer", "minimum": 0, "maximum": 100},
+    "fault_scenarios": {
+      "type": "object", "additionalProperties": false,
+      "required": ["lidar_dropout", "odometry_freeze", "nav2_lifecycle_failure"],
+      "properties": {
+        "lidar_dropout": {"$ref": "#/$defs/nullable_digest"},
+        "odometry_freeze": {"$ref": "#/$defs/nullable_digest"},
+        "nav2_lifecycle_failure": {"$ref": "#/$defs/nullable_digest"}
+      }
+    },
+    "evidence_snapshots": {
+      "type": "array", "minItems": 1, "maxItems": 103, "uniqueItems": true,
+      "items": {"$ref": "#/$defs/digest"}
+    },
+    "grant_expiry_probe_snapshot": {"$ref": "#/$defs/digest"},
+    "grant_expiry_rejected": {"type": "boolean"},
+    "max_safety_stop_latency_ms": {"type": "number", "minimum": 0, "maximum": 10000},
+    "max_post_stop_drift_m": {"type": "number", "minimum": 0, "maximum": 1000},
+    "checks": {
+      "type": "array", "minItems": 1, "maxItems": 32,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["code", "passed"],
+        "properties": {
+          "code": {"$ref": "#/$defs/id"},
+          "passed": {"type": "boolean"}
+        }
+      }
+    },
+    "passed": {"type": "boolean"},
+    "snapshot": {"$ref": "#/$defs/digest"}
+  },
+  "$defs": {
+    "id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,191}$"},
+    "digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "nullable_digest": {
+      "anyOf": [{"type": "null"}, {"$ref": "#/$defs/digest"}]
+    }
+  }
+}

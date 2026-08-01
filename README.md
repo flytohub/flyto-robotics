@@ -350,6 +350,33 @@ The evidence binds the resource plan, Space, robot, adapter, capability, live
 runtime and grant snapshots without exposing action names, message types or
 velocity commands.
 
+### Nav2 fault-injection stress gate
+
+Run the real Jazzy/Harmonic stack repeatedly and inject sensor and lifecycle
+failures only after the rover has started moving:
+
+```bash
+make nav2-stress
+```
+
+The default gate runs five independent successful navigation containers, then
+one container each for LiDAR dropout, frozen odometry, and a deactivated Nav2
+controller. Every container uses a unique ROS domain. Raw Gazebo sensors pass
+through `ros2_sensor_guard`; the safety supervisor independently watches action
+execution state, odometry, LiDAR, and command freshness and owns the only
+actuator output.
+
+A fault passes only when the action was accepted, feedback and physical motion
+were observed, the injected fault was observed, the exact safety reason was
+latched, stop latency was at most 750 ms, and post-stop physical drift was at
+most 5 cm. The run also proves an expired grant is rejected before the private
+ROS action endpoint is resolved. Evidence remains under ignored
+`results/nav2-stress/` output.
+
+```bash
+FLYTO_ROBOTICS_STRESS_SOAK_RUNS=50 make nav2-stress
+```
+
 ```bash
 export FLYTO_ROBOTICS_PLANNER_URL=https://planner.example.com/v1/robot-plan
 export FLYTO_ROBOTICS_PLANNER_TOKEN=...

@@ -127,3 +127,73 @@ def test_evidence_tampering_and_false_success_fail_closed() -> None:
     assert next(
         check for check in verdict["checks"] if check["code"] == "post_stop_stability"
     )["passed"] is False
+
+
+def test_fault_evidence_requires_exact_reason_and_bounded_latency() -> None:
+    prepared, grant = _prepared_fault_navigation()
+    monitor = NavigationExecutionMonitor(
+        prepared,
+        StationPose("robot.current", 0.0, 0.0, 0.0),
+        started_at=AT,
+    )
+    monitor.accept_goal()
+    monitor.feedback(2.5)
+    monitor.request_cancel(
+        "odometry_stale",
+        fault_injection_observed=True,
+        safety_stop_latency_ms=399.0,
+    )
+    outcome = monitor.finish(
+        "canceled",
+        StationPose("robot.current", 0.2, 0.0, 0.0),
+        finished_at=AT + timedelta(seconds=2),
+    )
+    evidence = build_ros2_execution_evidence(
+        grant,
+        prepared,
+        outcome,
+        scenario="odometry_freeze",
+        finished_at=AT + timedelta(seconds=2),
+    )
+
+    verdict = evaluate_closed_loop_evidence(
+        evidence,
+        expected_scenario="odometry_freeze",
+    )
+    assert verdict["passed"] is True
+    assert evidence["safety_stop_reason"] == "odometry_stale"
+    assert evidence["safety_stop_latency_ms"] == 399.0
+
+
+def _prepared_fault_navigation():
+    manifest = load_ros2_adapter_manifest(
+        ROOT / "examples/ros2-adapters/flyto2-standard.json"
+    )
+    runtime = load_ros2_runtime_snapshot(
+        ROOT / "examples/ros2-runtime/ready-sim.json"
+    )
+    grant = authorize_ros2_execution(
+        resource_plan=load_resource_plan(
+            ROOT / "examples/resource-plans/nav2-hospital-delivery.json"
+        ),
+        manifest=manifest,
+        runtime=runtime,
+        workflow_id="hospital_delivery.v1",
+        resource_id="flyto-rover-sim-001",
+        capability_id="robotics.motion.navigate@1",
+        target_space_id="gazebo-nav2-lab",
+        observed_at=AT,
+    )
+    semantic_map = json.loads(
+        (ROOT / "examples/maps/atomic-color-route.json").read_text()
+    )
+    prepared = prepare_authorized_navigation(
+        grant=grant,
+        manifest=manifest,
+        runtime=runtime,
+        semantic_map=semantic_map,
+        location_id="hospital.route.yellow_end",
+        frame_id="map",
+        observed_at=AT,
+    )
+    return prepared, grant

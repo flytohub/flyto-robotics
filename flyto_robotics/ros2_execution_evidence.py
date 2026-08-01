@@ -14,6 +14,13 @@ from .ros2_action_executor import NavigationOutcome, PreparedNavigation
 from .ros2_execution import parse_ros2_execution_grant
 
 ROS2_EXECUTION_EVIDENCE_VERSION = "flyto.robotics.ros2-execution-evidence.v1"
+FAULT_EXPECTATIONS = {
+    "lidar_dropout": "lidar_stale",
+    "odometry_freeze": "odometry_stale",
+    "nav2_lifecycle_failure": "command_stale",
+}
+_SCENARIOS = {"success", "cancel", "emergency_stop", *FAULT_EXPECTATIONS}
+_SAFETY_REASONS = {"emergency_stop", *FAULT_EXPECTATIONS.values()}
 _DIGEST = re.compile(r"^[0-9a-f]{64}$")
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,191}$")
 _FIELDS = {
@@ -48,6 +55,9 @@ _FIELDS = {
     "cancel_requested",
     "cancel_reason",
     "safety_stop_observed",
+    "safety_stop_reason",
+    "fault_injection_observed",
+    "safety_stop_latency_ms",
     "event_codes",
     "snapshot",
 }
@@ -76,7 +86,7 @@ def build_ros2_execution_evidence(
     """Bind terminal action facts to the exact short-lived authority snapshot."""
 
     validated_grant = parse_ros2_execution_grant(grant)
-    if scenario not in {"success", "cancel", "emergency_stop"}:
+    if scenario not in _SCENARIOS:
         raise Ros2ExecutionEvidenceError("scenario is unsupported")
     finished = _utc(finished_at or datetime.now(timezone.utc), "finished_at")
     started = finished - timedelta(seconds=outcome.duration_seconds)
@@ -118,6 +128,9 @@ def build_ros2_execution_evidence(
         "cancel_requested": outcome.cancel_requested,
         "cancel_reason": outcome.cancel_reason,
         "safety_stop_observed": outcome.safety_stop_observed,
+        "safety_stop_reason": outcome.safety_stop_reason,
+        "fault_injection_observed": outcome.fault_injection_observed,
+        "safety_stop_latency_ms": outcome.safety_stop_latency_ms,
         "event_codes": list(outcome.event_codes),
     }
     evidence["snapshot"] = _snapshot(evidence)
@@ -149,7 +162,7 @@ def parse_ros2_execution_evidence(value: Any) -> dict[str, Any]:
         "semantic_location_id",
     ):
         _identifier(value[field], field)
-    if value["scenario"] not in {"success", "cancel", "emergency_stop"}:
+    if value["scenario"] not in _SCENARIOS:
         raise Ros2ExecutionEvidenceError("scenario is unsupported")
     if value["goal_frame"] not in {"map", "odom"}:
         raise Ros2ExecutionEvidenceError("goal_frame is unsupported")
@@ -166,7 +179,12 @@ def parse_ros2_execution_evidence(value: Any) -> dict[str, Any]:
         raise Ros2ExecutionEvidenceError("status is unsupported")
     if value["result_code"] not in {"succeeded", "canceled", "rejected", "aborted"}:
         raise Ros2ExecutionEvidenceError("result_code is unsupported")
-    for field in ("goal_accepted", "cancel_requested", "safety_stop_observed"):
+    for field in (
+        "goal_accepted",
+        "cancel_requested",
+        "safety_stop_observed",
+        "fault_injection_observed",
+    ):
         if type(value[field]) is not bool:
             raise Ros2ExecutionEvidenceError(f"{field} must be boolean")
     if (
@@ -190,12 +208,33 @@ def parse_ros2_execution_evidence(value: Any) -> dict[str, Any]:
     if abs(duration - float(value["duration_seconds"])) > 0.01:
         raise Ros2ExecutionEvidenceError("duration does not match timestamps")
     cancel_reason = value["cancel_reason"]
-    if cancel_reason not in {None, "operator_cancel", "emergency_stop", "timeout"}:
+    if cancel_reason not in {
+        None,
+        "operator_cancel",
+        "emergency_stop",
+        "timeout",
+        *FAULT_EXPECTATIONS.values(),
+    }:
         raise Ros2ExecutionEvidenceError("cancel_reason is unsupported")
     if value["cancel_requested"] is not (cancel_reason is not None):
         raise Ros2ExecutionEvidenceError("cancel fields are inconsistent")
-    if value["safety_stop_observed"] is not (cancel_reason == "emergency_stop"):
+    safety_reason = value["safety_stop_reason"]
+    if safety_reason not in {None, *_SAFETY_REASONS}:
+        raise Ros2ExecutionEvidenceError("safety_stop_reason is unsupported")
+    if value["safety_stop_observed"] is not (safety_reason is not None):
         raise Ros2ExecutionEvidenceError("safety stop fields are inconsistent")
+    if cancel_reason in _SAFETY_REASONS and cancel_reason != safety_reason:
+        raise Ros2ExecutionEvidenceError("cancel and safety reasons disagree")
+    latency = value["safety_stop_latency_ms"]
+    if latency is not None:
+        _number(latency, "safety_stop_latency_ms", minimum=0.0, maximum=10_000.0)
+    fault_scenario = value["scenario"] in FAULT_EXPECTATIONS
+    if value["fault_injection_observed"] is not fault_scenario:
+        raise Ros2ExecutionEvidenceError("fault observation does not match scenario")
+    if fault_scenario and (safety_reason is None or latency is None):
+        raise Ros2ExecutionEvidenceError("fault scenario lacks measured safety stop")
+    if not fault_scenario and latency is not None:
+        raise Ros2ExecutionEvidenceError("non-fault scenario has fault latency")
     event_codes = value["event_codes"]
     if not isinstance(event_codes, list) or not 1 <= len(event_codes) <= 64:
         raise Ros2ExecutionEvidenceError("event_codes must contain 1 to 64 items")
@@ -247,6 +286,23 @@ def evaluate_closed_loop_evidence(
                 "terminal_status": evidence["status"] == "safety_stopped",
                 "cancel_requested": evidence["cancel_reason"] == "emergency_stop",
                 "safety_stop_observed": evidence["safety_stop_observed"] is True,
+                "safety_reason": evidence["safety_stop_reason"] == "emergency_stop",
+            }
+        )
+    elif expected_scenario in FAULT_EXPECTATIONS:
+        checks.update(
+            {
+                "terminal_status": evidence["status"] == "safety_stopped",
+                "fault_injected": evidence["fault_injection_observed"] is True,
+                "safety_stop_observed": evidence["safety_stop_observed"] is True,
+                "safety_reason": (
+                    evidence["safety_stop_reason"]
+                    == FAULT_EXPECTATIONS[expected_scenario]
+                ),
+                "bounded_stop_latency": (
+                    evidence["safety_stop_latency_ms"] is not None
+                    and evidence["safety_stop_latency_ms"] <= 750.0
+                ),
             }
         )
     else:

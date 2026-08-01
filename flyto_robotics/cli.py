@@ -64,6 +64,13 @@ from .ros2_pairing import (
     parse_observed_at,
     verify_ros2_pairing,
 )
+from .ros2_stress_evidence import (
+    Ros2StressEvidenceError,
+    build_ros2_stress_report,
+    parse_grant_expiry_probe,
+    parse_ros2_stress_report,
+    prove_expired_grant_rejected,
+)
 from .semantic_map import SemanticLocationStore, parse_semantic_location_map
 from .soak import (
     render_soak_junit,
@@ -143,6 +150,7 @@ def validate_assets(root: Path = PROJECT_ROOT) -> list[str]:
         root / "contracts/ros2-runtime-snapshot-v1.schema.json",
         root / "contracts/ros2-execution-grant-v1.schema.json",
         root / "contracts/ros2-execution-evidence-v1.schema.json",
+        root / "contracts/ros2-stress-evidence-v1.schema.json",
     ]
     for path in json_paths:
         decoded = _load_json(path)
@@ -615,8 +623,44 @@ def _parser() -> argparse.ArgumentParser:
     verify_execution.add_argument(
         "--scenario",
         required=True,
-        choices=("success", "cancel", "emergency_stop"),
+        choices=(
+            "success",
+            "cancel",
+            "emergency_stop",
+            "lidar_dropout",
+            "odometry_freeze",
+            "nav2_lifecycle_failure",
+        ),
     )
+
+    expiry_probe = subcommands.add_parser(
+        "prove-ros2-expired-grant",
+        help="prove an expired execution grant is rejected before ROS dispatch",
+    )
+    expiry_probe.add_argument("--manifest", required=True, type=Path)
+    expiry_probe.add_argument("--runtime", required=True, type=Path)
+    expiry_probe.add_argument("--resource-plan", required=True, type=Path)
+    expiry_probe.add_argument("--semantic-map", required=True, type=Path)
+    expiry_probe.add_argument("--location", default="hospital.route.blue_end")
+    expiry_probe.add_argument("--workflow", default="hospital_delivery.v1")
+    expiry_probe.add_argument("--capability", default="robotics.motion.navigate@1")
+    expiry_probe.add_argument("--space", default="gazebo-nav2-lab")
+    expiry_probe.add_argument("--output", required=True, type=Path)
+
+    build_stress = subcommands.add_parser(
+        "build-ros2-stress-report",
+        help="aggregate soak and live fault evidence into one strict report",
+    )
+    build_stress.add_argument("--evidence", required=True, nargs="+", type=Path)
+    build_stress.add_argument("--grant-expiry-probe", required=True, type=Path)
+    build_stress.add_argument("--soak-runs", required=True, type=int)
+    build_stress.add_argument("--output", required=True, type=Path)
+
+    verify_stress = subcommands.add_parser(
+        "verify-ros2-stress-report",
+        help="verify one content-addressed ROS 2 stress report",
+    )
+    verify_stress.add_argument("--report", required=True, type=Path)
 
     ros = subcommands.add_parser("run-ros", help="run the ROS 2 mission adapter")
     ros.add_argument("--job", required=True, type=Path)
@@ -897,6 +941,50 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             print(json.dumps(verdict, ensure_ascii=False, sort_keys=True))
             return 0 if verdict["passed"] is True else 6
+        if args.command == "prove-ros2-expired-grant":
+            manifest = load_ros2_adapter_manifest(args.manifest)
+            runtime = load_ros2_runtime_snapshot(args.runtime)
+            observed_at = parse_observed_at(runtime["observed_at"], "observed_at")
+            grant = authorize_ros2_execution(
+                resource_plan=load_resource_plan(args.resource_plan),
+                manifest=manifest,
+                runtime=runtime,
+                workflow_id=args.workflow,
+                resource_id=manifest["robot_id"],
+                capability_id=args.capability,
+                target_space_id=args.space,
+                observed_at=observed_at,
+            )
+            semantic_map = _load_json(args.semantic_map)
+            if not isinstance(semantic_map, dict):
+                raise Ros2StressEvidenceError("semantic map must be an object")
+            probe = prove_expired_grant_rejected(
+                grant=grant,
+                manifest=manifest,
+                runtime=runtime,
+                semantic_map=semantic_map,
+                location_id=args.location,
+            )
+            write_json_atomic(args.output, probe)
+            print(json.dumps(probe, ensure_ascii=False, sort_keys=True))
+            return 0 if probe["rejected"] is True else 7
+        if args.command == "build-ros2-stress-report":
+            executions = [_load_json(path) for path in args.evidence]
+            if any(not isinstance(item, dict) for item in executions):
+                raise Ros2StressEvidenceError("execution evidence must be objects")
+            probe = parse_grant_expiry_probe(_load_json(args.grant_expiry_probe))
+            report = build_ros2_stress_report(
+                executions,
+                probe,
+                requested_soak_runs=args.soak_runs,
+            )
+            write_json_atomic(args.output, report)
+            print(json.dumps(report, ensure_ascii=False, sort_keys=True))
+            return 0 if report["passed"] is True else 8
+        if args.command == "verify-ros2-stress-report":
+            report = parse_ros2_stress_report(_load_json(args.report))
+            print(json.dumps(report, ensure_ascii=False, sort_keys=True))
+            return 0 if report["passed"] is True else 8
         if args.command == "run-ros":
             from .ros2_node import run
 
@@ -913,6 +1001,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         Ros2PairingError,
         Ros2ExecutionError,
         Ros2ExecutionEvidenceError,
+        Ros2StressEvidenceError,
         JobValidationError,
         PlanValidationError,
         OSError,

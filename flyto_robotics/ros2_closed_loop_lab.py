@@ -43,6 +43,9 @@ def run_lab(node: Any) -> dict[str, Any]:
         ("output_file", "results/nav2-closed-loop.json"),
         ("odometry_topic", "/flyto/odom"),
         ("safety_state_topic", "/safety/emergency_stop_state"),
+        ("safety_reason_topic", "/safety/stop_reason"),
+        ("fault_state_topic", "/fault_injection/state"),
+        ("execution_state_topic", "/flyto/navigation_execution_active"),
         ("emergency_stop_node", "/safety/emergency_supervisor"),
         ("emergency_stop_service", "/safety/emergency_stop"),
         ("goal_frame", "map"),
@@ -60,6 +63,9 @@ def run_lab(node: Any) -> dict[str, Any]:
             "output_file",
             "odometry_topic",
             "safety_state_topic",
+            "safety_reason_topic",
+            "fault_state_topic",
+            "execution_state_topic",
             "emergency_stop_node",
             "emergency_stop_service",
             "goal_frame",
@@ -108,10 +114,8 @@ def run_lab(node: Any) -> dict[str, Any]:
         observed_at=observed_at,
     )
     scenario = str(values["scenario"])
-    location_id = (
-        "hospital.route.blue_end"
-        if scenario == "success"
-        else "hospital.route.yellow_end"
+    location_id = "hospital.route.blue_end" if scenario == "success" else (
+        "hospital.route.yellow_end"
     )
     prepared = prepare_authorized_navigation(
         grant=grant,
@@ -127,6 +131,9 @@ def run_lab(node: Any) -> dict[str, Any]:
         prepared,
         odometry_topic=str(values["odometry_topic"]),
         safety_state_topic=str(values["safety_state_topic"]),
+        safety_reason_topic=str(values["safety_reason_topic"]),
+        fault_state_topic=str(values["fault_state_topic"]),
+        execution_state_topic=str(values["execution_state_topic"]),
         emergency_stop_service=str(values["emergency_stop_service"]),
         scenario=scenario,
         cancel_after_displacement_m=float(values["cancel_after_displacement_m"]),

@@ -29,6 +29,18 @@ def _launch_runtime(context: object) -> list[object]:
     world = Path(LaunchConfiguration("world_file").perform(context))
     map_file = Path(LaunchConfiguration("map_file").perform(context))
     params = Path(LaunchConfiguration("params_file").perform(context))
+    scenario = LaunchConfiguration("scenario").perform(context)
+    supported_scenarios = {
+        "success",
+        "cancel",
+        "emergency_stop",
+        "lidar_dropout",
+        "odometry_freeze",
+        "nav2_lifecycle_failure",
+    }
+    if scenario not in supported_scenarios:
+        raise ValueError("closed-loop scenario is unsupported")
+    fault_scenario = scenario if scenario.endswith(("dropout", "freeze", "failure")) else "none"
     for path, suffix in ((world, ".sdf"), (map_file, ".yaml"), (params, ".yaml")):
         if path.suffix != suffix or not path.is_file():
             raise ValueError(f"required local asset is invalid: {path}")
@@ -58,7 +70,25 @@ def _launch_runtime(context: object) -> list[object]:
         ],
         remappings=[
             ("/flyto/cmd_vel", "/cmd_vel"),
+            ("/flyto/odom", "/flyto/raw_odom"),
             ("/flyto/tf", "/tf"),
+            ("/flyto/scan", "/flyto/raw_scan"),
+        ],
+        output="screen",
+    )
+    sensor_guard = Node(
+        package="flyto_robotics",
+        executable="ros2_sensor_guard",
+        name="flyto_sensor_guard",
+        parameters=[
+            {
+                "use_sim_time": False,
+                "fault_scenario": fault_scenario,
+                "fault_delay_seconds": ParameterValue(
+                    LaunchConfiguration("fault_delay_seconds"),
+                    value_type=float,
+                ),
+            }
         ],
         output="screen",
     )
@@ -173,9 +203,12 @@ def _launch_runtime(context: object) -> list[object]:
         name="emergency_supervisor",
         parameters=[
             {
-                "use_sim_time": True,
+                "use_sim_time": False,
                 "cmd_vel_input_topic": "/nav2/cmd_vel",
                 "cmd_vel_output_topic": "/cmd_vel",
+                "fault_state_topic": "/fault_injection/state",
+                "sensor_timeout_seconds": 0.40,
+                "command_timeout_seconds": 0.30,
             }
         ],
         output="screen",
@@ -193,6 +226,10 @@ def _launch_runtime(context: object) -> list[object]:
                 "semantic_map_id": LaunchConfiguration("semantic_map_id"),
                 "scenario": LaunchConfiguration("scenario"),
                 "output_file": LaunchConfiguration("output_file"),
+                "odometry_topic": "/flyto/raw_odom",
+                "safety_reason_topic": "/safety/stop_reason",
+                "fault_state_topic": "/fault_injection/state",
+                "execution_state_topic": "/flyto/navigation_execution_active",
                 "cancel_after_displacement_m": ParameterValue(
                     LaunchConfiguration("cancel_after_displacement_m"),
                     value_type=float,
@@ -208,6 +245,7 @@ def _launch_runtime(context: object) -> list[object]:
     return [
         gazebo,
         bridge,
+        sensor_guard,
         map_to_odom,
         base_to_lidar,
         map_server,
@@ -269,6 +307,7 @@ def generate_launch_description() -> LaunchDescription:
                 "cancel_after_displacement_m",
                 default_value="0.25",
             ),
+            DeclareLaunchArgument("fault_delay_seconds", default_value="0.35"),
             DeclareLaunchArgument("headless", default_value="true"),
             OpaqueFunction(function=_launch_runtime),
         ]
