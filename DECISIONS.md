@@ -1,5 +1,35 @@
 # Decisions
 
+## 2026-08-01 — Robot MCP evidence is per-case, tiered, and content-addressed
+
+Decision: a release campaign contains at least 101 distinct cases. Every case
+uses the production stdio process to prepare a request, validate a semantic
+plan, and run the real deterministic controller. The overall family and each
+difficulty tier must independently reach 90%. A case is counted once, without
+automatic retries, and retains stage results plus input/output digests in an
+atomic owner-readable report whose filename contains the evidence digest.
+
+Reason: a pooled unit-test count can conceal an unusable protocol, an easy-only
+workload, or selective retrying. The tiered contract proves negotiation,
+validation, safety behaviors, controller execution, and evidence persistence
+as one repeatable boundary while keeping generated workload data separate from
+mocked runtime behavior.
+
+## 2026-08-01 — Robot MCP is an adapter, never a second control plane
+
+Decision: the detachable stdio MCP exposes only semantic capability discovery,
+bounded planner request construction, strict plan compilation, and execution
+through the existing deterministic dry-run controller. It accepts complete
+job and plan documents, never caller-selected paths. Raw actuators, ROS topics,
+shell execution, arbitrary network access, and direct physical motion are not
+tools. The same job, plan, workflow, and result contracts remain authoritative
+for MCP, CLI, Gazebo, and physical adapters.
+
+Reason: Flyto2 AI and other MCP clients need a composable robot-development
+surface without entering the real-time safety boundary. Keeping protocol I/O
+outside the controller makes the agent replaceable and prevents an apparently
+convenient tool from bypassing plan validation, safety stops, or evidence.
+
 ## 2026-07-30 — AI chooses a complete constrained route, not arbitrary waypoints
 
 Decision: a data-driven route graph first applies deterministic resource

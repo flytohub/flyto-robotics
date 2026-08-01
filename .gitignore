@@ -10,6 +10,7 @@ install/
 log/
 *.egg-info/
 out/
+output/
 results/*
 !results/gazebo-result.json
 !results/atomic-gazebo-result.json

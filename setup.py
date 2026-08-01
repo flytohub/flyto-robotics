@@ -51,6 +51,7 @@ setup(
     entry_points={
         "console_scripts": [
             "flyto-robotics = flyto_robotics.cli:main",
+            "flyto-robot-mcp = flyto_robotics.mcp_server:main",
             "gazebo_lab_driver = flyto_robotics.gazebo_lab_driver:main",
             "mission_controller = flyto_robotics.ros2_node:main",
             "robotics_planning_session = flyto_robotics.planning_session:main",

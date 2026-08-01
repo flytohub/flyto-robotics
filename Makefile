@@ -1,6 +1,6 @@
 PYTHON ?= python3
 
-.PHONY: ai-dry-run ai4all-medication-showcase ai4all-showcase assets careflow-dry-run dry-run facility-contract gazebo-lab gazebo-matrix gazebo-shortcut gazebo-video lab-contract lint soak test verify
+.PHONY: ai-dry-run ai4all-medication-showcase ai4all-showcase assets benchmark-robot-mcp careflow-dry-run dry-run facility-contract gazebo-lab gazebo-matrix gazebo-shortcut gazebo-video lab-contract lint soak test verify
 
 lint:
 	$(PYTHON) -m ruff check .
@@ -23,6 +23,11 @@ careflow-dry-run:
 	$(PYTHON) -m flyto_robotics.cli dry-run-plan \
 		--job examples/jobs/pharmacy-to-ward.json \
 		--plan examples/plans/careflow-human-gate.json
+
+benchmark-robot-mcp:
+	$(PYTHON) scripts/benchmark_robot_mcp.py \
+		--cases 101 \
+		--output-dir output/benchmarks
 
 lab-contract:
 	$(PYTHON) -m flyto_robotics.cli validate-lab-scenario \

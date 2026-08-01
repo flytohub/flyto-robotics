@@ -28,6 +28,15 @@
   shortlist enforcement. Raw aliases are legacy fallback only.
 - Flyto AI can re-rank the transport-neutral manifest through its existing
   Blueprint and Core bridges without importing Robotics source.
+- A detachable `flyto-robot-mcp` stdio process now exposes four semantic-only
+  tools for capability discovery, planner request construction, strict plan
+  validation, and deterministic controller dry runs. It has no motor, shell,
+  ROS topic, arbitrary file, or network authority.
+- `make benchmark-robot-mcp` is the release evidence gate for that boundary. It
+  requires at least 101 distinct real subprocess cases and a 90% success rate
+  both across the Robot MCP family and independently within standard,
+  intermediate, and advanced tiers. The report is atomically written under a
+  content-addressed filename and records every failure without hidden retries.
 - Semantic location memory now keeps stable IDs and trusted poses in a
   map-scoped atomic store. The planner sees only IDs and bounded multilingual
   labels; named navigation resolves to the existing pose controller.
@@ -164,6 +173,12 @@
 
 ## Verification
 
+- The production Robot MCP campaign completed 101/101 distinct cases on
+  2026-08-01: standard 34/34 (depth 2–3), intermediate 34/34 (depth 5), and
+  advanced 33/33 (depth 8–12). Every case negotiated the real stdio server and
+  crossed request preparation, strict compilation, and `MissionController`.
+  The content-addressed report SHA-256 is
+  `7170922c61a41be8b134ad85d6add8a393cb13eee279b33bd023ea33d5b84808`.
 - The strict lab has a 28-assertion JSON/Markdown/JUnit report and four
   hash-listed overhead captures.
 - The three-run matrix and 50-run deterministic soak both passed in full on
@@ -188,6 +203,7 @@
 
 ```bash
 make verify
+make benchmark-robot-mcp
 python3 -m flyto_robotics.cli dry-run \
   examples/jobs/pharmacy-to-ward.json
 ```

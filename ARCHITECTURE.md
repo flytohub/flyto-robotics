@@ -70,6 +70,32 @@ The LLM chooses semantic steps in a slow loop and never participates in the
 10 Hz motor loop. Obstacle stopping remains a cross-cutting deterministic
 safety guard applied to every motion primitive.
 
+## Detachable Robot MCP
+
+`flyto_robotics.mcp_server` publishes a small stdio MCP contract for Flyto2 AI
+or any protocol-compatible client. Its four tools list the versioned capability
+registry, prepare a bounded planner request, validate and compile an untrusted
+plan, and run a job/plan pair through the real deterministic controller. The
+MCP process does not expose raw actuators, ROS topics, shell execution,
+arbitrary file paths, or network access.
+
+The MCP is an adapter over the existing safety boundary, not an alternate
+robot runtime. Plan and job payloads still pass the same strict parsers,
+terminal `safe_stop` policy, registry checks, speed limits, obstacle handling,
+and result contract used by the CLI, Gazebo, and physical ROS adapter. The
+stdio process can be removed without changing planning, simulation, or robot
+control, and the robot stack can run without Flyto2 AI.
+
+The release benchmark launches that production stdio process and negotiates MCP
+before every campaign. At least 101 distinct cases each prepare a routed planner
+request, validate a variable-depth semantic plan, and execute it with the real
+deterministic `MissionController`. Standard, intermediate, and advanced tiers
+exercise bounded waits, clearance sensing, human approval/resume, short motion,
+and terminal safe-stop. The family and every tier must independently reach a
+90% success rate. Results are written atomically as owner-readable,
+content-addressed JSON evidence; failed stages remain explicit instead of being
+retried into a passing count.
+
 ## Attested branching-plan boundary
 
 ```text

@@ -4,6 +4,14 @@ All notable project changes are recorded here.
 
 ## Unreleased
 
+- Added a detachable Robot MCP stdio adapter with strict protocol negotiation,
+  semantic capability discovery, bounded planner requests, plan validation,
+  and real deterministic-controller dry runs. No raw actuator, ROS topic,
+  shell, arbitrary path, or network tool is exposed.
+- Added a real 101-case Robot MCP release benchmark with distinct multilingual
+  and variable-depth inputs across three difficulty tiers. Every case crosses
+  the production stdio process and deterministic controller; the family and
+  every tier fail closed below 90%, with atomic content-addressed JSON evidence.
 - Added the strict, language-neutral `ai-space-resource-plan.v1` parser and JSON
   Schema. ROS startup now requires an exact workflow, resource, endpoint,
   capability, adapter, Space, confirmation, and immutable snapshot match when
