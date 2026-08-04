@@ -229,6 +229,48 @@ def test_stopped_gateway_rejects_new_deliveries() -> None:
         gateway.start_delivery(delivery_payload())
 
 
+class RecordingRunner:
+    """Execution backend stub proving the gateway/runner seam."""
+
+    mode = "recording"
+
+    def __init__(self) -> None:
+        self.bound = None
+        self.sessions: list[object] = []
+        self.shutdowns = 0
+
+    def bind(self, gateway: object) -> None:
+        self.bound = gateway
+
+    def start_session(self, session: object) -> None:
+        self.sessions.append(session)
+
+    def shutdown(self) -> None:
+        self.shutdowns += 1
+
+
+def test_custom_runner_receives_sessions_and_shutdown() -> None:
+    runner = RecordingRunner()
+    with gateway_under_test(runner=runner) as gateway:
+        assert runner.bound is gateway
+        url = base_url(gateway)
+        status, session = request_json(
+            f"{url}/v1/deliveries", payload=delivery_payload()
+        )
+        assert status == 200
+        assert session["execution_mode"] == "recording"
+        assert len(runner.sessions) == 1
+        assert session["status"] == "accepted"
+
+        status, body = request_json(
+            f"{url}/v1/deliveries/{session['session_id']}/safe-stop",
+            payload={"reason": "cloud_control_link_closed"},
+        )
+        assert status == 200
+        assert body["status"] == "cancelled"
+    assert runner.shutdowns == 1
+
+
 def test_invalid_qr_is_rejected_without_ending_the_session() -> None:
     with gateway_under_test() as gateway:
         url = base_url(gateway)

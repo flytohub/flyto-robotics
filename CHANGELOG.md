@@ -4,6 +4,17 @@ All notable project changes are recorded here.
 
 ## Unreleased
 
+- Added a ROS 2 execution backend for the delivery gateway
+  (`serve-delivery --backend ros2`, `flyto_robotics/ros2_delivery_runner.py`):
+  each session runs the same `MissionController` under a fail-safe per-session
+  node (`/flyto/cmd_vel`, `/flyto/odom`, `/flyto/scan`, one-second sensor
+  freshness gate). Motion commands publish under the gateway lock so a
+  shutdown stop can never be overtaken by an in-flight tick; the runner owns
+  SIGINT so the final zero-velocity stop still reaches the robot on Ctrl+C;
+  `--gazebo` switches the node to simulation time and labels the evidence.
+  Terminal sessions persist `results/delivery-<session>.json` on every path,
+  including gateway shutdown. The default backend remains the deterministic
+  planar simulation, now factored as `SimulatedDeliveryRunner`.
 - Added the loopback AI Space delivery gateway (`flyto_robotics/delivery_gateway.py`,
   CLI `serve-delivery`): an authenticated 127.0.0.1 HTTP adapter implementing the
   Flyto Cloud relay contract (`/v1/health`, `/v1/deliveries`, poll, QR

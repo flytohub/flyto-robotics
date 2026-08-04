@@ -28,6 +28,14 @@
   start → navigate → `waiting_for_human` → signed QR accepted (fingerprint-only
   evidence) → `completed`; abrupt WebSocket loss → relay safe-stop →
   `mission_cancelled` with reason `cloud_control_link_closed`.
+- The delivery gateway now takes `--backend ros2` to drive a live robot: a
+  per-session ROS 2 node mirrors the mission adapter's sensor gate and topics
+  (`/flyto/cmd_vel`, `/flyto/odom`, `/flyto/scan`), anchors mission time to
+  the ROS clock, and writes `results/delivery-<session>.json` on every
+  terminal path. Simulated planar kinematics remain the default backend and
+  the macOS-verified path; the ROS 2 backend compiles and passed adversarial
+  code review (Jazzy semantics) but still needs live verification in the
+  Linux ROS container and on hardware.
 - Capability selection now uses namespaced/versioned manifests, registry
   snapshot hashes, language-neutral Goal Frames, canonical
   intent/affordance/effect/event matching, runtime compatibility hard filters,

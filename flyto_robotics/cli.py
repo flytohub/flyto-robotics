@@ -685,6 +685,17 @@ def _parser() -> argparse.ArgumentParser:
         default=90.0,
         help="QR scan window in mission seconds; must fit the job mission timeout",
     )
+    serve_delivery.add_argument(
+        "--backend",
+        choices=("simulated", "ros2"),
+        default="simulated",
+        help="simulated planar kinematics or a live ROS 2 robot",
+    )
+    serve_delivery.add_argument(
+        "--gazebo",
+        action="store_true",
+        help="mark ros2 backend evidence as Gazebo physics instead of physical",
+    )
     return parser
 
 
@@ -1013,6 +1024,17 @@ def main(argv: Sequence[str] | None = None) -> int:
                 semantic_map_id=args.semantic_map_id,
             )
         if args.command == "serve-delivery":
+            runner = None
+            if args.backend == "ros2":
+                try:
+                    from .ros2_delivery_runner import Ros2DeliveryRunner
+                except ImportError as exc:
+                    raise ValueError(
+                        "backend ros2 requires a ROS 2 environment with rclpy "
+                        f"({exc})"
+                    ) from exc
+
+                runner = Ros2DeliveryRunner(gazebo_physics=args.gazebo)
             gateway = DeliveryGateway(
                 token=os.environ.get("FLYTO_ROBOTICS_DELIVERY_TOKEN", ""),
                 qr_secret=os.environ.get("FLYTO_ROBOTICS_QR_SECRET", ""),
@@ -1021,6 +1043,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 port=args.port,
                 time_scale=args.time_scale,
                 confirmation_timeout_seconds=args.confirmation_timeout,
+                runner=runner,
             )
             gateway.start()
             host, port = gateway.address
@@ -1029,6 +1052,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     {
                         "ok": True,
                         "service": "flyto-robotics-delivery",
+                        "backend": args.backend,
                         "listening": f"{host}:{port}",
                         "approval_id": gateway.approval_id,
                     },

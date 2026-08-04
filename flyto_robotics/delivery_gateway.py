@@ -197,7 +197,7 @@ def parse_qr_scan(value: Any, *, session_id: str) -> dict[str, str]:
 
 
 class DeliverySession:
-    """One delivery mission driven by a real-time deterministic tick thread."""
+    """One delivery mission executed by the gateway's mission runner."""
 
     def __init__(
         self,
@@ -220,6 +220,78 @@ class DeliverySession:
         self.thread: threading.Thread | None = None
 
 
+class SimulatedDeliveryRunner:
+    """Default execution backend: deterministic planar kinematics in real time."""
+
+    mode = "simulated_planar"
+
+    def __init__(self, *, time_scale: float = 1.0) -> None:
+        if (
+            isinstance(time_scale, bool)
+            or not isinstance(time_scale, (int, float))
+            or not 0.1 <= float(time_scale) <= 100.0
+        ):
+            raise DeliveryGatewayError("time_scale must be between 0.1 and 100.0")
+        self._time_scale = float(time_scale)
+        self._gateway: DeliveryGateway | None = None
+        self._threads: list[threading.Thread] = []
+
+    def bind(self, gateway: DeliveryGateway) -> None:
+        self._gateway = gateway
+
+    def start_session(self, session: DeliverySession) -> None:
+        if self._gateway is None:
+            raise DeliveryGatewayError("mission runner is not bound to a gateway")
+        self._threads = [thread for thread in self._threads if thread.is_alive()]
+        session.thread = threading.Thread(
+            target=self._run_mission,
+            args=(session,),
+            name=f"flyto-robotics-delivery-mission-{session.session_id}",
+            daemon=True,
+        )
+        self._threads.append(session.thread)
+        session.thread.start()
+
+    def shutdown(self) -> None:
+        for thread in self._threads:
+            thread.join(timeout=2.0)
+        self._threads.clear()
+
+    def _run_mission(self, session: DeliverySession) -> None:
+        gateway = self._gateway
+        if gateway is None:
+            return
+        wall_step = SIMULATION_TIMESTEP_SECONDS / self._time_scale
+        while True:
+            with gateway.lock:
+                if session.controller.terminal:
+                    return
+                if gateway.stopping:
+                    session.controller.cancel_for_safety(
+                        session.sim_now, reason="gateway_shutdown"
+                    )
+                    return
+                command = session.controller.tick(
+                    session.pose, minimum_range=math.inf, now=session.sim_now
+                )
+                session.pose = Pose2D(
+                    x=session.pose.x
+                    + command.linear_x
+                    * math.cos(session.pose.yaw)
+                    * SIMULATION_TIMESTEP_SECONDS,
+                    y=session.pose.y
+                    + command.linear_x
+                    * math.sin(session.pose.yaw)
+                    * SIMULATION_TIMESTEP_SECONDS,
+                    yaw=normalize_angle(
+                        session.pose.yaw
+                        + command.angular_z * SIMULATION_TIMESTEP_SECONDS
+                    ),
+                )
+                session.sim_now += SIMULATION_TIMESTEP_SECONDS
+            time.sleep(wall_step)
+
+
 class DeliveryGateway:
     """Small local-only HTTP adapter; the browser never receives its token."""
 
@@ -233,6 +305,7 @@ class DeliveryGateway:
         port: int = 8766,
         time_scale: float = 1.0,
         confirmation_timeout_seconds: float = 180.0,
+        runner: Any | None = None,
     ) -> None:
         token_bytes = token.encode("utf-8")
         if len(token_bytes) < 32:
@@ -249,12 +322,6 @@ class DeliveryGateway:
             raise DeliveryGatewayError("delivery gateway host must be a literal loopback IP")
         if isinstance(port, bool) or not isinstance(port, int) or not 0 <= port <= 65535:
             raise DeliveryGatewayError("delivery gateway port must be between 0 and 65535")
-        if (
-            isinstance(time_scale, bool)
-            or not isinstance(time_scale, (int, float))
-            or not 0.1 <= float(time_scale) <= 100.0
-        ):
-            raise DeliveryGatewayError("time_scale must be between 0.1 and 100.0")
         if (
             isinstance(confirmation_timeout_seconds, bool)
             or not isinstance(confirmation_timeout_seconds, (int, float))
@@ -274,14 +341,23 @@ class DeliveryGateway:
         self._job = job
         self._host = host
         self._port = port
-        self._time_scale = float(time_scale)
         self._confirmation_timeout_seconds = float(confirmation_timeout_seconds)
+        self._runner = runner or SimulatedDeliveryRunner(time_scale=time_scale)
         self._approval_id = f"{job.job_id}.dropoff"
         self._lock = threading.RLock()
         self._sessions: OrderedDict[str, DeliverySession] = OrderedDict()
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
         self._stopping = False
+        self._runner.bind(self)
+
+    @property
+    def lock(self) -> threading.RLock:
+        return self._lock
+
+    @property
+    def stopping(self) -> bool:
+        return self._stopping
 
     @property
     def address(self) -> tuple[str, int]:
@@ -460,17 +536,13 @@ class DeliveryGateway:
             server.server_close()
         if thread is not None:
             thread.join(timeout=2.0)
-        mission_threads: list[threading.Thread] = []
+        self._runner.shutdown()
         with self._lock:
             for session in self._sessions.values():
                 if not session.controller.terminal:
                     session.controller.cancel_for_safety(
                         session.sim_now, reason="gateway_shutdown"
                     )
-                if session.thread is not None:
-                    mission_threads.append(session.thread)
-        for mission_thread in mission_threads:
-            mission_thread.join(timeout=2.0)
 
     # --------------------------------------------------------------- sessions
 
@@ -505,13 +577,7 @@ class DeliveryGateway:
                 if not oldest.controller.terminal:
                     break
                 del self._sessions[oldest_id]
-            session.thread = threading.Thread(
-                target=self._run_mission,
-                args=(session,),
-                name=f"flyto-robotics-delivery-mission-{session_id}",
-                daemon=True,
-            )
-            session.thread.start()
+            self._runner.start_session(session)
             return self._session_payload(session)
 
     def session_payload(self, session_id: str) -> dict[str, Any] | None:
@@ -590,39 +656,6 @@ class DeliveryGateway:
                 session.controller.cancel_for_safety(session.sim_now, reason=reason)
             return self._session_payload(session)
 
-    # ---------------------------------------------------------------- mission
-
-    def _run_mission(self, session: DeliverySession) -> None:
-        wall_step = SIMULATION_TIMESTEP_SECONDS / self._time_scale
-        while True:
-            with self._lock:
-                if session.controller.terminal:
-                    return
-                if self._stopping:
-                    session.controller.cancel_for_safety(
-                        session.sim_now, reason="gateway_shutdown"
-                    )
-                    return
-                command = session.controller.tick(
-                    session.pose, minimum_range=math.inf, now=session.sim_now
-                )
-                session.pose = Pose2D(
-                    x=session.pose.x
-                    + command.linear_x
-                    * math.cos(session.pose.yaw)
-                    * SIMULATION_TIMESTEP_SECONDS,
-                    y=session.pose.y
-                    + command.linear_x
-                    * math.sin(session.pose.yaw)
-                    * SIMULATION_TIMESTEP_SECONDS,
-                    yaw=normalize_angle(
-                        session.pose.yaw
-                        + command.angular_z * SIMULATION_TIMESTEP_SECONDS
-                    ),
-                )
-                session.sim_now += SIMULATION_TIMESTEP_SECONDS
-            time.sleep(wall_step)
-
     def _session_payload(self, session: DeliverySession) -> dict[str, Any]:
         controller = session.controller
         return {
@@ -637,8 +670,11 @@ class DeliveryGateway:
             "robot_id": controller.job.robot_id,
             "workflow_id": controller.workflow.workflow_id,
             "approval_id": session.approval_id,
+            "execution_mode": str(getattr(self._runner, "mode", "unknown")),
             "failure_reason": controller.failure_reason,
-            "elapsed_seconds": round(session.sim_now, 3),
+            "elapsed_seconds": round(
+                max(0.0, session.sim_now - controller.started_at), 3
+            ),
             "pose": {
                 "x": round(session.pose.x, 3),
                 "y": round(session.pose.y, 3),
