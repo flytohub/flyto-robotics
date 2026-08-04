@@ -122,3 +122,45 @@ def test_gateway_health_is_authenticated_and_loopback_only() -> None:
         InputGateway(token=TOKEN, host="0.0.0.0")
     with pytest.raises(InputGatewayError, match="at least 32"):
         InputGateway(token="short")
+
+
+def test_abandoned_press_is_not_delivered_to_the_control_thread() -> None:
+    """A press whose ack timed out must never start unattended motion."""
+    with InputGateway(token=TOKEN, port=0, ack_timeout_seconds=0.05) as gateway:
+        host, port = gateway.address
+        status, body = request_json(
+            f"http://{host}:{port}/v1/input-events",
+            payload=input_payload(phase="press", sequence=1),
+        )
+        assert status == 503
+        assert body["error"] == "input_ack_timeout"
+        # Nothing client-side is tracking it, so no dead-man would ever stop it.
+        assert gateway.drain() == ()
+
+
+def test_abandoned_release_is_still_delivered() -> None:
+    """A stale release only ever stops motion, so dropping it would be unsafe."""
+    with InputGateway(token=TOKEN, port=0, ack_timeout_seconds=0.05) as gateway:
+        host, port = gateway.address
+        status, _ = request_json(
+            f"http://{host}:{port}/v1/input-events",
+            payload=input_payload(phase="release", sequence=2),
+        )
+        assert status == 503
+        drained = gateway.drain()
+        assert len(drained) == 1
+        assert drained[0].event.phase.value == "release"
+
+
+def test_acknowledge_reports_failure_once_abandoned() -> None:
+    with InputGateway(token=TOKEN, port=0, ack_timeout_seconds=0.05) as gateway:
+        host, port = gateway.address
+        request_json(
+            f"http://{host}:{port}/v1/input-events",
+            payload=input_payload(phase="release", sequence=3),
+        )
+        queued = gateway.drain()[0]
+        assert queued.abandoned is True
+        assert queued.acknowledge(
+            action="safe_stop", reason="input_released", workflow_id=None, robot_state="stopped"
+        ) is False

@@ -12,6 +12,7 @@ class MissionState(str, Enum):
     ACCEPTED = "accepted"
     NAVIGATING = "navigating"
     MOVING_RELATIVE = "moving_relative"
+    TURNING_RELATIVE = "turning_relative"
     NAVIGATING_TO_PICKUP = "navigating_to_pickup"
     WAITING_FOR_PICKUP = "waiting_for_pickup"
     NAVIGATING_TO_DROPOFF = "navigating_to_dropoff"
@@ -32,6 +33,7 @@ class MissionState(str, Enum):
 class PrimitiveKind(str, Enum):
     NAVIGATE = "navigate"
     MOVE_RELATIVE = "move_relative"
+    TURN_RELATIVE = "turn_relative"
     DWELL = "dwell"
     FOLLOW_LINE = "follow_line"
     WAIT_UNTIL_CLEAR = "wait_until_clear"
@@ -81,6 +83,16 @@ class WorkflowStep:
             ):
                 raise ValueError(
                     "move_relative primitives require distance_m between -2.0 and 2.0"
+                )
+        if self.kind == PrimitiveKind.TURN_RELATIVE:
+            delta = self.argument("yaw_delta_rad")
+            if (
+                isinstance(delta, bool)
+                or not isinstance(delta, (int, float))
+                or not 0.05 <= abs(float(delta)) <= 3.0
+            ):
+                raise ValueError(
+                    "turn_relative primitives require yaw_delta_rad between -3.0 and 3.0"
                 )
         if self.kind == PrimitiveKind.FOLLOW_LINE and self.argument("color") is None:
             raise ValueError("follow_line primitives require a color")

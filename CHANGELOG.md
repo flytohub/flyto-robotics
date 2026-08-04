@@ -4,6 +4,23 @@ All notable project changes are recorded here.
 
 ## Unreleased
 
+- Added the `turn_relative` atomic capability: rotate in place by a bounded
+  signed angle from a controller-captured odometry heading, obstacle-guarded,
+  and holding linear velocity at exactly zero so a rotation can never creep
+  toward something the operator cannot see. Registered in the capability
+  manifest, the plan contract, the compiler, and the input-runtime motion set,
+  so a turn card is enforced to end with `safe_stop` twice, independently.
+- Added the four keyboard-shortcut workflow cards as reviewed JSON artifacts
+  (`examples/plans/shortcut-{forward,backward}-40cm.json`,
+  `shortcut-turn-{left,right}-90deg.json`) plus `examples/jobs/tb3-lab-shortcut.json`.
+  Each card is sized to finish inside the operator's press-and-hold window, so
+  the bounded artifact is the binding constraint rather than a browser timer.
+- The input gateway now fails closed when the control thread misses its ack
+  deadline. A press that answered 503 previously still started its workflow
+  while nothing client-side tracked it, so no dead-man would have stopped it;
+  such a press is now dropped. Release, disconnect and heartbeat are always
+  delivered because they only ever stop motion.
+
 - The ROS 2 delivery backend now binds `/cmd_vel` to whatever message type the
   driver actually subscribes with. Jazzy's TurtleBot3 driver expects
   `TwistStamped` while the bundled Gazebo bridge uses `Twist`; a mismatch

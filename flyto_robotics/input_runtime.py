@@ -20,6 +20,7 @@ MOTION_PRIMITIVES = frozenset(
         PrimitiveKind.NAVIGATE,
         PrimitiveKind.NAVIGATE_TO_LOCATION,
         PrimitiveKind.MOVE_RELATIVE,
+        PrimitiveKind.TURN_RELATIVE,
         PrimitiveKind.FOLLOW_LINE,
     }
 )

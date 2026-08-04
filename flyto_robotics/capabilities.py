@@ -887,6 +887,72 @@ def default_capability_registry() -> CapabilityRegistry:
                 ),
             ),
             CapabilityDefinition(
+                name="turn_relative",
+                description=(
+                    "Rotate in place by a bounded signed angle from the current "
+                    "trusted odometry heading."
+                ),
+                canonical_id="robotics.motion.turn_relative@1",
+                tags=("relative-motion", "rotation", "jog", "左轉", "右轉", "度"),
+                aliases=(
+                    "turn relative",
+                    "turn left",
+                    "turn right",
+                    "rotate in place",
+                    "原地左轉",
+                    "原地右轉",
+                ),
+                control_class="motion",
+                required_observations=("odometry", "minimum_range"),
+                required_resources=("base_controller",),
+                safety_class="motion_bounded",
+                side_effects=("robot_motion",),
+                intent_ids=("motion.relative.rotation",),
+                affordances=("motion.base.relative_rotation",),
+                effects=("robot.heading.reached",),
+                handled_events=(
+                    "input.pressed",
+                    "input.released",
+                    "input.disconnected",
+                    "obstacle.detected",
+                ),
+                positive_examples=(
+                    "原地左轉九十度",
+                    "turn right 90 degrees",
+                ),
+                negative_examples=(
+                    "前往護理站",
+                    "前進三十公分",
+                ),
+                recovery_capabilities=("safe_stop", "ask_human"),
+                legacy_zero_score_fallback=False,
+                arguments=(
+                    ArgumentSpec(
+                        "yaw_delta_rad",
+                        "number",
+                        minimum=-3.0,
+                        maximum=3.0,
+                        description=(
+                            "Signed rotation in radians; positive is counter-clockwise "
+                            "(left) per ROS REP-103."
+                        ),
+                    ),
+                    ArgumentSpec(
+                        "angular_speed",
+                        "number",
+                        required=False,
+                        minimum=0.1,
+                        maximum=1.0,
+                        default=0.6,
+                    ),
+                ),
+                safety_notes=(
+                    "Rotation is measured from odometry captured by the deterministic "
+                    "controller and never commands linear velocity. Obstacles and "
+                    "external dead-man cancellation force zero velocity."
+                ),
+            ),
+            CapabilityDefinition(
                 name="navigate_to_location",
                 description=(
                     "Resolve one stable semantic location ID through the trusted map "

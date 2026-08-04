@@ -13,7 +13,12 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
-from .input_runtime import InputEvent, InputValidationError, parse_input_event
+from .input_runtime import (
+    InputEvent,
+    InputPhase,
+    InputValidationError,
+    parse_input_event,
+)
 
 INPUT_ACK_CONTRACT_VERSION = "flyto.robotics.input-ack.v1"
 MAX_INPUT_BODY_BYTES = 8192
@@ -31,6 +36,21 @@ class QueuedInput:
     event: InputEvent
     _completed: threading.Event = field(default_factory=threading.Event)
     _response: dict[str, object] | None = None
+    _guard: threading.Lock = field(default_factory=threading.Lock)
+    _abandoned: bool = False
+
+    def abandon(self) -> bool:
+        """Mark an event whose caller already gave up waiting for the ack."""
+        with self._guard:
+            if self._response is not None:
+                return False
+            self._abandoned = True
+            return True
+
+    @property
+    def abandoned(self) -> bool:
+        with self._guard:
+            return self._abandoned
 
     def acknowledge(
         self,
@@ -39,7 +59,10 @@ class QueuedInput:
         reason: str,
         workflow_id: str | None,
         robot_state: str,
-    ) -> None:
+    ) -> bool:
+        with self._guard:
+            if self._abandoned:
+                return False
         self._response = {
             "contract_version": INPUT_ACK_CONTRACT_VERSION,
             "accepted": True,
@@ -50,6 +73,7 @@ class QueuedInput:
             "robot_state": robot_state,
         }
         self._completed.set()
+        return True
 
     def wait(self, timeout_seconds: float) -> dict[str, object] | None:
         if not self._completed.wait(timeout_seconds):
@@ -194,6 +218,10 @@ class InputGateway:
                     return
                 response = pending.wait(gateway._ack_timeout_seconds)
                 if response is None:
+                    # The caller is no longer tracking this event, so no
+                    # client-side dead-man will ever stop it. Mark it abandoned
+                    # before answering; drain() drops abandoned presses.
+                    pending.abandon()
                     self._send_json(
                         HTTPStatus.SERVICE_UNAVAILABLE,
                         {
@@ -218,9 +246,15 @@ class InputGateway:
         drained: list[QueuedInput] = []
         for _ in range(maximum):
             try:
-                drained.append(self._pending.get_nowait())
+                queued = self._pending.get_nowait()
             except queue.Empty:
                 break
+            # An abandoned press would start unattended motion that nothing
+            # client-side is watching, so drop it. Release, disconnect and
+            # heartbeat are always delivered: they only ever stop things.
+            if queued.abandoned and queued.event.phase is InputPhase.PRESS:
+                continue
+            drained.append(queued)
         return tuple(drained)
 
     def stop(self) -> None:

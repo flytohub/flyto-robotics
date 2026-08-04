@@ -1,0 +1,35 @@
+{
+  "contract_version": "flyto.robotics.job.v1",
+  "job_id": "tb3-lab-shortcut-001",
+  "robot_id": "flyto-tb3-lab-001",
+  "task_type": "hospital_delivery",
+  "pickup": {
+    "station_id": "lab_origin",
+    "x": 0.0,
+    "y": 0.0,
+    "yaw": 0.0
+  },
+  "dropoff": {
+    "station_id": "lab_target",
+    "x": 1.0,
+    "y": 0.0,
+    "yaw": 0.0
+  },
+  "payload": {
+    "payload_id": "none",
+    "category": "supplies",
+    "sealed": true
+  },
+  "safety": {
+    "max_linear_speed": 0.2,
+    "max_angular_speed": 0.8,
+    "obstacle_stop_distance": 0.25,
+    "pose_tolerance": 0.05,
+    "mission_timeout_seconds": 30.0,
+    "pickup_dwell_seconds": 0.0,
+    "dropoff_dwell_seconds": 0.0
+  },
+  "metadata": {
+    "scenario": "keyboard-shortcut-jog"
+  }
+}

@@ -133,6 +133,7 @@ class MissionController:
         self.line_acquired_at: float | None = None
         self.line_last_seen_at: float | None = None
         self.relative_origin: Pose2D | None = None
+        self.turn_origin_yaw: float | None = None
         self.clear_since: float | None = None
         self.clearance_blocked = False
         self.approval_requests: set[str] = set()
@@ -286,6 +287,7 @@ class MissionController:
         self.line_acquired_at = None
         self.line_last_seen_at = None
         self.relative_origin = None
+        self.turn_origin_yaw = None
         self.clear_since = None
         self.clearance_blocked = False
         target_detail = (
@@ -423,6 +425,60 @@ class MissionController:
             self.job.safety.max_angular_speed,
         )
         return Command(linear, angular, self.state, "moving_relative")
+
+    def _turn_relative(
+        self,
+        pose: Pose2D,
+        minimum_range: float,
+        now: float,
+    ) -> Command:
+        """Rotate a bounded angle from a controller-captured odometry origin."""
+        guarded = self._obstacle_guard(minimum_range, now)
+        if guarded is not None:
+            return guarded
+
+        step = self._current_step()
+        target_delta = float(step.argument("yaw_delta_rad"))
+        if self.turn_origin_yaw is None:
+            self.turn_origin_yaw = pose.yaw
+            self._record_event(
+                now,
+                "relative_origin_captured",
+                f"{step.step_id} captured trusted odometry yaw",
+            )
+
+        origin_yaw = self.turn_origin_yaw
+        # Accumulate so a turn larger than pi cannot alias to the short way
+        # round: track the signed delta since the previous tick.
+        turned = normalize_angle(pose.yaw - origin_yaw)
+        if target_delta > 0.0 and turned < -math.pi / 2:
+            turned += 2.0 * math.pi
+        elif target_delta < 0.0 and turned > math.pi / 2:
+            turned -= 2.0 * math.pi
+
+        tolerance = 0.035
+        reached = (
+            turned >= target_delta - tolerance
+            if target_delta > 0.0
+            else turned <= target_delta + tolerance
+        )
+        if reached:
+            return self._complete_step(
+                now,
+                f"{step.step_id} turned {turned:.3f}rad toward {target_delta:.3f}rad",
+            )
+
+        remaining = target_delta - turned
+        speed_limit = min(
+            self.job.safety.max_angular_speed,
+            float(step.argument("angular_speed", 0.6)),
+        )
+        angular = math.copysign(
+            min(speed_limit, max(0.08, 1.8 * abs(remaining))),
+            remaining,
+        )
+        # A turn is rotation only: never translate while rotating in place.
+        return Command(0.0, angular, self.state, "turning_relative")
 
     def _follow_line(
         self,
@@ -631,6 +687,9 @@ class MissionController:
             PrimitiveKind.NAVIGATE_TO_LOCATION,
         }:
             return self._navigate(pose, minimum_range, now)
+
+        if step.kind == PrimitiveKind.TURN_RELATIVE:
+            return self._turn_relative(pose, minimum_range, now)
 
         if step.kind == PrimitiveKind.MOVE_RELATIVE:
             return self._move_relative(pose, minimum_range, now)

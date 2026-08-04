@@ -1,0 +1,32 @@
+{
+  "contract_version": "flyto.robotics.plan.v1",
+  "plan_id": "shortcut.turn.right.90deg.v1",
+  "robot_id": "flyto-tb3-lab-001",
+  "goal": "原地右轉九十度後安全停止",
+  "generated_by": {
+    "kind": "human",
+    "provider": "flyto-cloud",
+    "model": "workflow-card"
+  },
+  "steps": [
+    {
+      "step_id": "turn.right",
+      "capability": "turn_relative",
+      "arguments": {
+        "yaw_delta_rad": -1.5708,
+        "angular_speed": 0.6
+      },
+      "timeout_seconds": 6.0,
+      "on_failure": "abort"
+    },
+    {
+      "step_id": "stop.finish",
+      "capability": "safe_stop",
+      "arguments": {
+        "seconds": 0.0
+      },
+      "timeout_seconds": 1.0,
+      "on_failure": "abort"
+    }
+  ]
+}
