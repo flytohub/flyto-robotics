@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import math
+import re
 import threading
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import rclpy
-from geometry_msgs.msg import Twist
+from geometry_msgs.msg import Twist, TwistStamped
 from nav_msgs.msg import Odometry
 from rclpy import logging as rclpy_logging
 from rclpy.executors import ExternalShutdownException, SingleThreadedExecutor
@@ -30,6 +31,27 @@ ODOMETRY_TIMEOUT_SECONDS = 1.0
 SENSOR_STARTUP_GRACE_SECONDS = 10.0
 SENSOR_STABILIZATION_SECONDS = 1.0
 
+# The bundled Gazebo bridge publishes under /flyto; a vendor driver such as
+# TurtleBot3 keeps the unnamespaced names. Configure the runner instead of
+# remapping the vendor driver, so teleop, rviz and Nav2 keep working alongside.
+DEFAULT_ODOM_TOPIC = "/flyto/odom"
+DEFAULT_SCAN_TOPIC = "/flyto/scan"
+DEFAULT_CMD_VEL_TOPIC = "/flyto/cmd_vel"
+TOPIC_PATTERN = re.compile(r"^/?[A-Za-z_~][A-Za-z0-9_/]{0,127}$")
+
+CMD_VEL_TYPE_AUTO = "auto"
+CMD_VEL_TYPE_TWIST = "twist"
+CMD_VEL_TYPE_TWIST_STAMPED = "twist_stamped"
+CMD_VEL_TYPES = (CMD_VEL_TYPE_AUTO, CMD_VEL_TYPE_TWIST, CMD_VEL_TYPE_TWIST_STAMPED)
+TWIST_STAMPED_TYPE_NAME = "geometry_msgs/msg/TwistStamped"
+
+
+def validated_topic(value: str, field_name: str) -> str:
+    """Reject anything that is not a plain absolute ROS topic name."""
+    if not isinstance(value, str) or not TOPIC_PATTERN.fullmatch(value):
+        raise ValueError(f"{field_name} must be a valid ROS topic name")
+    return value if value.startswith("/") else f"/{value}"
+
 
 class Ros2DeliverySessionNode(Node):
     """Fail-safe per-session ROS wrapper mirroring the mission adapter.
@@ -46,6 +68,11 @@ class Ros2DeliverySessionNode(Node):
         results_dir: Path,
         gazebo_physics: bool,
         on_terminal: Any,
+        odom_topic: str = DEFAULT_ODOM_TOPIC,
+        scan_topic: str = DEFAULT_SCAN_TOPIC,
+        cmd_vel_topic: str = DEFAULT_CMD_VEL_TOPIC,
+        cmd_vel_type: str = CMD_VEL_TYPE_AUTO,
+        require_range: bool = True,
     ) -> None:
         parameter_overrides = []
         if gazebo_physics:
@@ -72,14 +99,26 @@ class Ros2DeliverySessionNode(Node):
         self._clock_anchored = False
         self._minimum_range = math.inf
         self._finished = False
+        self._requires_range = require_range
 
-        self._command_publisher = self.create_publisher(Twist, "/flyto/cmd_vel", 10)
-        self.create_subscription(Odometry, "/flyto/odom", self._on_odometry, 10)
+        # Jazzy's TurtleBot3 driver subscribes with TwistStamped while the
+        # bundled Gazebo bridge uses Twist. A type mismatch matches zero
+        # subscribers and DDS reports no error, so the robot silently ignores
+        # every command. Bind the publisher lazily to whatever the driver
+        # actually subscribes with instead of hardcoding either type.
+        self._cmd_vel_topic = cmd_vel_topic
+        self._cmd_vel_type = cmd_vel_type
+        self._command_publisher: Any = None
+        self._resolved_cmd_vel_type = CMD_VEL_TYPE_TWIST
+        self.create_subscription(Odometry, odom_topic, self._on_odometry, 10)
         self.create_subscription(
             LaserScan,
-            "/flyto/scan",
+            scan_topic,
             self._on_scan,
             qos_profile_sensor_data,
+        )
+        self.get_logger().info(
+            f"topics: cmd_vel={cmd_vel_topic} odom={odom_topic} scan={scan_topic}"
         )
         self._timer = self.create_timer(CONTROL_PERIOD_SECONDS, self._control_tick)
         self.get_logger().info(
@@ -110,9 +149,61 @@ class Ros2DeliverySessionNode(Node):
         self._minimum_range = min(valid, default=math.inf)
         self._last_scan_at = time.monotonic()
 
+    def _detected_cmd_vel_type(self) -> str:
+        """Return the message type the driver actually subscribes with."""
+        if self._cmd_vel_type != CMD_VEL_TYPE_AUTO:
+            return self._cmd_vel_type
+        try:
+            endpoints = self.get_subscriptions_info_by_topic(self._cmd_vel_topic)
+        except Exception:  # noqa: BLE001 - introspection is best-effort
+            endpoints = []
+        for endpoint in endpoints:
+            if endpoint.topic_type == TWIST_STAMPED_TYPE_NAME:
+                return CMD_VEL_TYPE_TWIST_STAMPED
+        if endpoints:
+            return CMD_VEL_TYPE_TWIST
+        # Nobody is listening yet. Say so loudly rather than command into a void.
+        self.get_logger().warning(
+            f"no subscriber on {self._cmd_vel_topic}; assuming Twist. "
+            "The robot will ignore commands if its driver expects TwistStamped."
+        )
+        return CMD_VEL_TYPE_TWIST
+
+    def _command_channel(self) -> Any:
+        if self._command_publisher is not None:
+            return self._command_publisher
+        resolved = self._detected_cmd_vel_type()
+        message_type = (
+            TwistStamped if resolved == CMD_VEL_TYPE_TWIST_STAMPED else Twist
+        )
+        self._command_publisher = self.create_publisher(
+            message_type, self._cmd_vel_topic, 10
+        )
+        self._resolved_cmd_vel_type = resolved
+        self.get_logger().info(
+            f"cmd_vel bound: topic={self._cmd_vel_topic} "
+            f"type={message_type.__name__} ({self._cmd_vel_type})"
+        )
+        return self._command_publisher
+
+    def _send_velocity(self, linear_x: float, angular_z: float) -> None:
+        if not rclpy.ok():
+            return
+        publisher = self._command_channel()
+        if self._resolved_cmd_vel_type == CMD_VEL_TYPE_TWIST_STAMPED:
+            message = TwistStamped()
+            message.header.stamp = self.get_clock().now().to_msg()
+            message.header.frame_id = "base_link"
+            message.twist.linear.x = linear_x
+            message.twist.angular.z = angular_z
+        else:
+            message = Twist()
+            message.linear.x = linear_x
+            message.angular.z = angular_z
+        publisher.publish(message)
+
     def _publish_stop(self) -> None:
-        if rclpy.ok():
-            self._command_publisher.publish(Twist())
+        self._send_velocity(0.0, 0.0)
 
     def finish_locked(self, now: float) -> dict[str, Any] | None:
         """Stop, snapshot evidence, and retire; caller holds the gateway lock.
@@ -153,15 +244,20 @@ class Ros2DeliverySessionNode(Node):
 
     def _control_tick(self) -> None:
         steady_now = time.monotonic()
-        samples_present = not (
-            self._last_pose is None
-            or self._last_odometry_at is None
-            or self._last_scan_at is None
+        # Odometry is always required: without a trusted pose the controller
+        # cannot know where it is. A range sensor is only required when the
+        # workflow actually uses clearance, so a delivery on a robot with no
+        # lidar still runs, it simply forfeits obstacle waiting.
+        required_samples: list[float | None] = [self._last_odometry_at]
+        if self._requires_range:
+            required_samples.append(self._last_scan_at)
+        samples_present = self._last_pose is not None and all(
+            sample is not None for sample in required_samples
         )
         oldest_sample_age = max(
             (
                 steady_now - sample_time
-                for sample_time in (self._last_odometry_at, self._last_scan_at)
+                for sample_time in required_samples
                 if sample_time is not None
             ),
             default=math.inf,
@@ -224,10 +320,7 @@ class Ros2DeliverySessionNode(Node):
                     else:
                         # Publish while holding the lock so a shutdown stop
                         # can never be overtaken by an in-flight command.
-                        velocity = Twist()
-                        velocity.linear.x = command.linear_x
-                        velocity.angular.z = command.angular_z
-                        self._command_publisher.publish(velocity)
+                        self._send_velocity(command.linear_x, command.angular_z)
         if finished_result is not None:
             self.write_evidence(finished_result)
 
@@ -242,9 +335,21 @@ class Ros2DeliveryRunner:
         *,
         results_dir: Path | str = "results",
         gazebo_physics: bool = False,
+        odom_topic: str = DEFAULT_ODOM_TOPIC,
+        scan_topic: str = DEFAULT_SCAN_TOPIC,
+        cmd_vel_topic: str = DEFAULT_CMD_VEL_TOPIC,
+        cmd_vel_type: str = CMD_VEL_TYPE_AUTO,
+        require_range: bool = True,
     ) -> None:
         self._results_dir = Path(results_dir)
         self._gazebo_physics = bool(gazebo_physics)
+        self._odom_topic = validated_topic(odom_topic, "odom_topic")
+        self._scan_topic = validated_topic(scan_topic, "scan_topic")
+        self._cmd_vel_topic = validated_topic(cmd_vel_topic, "cmd_vel_topic")
+        if cmd_vel_type not in CMD_VEL_TYPES:
+            raise ValueError(f"cmd_vel_type must be one of {', '.join(CMD_VEL_TYPES)}")
+        self._cmd_vel_type = cmd_vel_type
+        self._require_range = bool(require_range)
         self._gateway: DeliveryGateway | None = None
         self._executor: SingleThreadedExecutor | None = None
         self._spin_thread: threading.Thread | None = None
@@ -308,6 +413,11 @@ class Ros2DeliveryRunner:
             results_dir=self._results_dir,
             gazebo_physics=self._gazebo_physics,
             on_terminal=self._retire_node,
+            odom_topic=self._odom_topic,
+            scan_topic=self._scan_topic,
+            cmd_vel_topic=self._cmd_vel_topic,
+            cmd_vel_type=self._cmd_vel_type,
+            require_range=self._require_range,
         )
         with self._nodes_lock:
             self._nodes.append(node)

@@ -4,6 +4,21 @@ All notable project changes are recorded here.
 
 ## Unreleased
 
+- The ROS 2 delivery backend now binds `/cmd_vel` to whatever message type the
+  driver actually subscribes with. Jazzy's TurtleBot3 driver expects
+  `TwistStamped` while the bundled Gazebo bridge uses `Twist`; a mismatch
+  matches zero subscribers and DDS reports no error, so the robot silently
+  ignored every command while the logs looked clean. Detection happens at first
+  publish, the resolved type is logged, an absent subscriber is warned about
+  rather than commanded into a void, and `--cmd-vel-type` forces either type
+  when determinism matters.
+- Topics are configurable (`--odom-topic`, `--scan-topic`, `--cmd-vel-topic`)
+  so a vendor driver keeps its standard names and teleop, rviz and Nav2 keep
+  working alongside the gateway.
+- A range sensor is now required only when the workflow uses clearance, so a
+  delivery still runs on a robot with no lidar, forfeiting obstacle waiting
+  instead of refusing to move.
+
 - Deliveries are now goal-driven: `serve-delivery --semantic-map` resolves a
   free-form operator goal (zh-TW or English, Han or Arabic digits, partial
   labels, or a literal location ID) to exactly one semantic destination, routes

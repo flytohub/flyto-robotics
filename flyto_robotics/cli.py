@@ -704,6 +704,21 @@ def _parser() -> argparse.ArgumentParser:
         help="enable goal-driven deliveries resolved against this location map",
     )
     serve_delivery.add_argument("--semantic-map-id")
+    serve_delivery.add_argument(
+        "--odom-topic",
+        default="/flyto/odom",
+        help="odometry topic for the ros2 backend (TurtleBot3 uses /odom)",
+    )
+    serve_delivery.add_argument(
+        "--scan-topic",
+        default="/flyto/scan",
+        help="lidar topic for the ros2 backend (TurtleBot3 uses /scan)",
+    )
+    serve_delivery.add_argument(
+        "--cmd-vel-topic",
+        default="/flyto/cmd_vel",
+        help="velocity topic for the ros2 backend (TurtleBot3 uses /cmd_vel)",
+    )
 
     resolve_goal = subcommands.add_parser(
         "resolve-goal",
@@ -1078,7 +1093,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                         f"({exc})"
                     ) from exc
 
-                runner = Ros2DeliveryRunner(gazebo_physics=args.gazebo)
+                runner = Ros2DeliveryRunner(
+                    gazebo_physics=args.gazebo,
+                    odom_topic=args.odom_topic,
+                    scan_topic=args.scan_topic,
+                    cmd_vel_topic=args.cmd_vel_topic,
+                )
             semantic_map = _semantic_map_store(
                 args.semantic_map,
                 args.semantic_map_id,
