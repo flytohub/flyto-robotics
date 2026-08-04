@@ -21,6 +21,13 @@
   and snapshot identity, rejects raw actuator fields, and requires one matching
   workflow/resource/endpoint/capability/adapter/Space binding before ROS starts.
   The projects remain source-independent and share only the JSON contract.
+- The AI Space delivery loop is now closed end to end: `serve-delivery` hosts
+  the loopback `/v1/deliveries` adapter the Cloud relay expects (bearer token
+  `FLYTO_ROBOTICS_DELIVERY_TOKEN`, QR secret `FLYTO_ROBOTICS_QR_SECRET`).
+  Verified 2026-08-04 against the live Cloud relay: UI-equivalent WebSocket
+  start → navigate → `waiting_for_human` → signed QR accepted (fingerprint-only
+  evidence) → `completed`; abrupt WebSocket loss → relay safe-stop →
+  `mission_cancelled` with reason `cloud_control_link_closed`.
 - Capability selection now uses namespaced/versioned manifests, registry
   snapshot hashes, language-neutral Goal Frames, canonical
   intent/affordance/effect/event matching, runtime compatibility hard filters,

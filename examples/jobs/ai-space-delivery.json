@@ -1,0 +1,35 @@
+{
+  "contract_version": "flyto.robotics.job.v1",
+  "job_id": "ai-space-delivery-demo-001",
+  "robot_id": "flyto-rover-sim-001",
+  "task_type": "hospital_delivery",
+  "pickup": {
+    "station_id": "pharmacy",
+    "x": 3.0,
+    "y": -2.0,
+    "yaw": 1.5708
+  },
+  "dropoff": {
+    "station_id": "ward_a",
+    "x": 3.0,
+    "y": 2.0,
+    "yaw": 1.5708
+  },
+  "payload": {
+    "payload_id": "sealed-medication-bin-001",
+    "category": "medication",
+    "sealed": true
+  },
+  "safety": {
+    "max_linear_speed": 0.35,
+    "max_angular_speed": 0.8,
+    "obstacle_stop_distance": 0.45,
+    "pose_tolerance": 0.2,
+    "mission_timeout_seconds": 600.0,
+    "pickup_dwell_seconds": 2.0,
+    "dropoff_dwell_seconds": 2.0
+  },
+  "metadata": {
+    "scenario": "ai-space-hospital-delivery"
+  }
+}

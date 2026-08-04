@@ -4,6 +4,15 @@ All notable project changes are recorded here.
 
 ## Unreleased
 
+- Added the loopback AI Space delivery gateway (`flyto_robotics/delivery_gateway.py`,
+  CLI `serve-delivery`): an authenticated 127.0.0.1 HTTP adapter implementing the
+  Flyto Cloud relay contract (`/v1/health`, `/v1/deliveries`, poll, QR
+  `/confirmation`, `/safe-stop`). Deliveries run the real `MissionController`
+  under a real-time deterministic tick thread; dropoff is gated behind one
+  signed `F2QR1` scan verified with job/robot/approval binding; responses carry
+  only the token SHA-256 fingerprint, never the raw token; WebSocket loss
+  fail-closes through relay safe-stop into `mission_cancelled` evidence.
+
 - Added a monotonic, fail-safe ROS sensor startup gate: odometry, LiDAR, and
   camera samples must remain fresh for one continuous second before the first
   control command. Bootstrap samples from an older Gazebo generation now keep

@@ -7,6 +7,7 @@ import json
 import math
 import os
 import sys
+import time
 import xml.etree.ElementTree as ET
 from collections.abc import Sequence
 from datetime import datetime, timezone
@@ -23,6 +24,7 @@ from .ai_planner import (
 )
 from .capabilities import GoalFrame, default_capability_registry
 from .contracts import JobValidationError, load_job, write_json_atomic
+from .delivery_gateway import DeliveryGateway
 from .guarded_handoff import load_policy, load_script
 from .human_approval import (
     HumanDecisionValidationError,
@@ -668,6 +670,21 @@ def _parser() -> argparse.ArgumentParser:
     ros.add_argument("--plan", type=Path)
     ros.add_argument("--semantic-map", type=Path)
     ros.add_argument("--semantic-map-id")
+
+    serve_delivery = subcommands.add_parser(
+        "serve-delivery",
+        help="serve the loopback AI Space delivery gateway",
+    )
+    serve_delivery.add_argument("--job", required=True, type=Path)
+    serve_delivery.add_argument("--host", default="127.0.0.1")
+    serve_delivery.add_argument("--port", type=int, default=8766)
+    serve_delivery.add_argument("--time-scale", type=float, default=1.0)
+    serve_delivery.add_argument(
+        "--confirmation-timeout",
+        type=float,
+        default=90.0,
+        help="QR scan window in mission seconds; must fit the job mission timeout",
+    )
     return parser
 
 
@@ -995,6 +1012,38 @@ def main(argv: Sequence[str] | None = None) -> int:
                 semantic_map_path=args.semantic_map,
                 semantic_map_id=args.semantic_map_id,
             )
+        if args.command == "serve-delivery":
+            gateway = DeliveryGateway(
+                token=os.environ.get("FLYTO_ROBOTICS_DELIVERY_TOKEN", ""),
+                qr_secret=os.environ.get("FLYTO_ROBOTICS_QR_SECRET", ""),
+                job=load_job(args.job),
+                host=args.host,
+                port=args.port,
+                time_scale=args.time_scale,
+                confirmation_timeout_seconds=args.confirmation_timeout,
+            )
+            gateway.start()
+            host, port = gateway.address
+            print(
+                json.dumps(
+                    {
+                        "ok": True,
+                        "service": "flyto-robotics-delivery",
+                        "listening": f"{host}:{port}",
+                        "approval_id": gateway.approval_id,
+                    },
+                    sort_keys=True,
+                ),
+                flush=True,
+            )
+            try:
+                while True:
+                    time.sleep(1.0)
+            except KeyboardInterrupt:
+                pass
+            finally:
+                gateway.stop()
+            return 0
     except (
         HumanDecisionValidationError,
         QRConfirmationValidationError,
