@@ -32,10 +32,14 @@
   per-session ROS 2 node mirrors the mission adapter's sensor gate and topics
   (`/flyto/cmd_vel`, `/flyto/odom`, `/flyto/scan`), anchors mission time to
   the ROS clock, and writes `results/delivery-<session>.json` on every
-  terminal path. Simulated planar kinematics remain the default backend and
-  the macOS-verified path; the ROS 2 backend compiles and passed adversarial
-  code review (Jazzy semantics) but still needs live verification in the
-  Linux ROS container and on hardware.
+  terminal path. Simulated planar kinematics remain the default backend.
+  Verified 2026-08-04 inside the ROS 2 Jazzy container against a planar
+  fake-robot node: full delivery (navigate → QR gate → completed,
+  `physical_ros2` evidence), mid-route safe-stop, and clean teardown with an
+  active mission under both SIGINT and SIGTERM (`serve-delivery` installs
+  explicit handlers because background shells inherit SIGINT as ignored and
+  docker/systemd stop with SIGTERM). Hardware verification on the physical
+  robot is still pending.
 - Capability selection now uses namespaced/versioned manifests, registry
   snapshot hashes, language-neutral Goal Frames, canonical
   intent/affordance/effect/event matching, runtime compatibility hard filters,

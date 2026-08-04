@@ -6,8 +6,9 @@ import argparse
 import json
 import math
 import os
+import signal
 import sys
-import time
+import threading
 import xml.etree.ElementTree as ET
 from collections.abc import Sequence
 from datetime import datetime, timezone
@@ -1060,11 +1061,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                 ),
                 flush=True,
             )
+            # Explicit handlers: SIGTERM (docker stop, systemd) must tear down
+            # cleanly, and SIGINT may be inherited as ignored when the server
+            # is started from a non-interactive background shell.
+            stop_requested = threading.Event()
+            signal.signal(signal.SIGINT, lambda *_: stop_requested.set())
+            signal.signal(signal.SIGTERM, lambda *_: stop_requested.set())
             try:
-                while True:
-                    time.sleep(1.0)
-            except KeyboardInterrupt:
-                pass
+                stop_requested.wait()
             finally:
                 gateway.stop()
             return 0

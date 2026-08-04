@@ -13,8 +13,13 @@ All notable project changes are recorded here.
   SIGINT so the final zero-velocity stop still reaches the robot on Ctrl+C;
   `--gazebo` switches the node to simulation time and labels the evidence.
   Terminal sessions persist `results/delivery-<session>.json` on every path,
-  including gateway shutdown. The default backend remains the deterministic
-  planar simulation, now factored as `SimulatedDeliveryRunner`.
+  including gateway shutdown. `serve-delivery` installs explicit
+  SIGINT/SIGTERM handlers so docker/systemd stops and background shells
+  (which inherit SIGINT as ignored) still tear down through the safe-stop
+  path. Verified in the ROS 2 Jazzy container: full delivery, mid-route
+  safe-stop, and active-mission teardown under both signals. The default
+  backend remains the deterministic planar simulation, now factored as
+  `SimulatedDeliveryRunner`.
 - Added the loopback AI Space delivery gateway (`flyto_robotics/delivery_gateway.py`,
   CLI `serve-delivery`): an authenticated 127.0.0.1 HTTP adapter implementing the
   Flyto Cloud relay contract (`/v1/health`, `/v1/deliveries`, poll, QR
