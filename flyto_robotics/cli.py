@@ -26,6 +26,7 @@ from .ai_planner import (
 from .capabilities import GoalFrame, default_capability_registry
 from .contracts import JobValidationError, load_job, write_json_atomic
 from .delivery_gateway import DeliveryGateway
+from .goal_planner import DeterministicDeliveryGoalPlanner
 from .guarded_handoff import load_policy, load_script
 from .human_approval import (
     HumanDecisionValidationError,
@@ -697,6 +698,22 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="mark ros2 backend evidence as Gazebo physics instead of physical",
     )
+    serve_delivery.add_argument(
+        "--semantic-map",
+        type=Path,
+        help="enable goal-driven deliveries resolved against this location map",
+    )
+    serve_delivery.add_argument("--semantic-map-id")
+
+    resolve_goal = subcommands.add_parser(
+        "resolve-goal",
+        help="resolve one operator goal into a validated delivery workflow",
+    )
+    resolve_goal.add_argument("--job", required=True, type=Path)
+    resolve_goal.add_argument("--goal", required=True)
+    resolve_goal.add_argument("--semantic-map", required=True, type=Path)
+    resolve_goal.add_argument("--semantic-map-id", required=True)
+    resolve_goal.add_argument("--confirmation-timeout", type=float, default=90.0)
     return parser
 
 
@@ -1024,6 +1041,32 @@ def main(argv: Sequence[str] | None = None) -> int:
                 semantic_map_path=args.semantic_map,
                 semantic_map_id=args.semantic_map_id,
             )
+        if args.command == "resolve-goal":
+            store = _semantic_map_store(args.semantic_map, args.semantic_map_id)
+            job = load_job(args.job)
+            decision = DeterministicDeliveryGoalPlanner(
+                semantic_map=store
+            ).plan_delivery(
+                job=job,
+                goal=args.goal,
+                session_id="dlv-resolve",
+                approval_id=f"{job.job_id}.dropoff",
+                confirmation_timeout_seconds=args.confirmation_timeout,
+                execution_mode="offline",
+            )
+            report: dict[str, object] = {
+                "ok": decision.accepted,
+                "decision": decision.decision,
+            }
+            if decision.rejection is not None:
+                report["rejection"] = decision.rejection
+            if decision.workflow is not None:
+                report["workflow_id"] = decision.workflow.workflow_id
+                report["steps"] = [
+                    step.step_id for step in decision.workflow.steps
+                ]
+            print(json.dumps(report, ensure_ascii=False, sort_keys=True))
+            return 0 if decision.accepted else 3
         if args.command == "serve-delivery":
             runner = None
             if args.backend == "ros2":
@@ -1036,6 +1079,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                     ) from exc
 
                 runner = Ros2DeliveryRunner(gazebo_physics=args.gazebo)
+            semantic_map = _semantic_map_store(
+                args.semantic_map,
+                args.semantic_map_id,
+            )
             gateway = DeliveryGateway(
                 token=os.environ.get("FLYTO_ROBOTICS_DELIVERY_TOKEN", ""),
                 qr_secret=os.environ.get("FLYTO_ROBOTICS_QR_SECRET", ""),
@@ -1045,6 +1092,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 time_scale=args.time_scale,
                 confirmation_timeout_seconds=args.confirmation_timeout,
                 runner=runner,
+                semantic_map=semantic_map,
             )
             gateway.start()
             host, port = gateway.address
@@ -1054,6 +1102,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                         "ok": True,
                         "service": "flyto-robotics-delivery",
                         "backend": args.backend,
+                        "goal_planner": (
+                            "deterministic" if semantic_map else "fixed_template"
+                        ),
                         "listening": f"{host}:{port}",
                         "approval_id": gateway.approval_id,
                     },

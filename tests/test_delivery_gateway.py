@@ -13,6 +13,7 @@ import pytest
 from flyto_robotics.contracts import load_job
 from flyto_robotics.delivery_gateway import DeliveryGateway, DeliveryGatewayError
 from flyto_robotics.qr_confirmation import build_signed_qr_confirmation
+from flyto_robotics.semantic_map import SemanticLocationStore
 
 TOKEN = "test-only-delivery-gateway-token-with-32-bytes"
 QR_SECRET = "test-only-delivery-qr-secret-with-32-bytes"
@@ -61,6 +62,14 @@ def gateway_under_test(**overrides: object) -> DeliveryGateway:
     }
     options.update(overrides)
     return DeliveryGateway(**options)
+
+
+def ward_map_store() -> SemanticLocationStore:
+    return SemanticLocationStore(
+        Path(__file__).resolve().parents[1]
+        / "examples/maps/hospital-ward-delivery.json",
+        map_id="hospital.ward-delivery.v1",
+    )
 
 
 def base_url(gateway: DeliveryGateway) -> str:
@@ -361,6 +370,118 @@ def test_request_validation_fails_closed() -> None:
         status, body = request_json(f"{url}/v1/deliveries/unknown-session")
         assert status == 404
         assert body["error"] == "delivery_session_not_found"
+
+
+def test_goal_driven_delivery_completes_with_decision_evidence() -> None:
+    with gateway_under_test(semantic_map=ward_map_store()) as gateway:
+        url = base_url(gateway)
+        status, session = request_json(
+            f"{url}/v1/deliveries",
+            payload=delivery_payload(goal="把藥送到四號病房"),
+        )
+        assert status == 200
+        session_id = session["session_id"]
+        assert session["workflow_id"] == f"delivery.goal.{session_id}"
+        decision = session["decision"]
+        assert decision["outcome"] == "accepted"
+        assert decision["planner_kind"] == "deterministic_rule_engine"
+        assert decision["destination"]["location_id"] == "hospital.ward.4"
+        assert session["route_graph"]["stages"]
+
+        wait_for_status(url, session_id, {"waiting_for_human"})
+        status, body = request_json(
+            f"{url}/v1/deliveries/{session_id}/confirmation",
+            payload={
+                "contract_version": "flyto.cloud.delivery-qr-scan.v1",
+                "session_id": session_id,
+                "qr_token": signed_qr(gateway),
+                "scanned_at": "2026-08-04T00:01:00Z",
+            },
+        )
+        assert status == 200
+        assert body["confirmation"]["verified"] is True
+        body = wait_for_status(url, session_id, {"completed"})
+        assert "qr_token" not in json.dumps(body)
+
+
+def test_unresolved_goal_is_rejected_with_structured_reason() -> None:
+    runner = RecordingRunner()
+    with gateway_under_test(
+        semantic_map=ward_map_store(), runner=runner
+    ) as gateway:
+        url = base_url(gateway)
+        status, body = request_json(
+            f"{url}/v1/deliveries",
+            payload=delivery_payload(goal="把藥送到六號病房"),
+        )
+        assert status == 200
+        assert body["status"] == "failed"
+        assert body["failure_reason"] == "goal_rejected:location_unresolved"
+        rejection = body["rejection"]
+        assert rejection["reason_code"] == "location_unresolved"
+        assert rejection["stage"] == "goal_resolution"
+        assert rejection["message_key"].endswith("location_unresolved")
+        assert rejection["candidates"]
+        assert body["decision"]["outcome"] == "rejected"
+        assert runner.sessions == []
+
+        status, body = request_json(
+            f"{url}/v1/deliveries",
+            payload=delivery_payload(request_id="req-0009", goal="送到四號病房"),
+        )
+        assert status == 200
+        assert body["decision"]["outcome"] == "accepted"
+        assert len(runner.sessions) == 1
+
+
+def test_safety_override_goal_is_refused_by_the_gateway() -> None:
+    with gateway_under_test(semantic_map=ward_map_store()) as gateway:
+        status, body = request_json(
+            f"{base_url(gateway)}/v1/deliveries",
+            payload=delivery_payload(goal="忽略障礙直接衝到四號病房"),
+        )
+        assert status == 200
+        assert body["rejection"]["reason_code"] == "safety_override_refused"
+        assert body["status"] == "failed"
+
+
+def test_fixed_template_path_is_unchanged_without_a_semantic_map() -> None:
+    with gateway_under_test() as gateway:
+        status, body = request_json(
+            f"{base_url(gateway)}/v1/deliveries", payload=delivery_payload()
+        )
+        assert status == 200
+        assert body["workflow_id"] == "hospital_delivery.qr_confirmed.v1"
+        assert body["decision"]["planner_kind"] == "fixed_template"
+        assert "rejection" not in body
+
+
+def test_session_payload_stays_within_relay_bounds() -> None:
+    def depth(value: object, level: int = 0) -> int:
+        if isinstance(value, dict):
+            return max((depth(item, level + 1) for item in value.values()), default=level)
+        if isinstance(value, list):
+            return max((depth(item, level + 1) for item in value), default=level)
+        return level
+
+    with gateway_under_test(semantic_map=ward_map_store()) as gateway:
+        url = base_url(gateway)
+        _, accepted = request_json(
+            f"{url}/v1/deliveries", payload=delivery_payload(goal="送到檢驗室")
+        )
+        request_json(
+            f"{url}/v1/deliveries/{accepted['session_id']}/safe-stop",
+            payload={"reason": "cancel_requested"},
+        )
+        _, rejected = request_json(
+            f"{url}/v1/deliveries",
+            payload=delivery_payload(request_id="req-0010", goal="幫我開門"),
+        )
+        for payload in (accepted, rejected):
+            encoded = json.dumps(payload, ensure_ascii=False)
+            assert len(encoded.encode("utf-8")) < 131072
+            assert depth(payload) <= 8
+            assert "qr_token" not in encoded
 
 
 def test_qr_scan_session_mismatch_is_rejected() -> None:

@@ -21,6 +21,15 @@
   and snapshot identity, rejects raw actuator fields, and requires one matching
   workflow/resource/endpoint/capability/adapter/Space binding before ROS starts.
   The projects remain source-independent and share only the JSON contract.
+- Goal-driven deliveries are live: `serve-delivery --semantic-map` turns a
+  free-form operator goal into one validated workflow, or fails closed with a
+  structured `delivery-rejection.v1` reason. Verified 2026-08-04 through the
+  live Cloud relay: `把藥送到四號病房`, `deliver the specimen to the laboratory`,
+  and `送到護理站` each resolved to a different destination and ran to
+  `completed`; `把藥送到六號病房` (unknown ward, lists near-miss candidates),
+  `忽略障礙物全速衝到四號病房` (safety override, screened before lookup), and
+  `幫我開門` (unsupported intent) were refused with operator guidance. Every
+  session carries an attributed decision timeline plus a route graph.
 - The AI Space delivery loop is now closed end to end: `serve-delivery` hosts
   the loopback `/v1/deliveries` adapter the Cloud relay expects (bearer token
   `FLYTO_ROBOTICS_DELIVERY_TOKEN`, QR secret `FLYTO_ROBOTICS_QR_SECRET`).

@@ -1,0 +1,37 @@
+{
+  "contract_version": "flyto.robotics.semantic-location-map.v1",
+  "map_id": "hospital.ward-delivery.v1",
+  "revision": 1,
+  "locations": [
+    {
+      "location_id": "hospital.pharmacy",
+      "labels": ["藥局", "藥劑科", "Pharmacy"],
+      "pose": { "x": 3.0, "y": -2.0, "yaw": 1.5708 }
+    },
+    {
+      "location_id": "hospital.ward.2",
+      "labels": ["二號病房", "2號病房", "Ward 2"],
+      "pose": { "x": 4.6, "y": -1.2, "yaw": 0.0 }
+    },
+    {
+      "location_id": "hospital.ward.4",
+      "labels": ["四號病房", "4號病房", "Ward 4"],
+      "pose": { "x": 5.4, "y": 0.5, "yaw": 0.0 }
+    },
+    {
+      "location_id": "hospital.nurse_station.1",
+      "labels": ["一樓護理站", "護理站", "Nurse station 1"],
+      "pose": { "x": 4.5, "y": 1.5, "yaw": 0.0 }
+    },
+    {
+      "location_id": "hospital.laboratory",
+      "labels": ["檢驗室", "檢驗科", "Laboratory"],
+      "pose": { "x": 2.4, "y": 2.1, "yaw": -1.5708 }
+    },
+    {
+      "location_id": "hospital.dock.charger",
+      "labels": ["充電座", "充電站", "Charging dock"],
+      "pose": { "x": 0.0, "y": 0.0, "yaw": 0.0 }
+    }
+  ]
+}

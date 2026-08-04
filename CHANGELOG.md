@@ -4,6 +4,20 @@ All notable project changes are recorded here.
 
 ## Unreleased
 
+- Deliveries are now goal-driven: `serve-delivery --semantic-map` resolves a
+  free-form operator goal (zh-TW or English, Han or Arabic digits, partial
+  labels, or a literal location ID) to exactly one semantic destination, routes
+  capabilities through the frozen registry, composes a
+  `flyto.robotics.plan.v1`, and compiles it to an executable workflow. Unsafe
+  or unusable goals fail closed with a structured
+  `flyto.robotics.delivery-rejection.v1` payload — safety-override phrases and
+  raw actuator vocabulary are screened before any lookup, shared label
+  fragments never pick a winner, and two destinations report ambiguity with
+  candidates. Every session now carries an attributed decision timeline
+  (operator / rule engine / capability registry / plan contract / executor) and
+  a route graph the operator UI renders. `resolve-goal` exercises the whole
+  pipeline offline.
+
 - Added a ROS 2 execution backend for the delivery gateway
   (`serve-delivery --backend ros2`, `flyto_robotics/ros2_delivery_runner.py`):
   each session runs the same `MissionController` under a fail-safe per-session

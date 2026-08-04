@@ -15,12 +15,18 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
 from .contracts import DeliveryJob
+from .goal_planner import (
+    DeterministicDeliveryGoalPlanner,
+    FixedTemplateGoalPlanner,
+    GoalDecision,
+)
 from .mission import MissionController, Pose2D, normalize_angle
 from .qr_confirmation import (
     QRConfirmationAuthenticator,
     QRConfirmationValidationError,
     qr_token_sha256,
 )
+from .semantic_map import SemanticLocationMap, SemanticLocationStore
 from .workflow import (
     MissionState,
     PrimitiveKind,
@@ -206,6 +212,7 @@ class DeliverySession:
         request: dict[str, str],
         controller: MissionController,
         approval_id: str,
+        decision: GoalDecision | None = None,
     ) -> None:
         self.session_id = session_id
         self.request_id = request["request_id"]
@@ -214,6 +221,7 @@ class DeliverySession:
         self.requested_at = request["requested_at"]
         self.controller = controller
         self.approval_id = approval_id
+        self.decision = decision
         self.pose = Pose2D(0.0, 0.0, 0.0)
         self.sim_now = 0.0
         self.confirmation: dict[str, Any] | None = None
@@ -306,6 +314,7 @@ class DeliveryGateway:
         time_scale: float = 1.0,
         confirmation_timeout_seconds: float = 180.0,
         runner: Any | None = None,
+        semantic_map: SemanticLocationMap | SemanticLocationStore | None = None,
     ) -> None:
         token_bytes = token.encode("utf-8")
         if len(token_bytes) < 32:
@@ -343,6 +352,11 @@ class DeliveryGateway:
         self._port = port
         self._confirmation_timeout_seconds = float(confirmation_timeout_seconds)
         self._runner = runner or SimulatedDeliveryRunner(time_scale=time_scale)
+        self._planner: Any = (
+            DeterministicDeliveryGoalPlanner(semantic_map=semantic_map)
+            if semantic_map is not None
+            else FixedTemplateGoalPlanner()
+        )
         self._approval_id = f"{job.job_id}.dropoff"
         self._lock = threading.RLock()
         self._sessions: OrderedDict[str, DeliverySession] = OrderedDict()
@@ -557,19 +571,26 @@ class DeliveryGateway:
                         "an active delivery session already exists"
                     )
             session_id = f"dlv-{uuid.uuid4().hex[:12]}"
-            controller = MissionController(
-                self._job,
-                workflow=delivery_confirmation_workflow(
-                    self._job,
-                    approval_id=self._approval_id,
-                    confirmation_timeout_seconds=self._confirmation_timeout_seconds,
-                ),
+            goal_decision = self._planner.plan_delivery(
+                job=self._job,
+                goal=request["goal"],
+                session_id=session_id,
+                approval_id=self._approval_id,
+                confirmation_timeout_seconds=self._confirmation_timeout_seconds,
+                execution_mode=str(getattr(self._runner, "mode", "unknown")),
             )
+            workflow = goal_decision.workflow or delivery_confirmation_workflow(
+                self._job,
+                approval_id=self._approval_id,
+                confirmation_timeout_seconds=self._confirmation_timeout_seconds,
+            )
+            controller = MissionController(self._job, workflow=workflow)
             session = DeliverySession(
                 session_id=session_id,
                 request=request,
                 controller=controller,
                 approval_id=self._approval_id,
+                decision=goal_decision,
             )
             self._sessions[session_id] = session
             while len(self._sessions) > MAX_RETAINED_SESSIONS:
@@ -577,6 +598,13 @@ class DeliveryGateway:
                 if not oldest.controller.terminal:
                     break
                 del self._sessions[oldest_id]
+            if not goal_decision.accepted:
+                # Fail closed without ever moving: the session is born terminal
+                # so the relay reports a rejection instead of dropping the link.
+                controller.fail(
+                    f"goal_rejected:{goal_decision.reason_code}", session.sim_now
+                )
+                return self._session_payload(session)
             self._runner.start_session(session)
             return self._session_payload(session)
 
@@ -658,7 +686,8 @@ class DeliveryGateway:
 
     def _session_payload(self, session: DeliverySession) -> dict[str, Any]:
         controller = session.controller
-        return {
+        decision = session.decision
+        payload: dict[str, Any] = {
             "contract_version": DELIVERY_SESSION_CONTRACT_VERSION,
             "session_id": session.session_id,
             "status": controller.state.value,
@@ -685,3 +714,10 @@ class DeliveryGateway:
                 event.to_dict() for event in controller.events[-MAX_SESSION_EVENTS:]
             ],
         }
+        if decision is not None:
+            payload["decision"] = decision.decision
+            if decision.rejection is not None:
+                payload["rejection"] = decision.rejection
+            if decision.route_graph is not None:
+                payload["route_graph"] = decision.route_graph
+        return payload
