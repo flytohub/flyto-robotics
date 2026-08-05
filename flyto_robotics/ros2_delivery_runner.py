@@ -3,14 +3,12 @@
 from __future__ import annotations
 
 import math
-import re
 import threading
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import rclpy
-from geometry_msgs.msg import Twist, TwistStamped
 from nav_msgs.msg import Odometry
 from rclpy import logging as rclpy_logging
 from rclpy.executors import ExternalShutdownException, SingleThreadedExecutor
@@ -22,6 +20,12 @@ from sensor_msgs.msg import LaserScan
 
 from .contracts import write_json_atomic
 from .mission import Pose2D, evaluate_sensor_gate
+from .ros2_cmd_vel import (
+    CMD_VEL_TYPE_AUTO,
+    CMD_VEL_TYPES,
+    CmdVelChannel,
+    validated_topic,
+)
 
 if TYPE_CHECKING:
     from .delivery_gateway import DeliveryGateway, DeliverySession
@@ -37,21 +41,6 @@ SENSOR_STABILIZATION_SECONDS = 1.0
 DEFAULT_ODOM_TOPIC = "/flyto/odom"
 DEFAULT_SCAN_TOPIC = "/flyto/scan"
 DEFAULT_CMD_VEL_TOPIC = "/flyto/cmd_vel"
-TOPIC_PATTERN = re.compile(r"^/?[A-Za-z_~][A-Za-z0-9_/]{0,127}$")
-
-CMD_VEL_TYPE_AUTO = "auto"
-CMD_VEL_TYPE_TWIST = "twist"
-CMD_VEL_TYPE_TWIST_STAMPED = "twist_stamped"
-CMD_VEL_TYPES = (CMD_VEL_TYPE_AUTO, CMD_VEL_TYPE_TWIST, CMD_VEL_TYPE_TWIST_STAMPED)
-TWIST_STAMPED_TYPE_NAME = "geometry_msgs/msg/TwistStamped"
-
-
-def validated_topic(value: str, field_name: str) -> str:
-    """Reject anything that is not a plain absolute ROS topic name."""
-    if not isinstance(value, str) or not TOPIC_PATTERN.fullmatch(value):
-        raise ValueError(f"{field_name} must be a valid ROS topic name")
-    return value if value.startswith("/") else f"/{value}"
-
 
 class Ros2DeliverySessionNode(Node):
     """Fail-safe per-session ROS wrapper mirroring the mission adapter.
@@ -106,10 +95,9 @@ class Ros2DeliverySessionNode(Node):
         # subscribers and DDS reports no error, so the robot silently ignores
         # every command. Bind the publisher lazily to whatever the driver
         # actually subscribes with instead of hardcoding either type.
-        self._cmd_vel_topic = cmd_vel_topic
-        self._cmd_vel_type = cmd_vel_type
-        self._command_publisher: Any = None
-        self._resolved_cmd_vel_type = CMD_VEL_TYPE_TWIST
+        self._cmd_vel = CmdVelChannel(
+            self, topic=cmd_vel_topic, cmd_vel_type=cmd_vel_type
+        )
         self.create_subscription(Odometry, odom_topic, self._on_odometry, 10)
         self.create_subscription(
             LaserScan,
@@ -149,61 +137,11 @@ class Ros2DeliverySessionNode(Node):
         self._minimum_range = min(valid, default=math.inf)
         self._last_scan_at = time.monotonic()
 
-    def _detected_cmd_vel_type(self) -> str:
-        """Return the message type the driver actually subscribes with."""
-        if self._cmd_vel_type != CMD_VEL_TYPE_AUTO:
-            return self._cmd_vel_type
-        try:
-            endpoints = self.get_subscriptions_info_by_topic(self._cmd_vel_topic)
-        except Exception:  # noqa: BLE001 - introspection is best-effort
-            endpoints = []
-        for endpoint in endpoints:
-            if endpoint.topic_type == TWIST_STAMPED_TYPE_NAME:
-                return CMD_VEL_TYPE_TWIST_STAMPED
-        if endpoints:
-            return CMD_VEL_TYPE_TWIST
-        # Nobody is listening yet. Say so loudly rather than command into a void.
-        self.get_logger().warning(
-            f"no subscriber on {self._cmd_vel_topic}; assuming Twist. "
-            "The robot will ignore commands if its driver expects TwistStamped."
-        )
-        return CMD_VEL_TYPE_TWIST
-
-    def _command_channel(self) -> Any:
-        if self._command_publisher is not None:
-            return self._command_publisher
-        resolved = self._detected_cmd_vel_type()
-        message_type = (
-            TwistStamped if resolved == CMD_VEL_TYPE_TWIST_STAMPED else Twist
-        )
-        self._command_publisher = self.create_publisher(
-            message_type, self._cmd_vel_topic, 10
-        )
-        self._resolved_cmd_vel_type = resolved
-        self.get_logger().info(
-            f"cmd_vel bound: topic={self._cmd_vel_topic} "
-            f"type={message_type.__name__} ({self._cmd_vel_type})"
-        )
-        return self._command_publisher
-
     def _send_velocity(self, linear_x: float, angular_z: float) -> None:
-        if not rclpy.ok():
-            return
-        publisher = self._command_channel()
-        if self._resolved_cmd_vel_type == CMD_VEL_TYPE_TWIST_STAMPED:
-            message = TwistStamped()
-            message.header.stamp = self.get_clock().now().to_msg()
-            message.header.frame_id = "base_link"
-            message.twist.linear.x = linear_x
-            message.twist.angular.z = angular_z
-        else:
-            message = Twist()
-            message.linear.x = linear_x
-            message.angular.z = angular_z
-        publisher.publish(message)
+        self._cmd_vel.send(linear_x, angular_z)
 
     def _publish_stop(self) -> None:
-        self._send_velocity(0.0, 0.0)
+        self._cmd_vel.stop()
 
     def finish_locked(self, now: float) -> dict[str, Any] | None:
         """Stop, snapshot evidence, and retire; caller holds the gateway lock.

@@ -11,7 +11,6 @@ from pathlib import Path
 from typing import Any
 
 import rclpy
-from geometry_msgs.msg import Twist
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
@@ -36,6 +35,7 @@ from .resource_binding import (
     load_resource_plan,
     select_resource_binding,
 )
+from .ros2_cmd_vel import CmdVelChannel, validated_topic
 from .workflow import MissionState
 
 SHORTCUT_RESULT_CONTRACT_VERSION = "flyto.robotics.shortcut-result.v1"
@@ -66,6 +66,7 @@ class ShortcutNode(Node):
         super().__init__("flyto_robotics_shortcut")
         self.declare_parameter("job_file", "")
         self.declare_parameter("plan_file", "")
+        self.declare_parameter("plan_files", "")
         self.declare_parameter("result_file", "results/shortcut-result.json")
         self.declare_parameter("resource_plan_file", "")
         self.declare_parameter("require_resource_plan", False)
@@ -74,27 +75,43 @@ class ShortcutNode(Node):
         self.declare_parameter("resource_target_space_id", "")
         self.declare_parameter("resource_plan_confirmed", False)
         self.declare_parameter("binding_id", "binding.forward")
+        self.declare_parameter("binding_ids", "")
         self.declare_parameter("input_source_id", "keyboard.main")
         self.declare_parameter("input_control_id", "ArrowUp")
+        self.declare_parameter("input_control_ids", "")
         self.declare_parameter("deadman_timeout_seconds", 0.5)
         self.declare_parameter("sensor_timeout_seconds", 1.0)
         self.declare_parameter("sensor_startup_grace_seconds", 5.0)
         self.declare_parameter("gateway_enabled", True)
         self.declare_parameter("gateway_host", "127.0.0.1")
         self.declare_parameter("gateway_port", 8765)
+        self.declare_parameter("cmd_vel_topic", "/flyto/cmd_vel")
+        self.declare_parameter("odom_topic", "/flyto/odom")
+        self.declare_parameter("scan_topic", "/flyto/scan")
+        self.declare_parameter("cmd_vel_type", "auto")
         self.declare_parameter("exit_after_completed_workflows", 0)
         self.declare_parameter("gazebo_physics", False)
         self.declare_parameter("obstacle_injected", False)
 
         configured_job = job_path or self._required_path("job_file")
-        configured_plan = plan_path or self._required_path("plan_file")
+        plan_files_value = str(self.get_parameter("plan_files").value).strip()
+        if plan_files_value:
+            plan_paths = [
+                Path(item.strip())
+                for item in plan_files_value.split(",")
+                if item.strip()
+            ]
+        else:
+            plan_paths = [plan_path or self._required_path("plan_file")]
         self.result_path = result_path or Path(
             str(self.get_parameter("result_file").value)
         )
         self.job = load_job(configured_job)
-        plan_payload = json.loads(configured_plan.read_text(encoding="utf-8"))
-        catalog = ValidatedWorkflowCatalog.from_plan_payloads((plan_payload,))
-        workflow_id = str(plan_payload.get("plan_id", ""))
+        plan_payloads = [
+            json.loads(item.read_text(encoding="utf-8")) for item in plan_paths
+        ]
+        catalog = ValidatedWorkflowCatalog.from_plan_payloads(tuple(plan_payloads))
+        workflow_ids = [str(item.get("plan_id", "")) for item in plan_payloads]
         configured_resource_plan = resource_plan_path
         if configured_resource_plan is None:
             value = str(self.get_parameter("resource_plan_file").value).strip()
@@ -109,9 +126,14 @@ class ShortcutNode(Node):
                 ).split(",")
                 if item.strip()
             ]
+            if len(workflow_ids) != 1:
+                raise ResourceBindingError(
+                    "resource_plan_file binds exactly one workflow and cannot be "
+                    "combined with multiple cards"
+                )
             self.resource_binding = select_resource_binding(
                 resource_plan,
-                workflow_id=workflow_id,
+                workflow_id=workflow_ids[0],
                 resource_id=self.job.robot_id,
                 capability_id=str(
                     self.get_parameter("resource_capability_id").value
@@ -126,19 +148,39 @@ class ShortcutNode(Node):
             )
         elif bool(self.get_parameter("require_resource_plan").value):
             raise ResourceBindingError("resource_plan_file parameter is required")
-        binding = ShortcutBinding(
-            binding_id=str(self.get_parameter("binding_id").value),
-            source_id=str(self.get_parameter("input_source_id").value),
-            control_id=str(self.get_parameter("input_control_id").value),
-            workflow_id=workflow_id,
-            deadman_timeout_seconds=float(
-                self.get_parameter("deadman_timeout_seconds").value
-            ),
+        def _listed(single: str, plural: str) -> list[str]:
+            joined = str(self.get_parameter(plural).value).strip()
+            if joined:
+                return [item.strip() for item in joined.split(",") if item.strip()]
+            return [str(self.get_parameter(single).value)]
+
+        binding_ids = _listed("binding_id", "binding_ids")
+        control_ids = _listed("input_control_id", "input_control_ids")
+        if not len(plan_payloads) == len(binding_ids) == len(control_ids):
+            # A typo must kill startup, never a mission.
+            raise InputValidationError(
+                "plan_files, binding_ids and input_control_ids must list the "
+                f"same number of entries (got {len(plan_payloads)}, "
+                f"{len(binding_ids)}, {len(control_ids)})"
+            )
+        deadman = float(self.get_parameter("deadman_timeout_seconds").value)
+        source_id = str(self.get_parameter("input_source_id").value)
+        bindings = tuple(
+            ShortcutBinding(
+                binding_id=binding_id,
+                source_id=source_id,
+                control_id=control_id,
+                workflow_id=workflow_id,
+                deadman_timeout_seconds=deadman,
+            )
+            for binding_id, control_id, workflow_id in zip(
+                binding_ids, control_ids, workflow_ids
+            )
         )
         self.runtime = ShortcutRuntime(
             self.job,
             catalog=catalog,
-            bindings=(binding,),
+            bindings=bindings,
         )
 
         self.started_at = self._now()
@@ -153,12 +195,21 @@ class ShortcutNode(Node):
         self.result_written = False
         self.gateway: InputGateway | None = None
 
-        self.command_publisher = self.create_publisher(Twist, "/flyto/cmd_vel", 10)
+        self.cmd_vel = CmdVelChannel(
+            self,
+            topic=str(self.get_parameter("cmd_vel_topic").value),
+            cmd_vel_type=str(self.get_parameter("cmd_vel_type").value),
+        )
         self.event_publisher = self.create_publisher(String, "/flyto/events", 20)
-        self.create_subscription(Odometry, "/flyto/odom", self._on_odometry, 10)
+        self.create_subscription(
+            Odometry,
+            validated_topic(str(self.get_parameter("odom_topic").value), "odom_topic"),
+            self._on_odometry,
+            10,
+        )
         self.create_subscription(
             LaserScan,
-            "/flyto/scan",
+            validated_topic(str(self.get_parameter("scan_topic").value), "scan_topic"),
             self._on_scan,
             qos_profile_sensor_data,
         )
@@ -180,10 +231,11 @@ class ShortcutNode(Node):
             self.gateway.start()
             host, port = self.gateway.address
             self.get_logger().info(f"input gateway listening on {host}:{port}")
-        self.get_logger().info(
-            f"shortcut {binding.binding_id} accepts {binding.source_id}/"
-            f"{binding.control_id} for validated workflow {workflow_id}"
-        )
+        for entry in bindings:
+            self.get_logger().info(
+                f"shortcut {entry.binding_id} accepts {entry.source_id}/"
+                f"{entry.control_id} for validated workflow {entry.workflow_id}"
+            )
 
     def _required_path(self, parameter_name: str) -> Path:
         value = str(self.get_parameter(parameter_name).value).strip()
@@ -288,7 +340,7 @@ class ShortcutNode(Node):
         self.published_mission_events[controller_id] = published
 
     def _publish_stop(self) -> None:
-        self.command_publisher.publish(Twist())
+        self.cmd_vel.stop()
 
     def _archive(self, controller: MissionController, *, now: float) -> None:
         controller_id = id(controller)
@@ -434,10 +486,7 @@ class ShortcutNode(Node):
             now=now,
         )
         self._publish_new_mission_events()
-        velocity = Twist()
-        velocity.linear.x = command.linear_x
-        velocity.angular.z = command.angular_z
-        self.command_publisher.publish(velocity)
+        self.cmd_vel.send(command.linear_x, command.angular_z)
         if controller.terminal:
             self._archive(controller, now=now)
             exit_after = int(

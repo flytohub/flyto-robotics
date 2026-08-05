@@ -4,6 +4,23 @@ All notable project changes are recorded here.
 
 ## Unreleased
 
+- Extracted `CmdVelChannel` into `flyto_robotics/ros2_cmd_vel.py` so the
+  delivery runner and the shortcut controller share one velocity publisher.
+  The shortcut node still hardcoded `Twist` on a hardcoded topic, which would
+  have reproduced the exact silent type mismatch already fixed for delivery.
+  Verified in the Jazzy container against real `TwistStamped`, `Twist` and
+  no-subscriber endpoints.
+- The shortcut controller now drives several workflow cards from one process
+  (`plan_files`, `binding_ids`, `input_control_ids`), with configurable
+  `cmd_vel_topic`, `odom_topic`, `scan_topic` and `cmd_vel_type`. Mismatched
+  list lengths fail at startup rather than mid-mission, and combining multiple
+  cards with a single-workflow resource plan is refused outright.
+- Added `deploy/systemd/flyto-shortcut.service` with a reciprocal
+  `Conflicts=flyto-delivery.service`. Two Flyto processes publishing to one
+  velocity topic have no arbitration, so one node's stop can be overwritten by
+  the other's motion on the next tick; eliminating the second writer is
+  provable where mediating between them is not.
+
 - Added the `turn_relative` atomic capability: rotate in place by a bounded
   signed angle from a controller-captured odometry heading, obstacle-guarded,
   and holding linear velocity at exactly zero so a rotation can never creep

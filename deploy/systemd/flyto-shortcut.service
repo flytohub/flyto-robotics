@@ -1,0 +1,35 @@
+[Unit]
+Description=Flyto keyboard-shortcut jog controller (bounded workflow cards)
+After=turtlebot3-bringup.service
+Wants=turtlebot3-bringup.service
+# Exactly one Flyto process may drive cmd_vel. Two publishers on one topic have
+# no arbitration: last sample wins, so one node's stop is overwritten by the
+# other's motion on the next tick. Eliminating the second writer is provably
+# safer than mediating between them.
+Conflicts=flyto-delivery.service
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/flyto-robotics
+EnvironmentFile=/home/ubuntu/flyto-delivery.env
+Environment=PYTHONUNBUFFERED=1
+Environment=ROS_DOMAIN_ID=30
+Environment=TURTLEBOT3_MODEL=burger
+ExecStart=/bin/bash -lc 'source /opt/ros/jazzy/setup.bash && exec ros2 run flyto_robotics shortcut_controller --ros-args \
+  -p job_file:=/home/ubuntu/flyto-robotics/examples/jobs/tb3-lab-shortcut.json \
+  -p plan_files:=/home/ubuntu/flyto-robotics/examples/plans/shortcut-forward-40cm.json,/home/ubuntu/flyto-robotics/examples/plans/shortcut-backward-40cm.json,/home/ubuntu/flyto-robotics/examples/plans/shortcut-turn-left-90deg.json,/home/ubuntu/flyto-robotics/examples/plans/shortcut-turn-right-90deg.json \
+  -p binding_ids:=binding.forward,binding.backward,binding.turn_left,binding.turn_right \
+  -p input_control_ids:=ArrowUp,ArrowDown,ArrowLeft,ArrowRight \
+  -p input_source_id:=keyboard.main \
+  -p cmd_vel_topic:=/cmd_vel -p odom_topic:=/odom -p scan_topic:=/scan \
+  -p cmd_vel_type:=auto \
+  -p deadman_timeout_seconds:=0.5 \
+  -p gateway_enabled:=true -p gateway_port:=8765'
+Restart=on-failure
+RestartSec=5
+KillSignal=SIGINT
+TimeoutStopSec=20
+
+[Install]
+WantedBy=multi-user.target
