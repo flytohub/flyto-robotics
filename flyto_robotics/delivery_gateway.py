@@ -14,12 +14,14 @@ from collections import OrderedDict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
+from .ai_planner import PlanValidationError, compile_workflow, parse_plan
 from .contracts import DeliveryJob
 from .goal_planner import (
     DeterministicDeliveryGoalPlanner,
     FixedTemplateGoalPlanner,
     GoalDecision,
 )
+from .input_runtime import MOTION_PRIMITIVES
 from .mission import MissionController, Pose2D, normalize_angle
 from .qr_confirmation import (
     QRConfirmationAuthenticator,
@@ -63,6 +65,11 @@ SESSION_PATH = re.compile(r"^/v1/deliveries/([A-Za-z0-9][A-Za-z0-9._:-]{0,127})$
 CONFIRMATION_PATH = re.compile(
     r"^/v1/deliveries/([A-Za-z0-9][A-Za-z0-9._:-]{0,127})/confirmation$"
 )
+PLAN_RUN_REQUEST_CONTRACT_VERSION = "flyto.cloud.plan-run-request.v1"
+PLAN_RUN_REQUEST_FIELDS = frozenset(
+    {"contract_version", "request_id", "plan", "requested_at"}
+)
+
 SAFE_STOP_PATH = re.compile(
     r"^/v1/deliveries/([A-Za-z0-9][A-Za-z0-9._:-]{0,127})/safe-stop$"
 )
@@ -172,6 +179,28 @@ def parse_delivery_request(value: Any) -> dict[str, str]:
             data["space_name"], "space_name", minimum=0, maximum=MAX_SPACE_NAME_BYTES
         ),
         "goal": goal,
+        "requested_at": _bounded_text(
+            data["requested_at"], "requested_at", minimum=1, maximum=MAX_TIMESTAMP_BYTES
+        ),
+    }
+
+
+def parse_plan_run_request(value: Any) -> dict[str, Any]:
+    """Validate one flyto.cloud.plan-run-request.v1 payload, fail closed.
+
+    The wrapper is checked here; the plan inside it is checked by ``parse_plan``
+    against the frozen capability registry, which is the boundary that already
+    treats a plan as hostile input. Keeping the two separate means this function
+    never has to know what a capability is.
+    """
+    data = _exact_fields(value, PLAN_RUN_REQUEST_FIELDS, "plan run request")
+    if data["contract_version"] != PLAN_RUN_REQUEST_CONTRACT_VERSION:
+        raise DeliveryGatewayError("plan run request contract_version is unsupported")
+    if not isinstance(data["plan"], dict):
+        raise DeliveryGatewayError("plan must be an object")
+    return {
+        "request_id": _identifier(data["request_id"], "request_id"),
+        "plan": data["plan"],
         "requested_at": _bounded_text(
             data["requested_at"], "requested_at", minimum=1, maximum=MAX_TIMESTAMP_BYTES
         ),
@@ -356,6 +385,7 @@ class DeliveryGateway:
         self._port = port
         self._confirmation_timeout_seconds = float(confirmation_timeout_seconds)
         self._runner = runner or SimulatedDeliveryRunner(time_scale=time_scale)
+        self._semantic_map = semantic_map
         self._planner: Any = (
             DeterministicDeliveryGoalPlanner(semantic_map=semantic_map)
             if semantic_map is not None
@@ -476,6 +506,23 @@ class DeliveryGateway:
             def do_POST(self) -> None:  # noqa: N802 - http.server contract
                 if not self._authorized():
                     self._send_json(401, {"error": "unauthorized"})
+                    return
+                if self.path == "/v1/plans":
+                    body = self._read_json_body()
+                    if body is None:
+                        return
+                    try:
+                        payload = gateway.start_plan(body)
+                    except DeliverySessionConflictError:
+                        self._send_json(409, {"error": "delivery_session_active"})
+                        return
+                    except DeliveryGatewayError as exc:
+                        self._send_json(
+                            400,
+                            {"error": "plan_run_request_invalid", "detail": str(exc)[:160]},
+                        )
+                        return
+                    self._send_json(200, payload)
                     return
                 if self.path == "/v1/deliveries":
                     body = self._read_json_body()
@@ -609,6 +656,71 @@ class DeliveryGateway:
                     f"goal_rejected:{goal_decision.reason_code}", session.sim_now
                 )
                 return self._session_payload(session)
+            self._runner.start_session(session)
+            return self._session_payload(session)
+
+    def start_plan(self, body: Any) -> dict[str, Any]:
+        """Run one caller-supplied plan, with every existing guard in place.
+
+        This is the same path ``run-ros`` takes, given an entry point. It exists
+        so a workflow step can author its own motion — a distance typed into a
+        builder rather than a card pre-registered on the robot — without any
+        caller gaining a way around validation.
+
+        The plan is compiled against the frozen capability registry, its
+        robot_id must match this gateway's job, and a plan that moves must end
+        in safe_stop. Running out-of-process is the point: if the caller dies
+        mid-mission this gateway still owns the final stop.
+        """
+        request = parse_plan_run_request(body)
+        with self._lock:
+            if self._stopping:
+                raise DeliveryGatewayError("delivery gateway is stopping")
+            for session in self._sessions.values():
+                if not session.controller.terminal:
+                    raise DeliverySessionConflictError(
+                        "an active delivery session already exists"
+                    )
+
+            try:
+                plan = parse_plan(request["plan"])
+            except PlanValidationError as exc:
+                raise DeliveryGatewayError(f"plan_invalid:{exc}") from exc
+            if plan.robot_id != self._job.robot_id:
+                raise DeliveryGatewayError(
+                    "plan robot_id does not match this robot"
+                )
+            try:
+                workflow = compile_workflow(plan, semantic_map=self._semantic_map)
+            except PlanValidationError as exc:
+                raise DeliveryGatewayError(f"plan_uncompilable:{exc}") from exc
+            if (
+                any(step.kind in MOTION_PRIMITIVES for step in workflow.steps)
+                and workflow.steps[-1].kind != PrimitiveKind.SAFE_STOP
+            ):
+                raise DeliveryGatewayError(
+                    "a plan that moves must end with safe_stop"
+                )
+
+            session_id = f"pln-{uuid.uuid4().hex[:12]}"
+            controller = MissionController(self._job, workflow=workflow)
+            session = DeliverySession(
+                session_id=session_id,
+                request={
+                    "request_id": request["request_id"],
+                    "space_name": "",
+                    "goal": plan.goal,
+                    "requested_at": request["requested_at"],
+                },
+                controller=controller,
+                approval_id=self._approval_id,
+            )
+            self._sessions[session_id] = session
+            while len(self._sessions) > MAX_RETAINED_SESSIONS:
+                oldest_id, oldest = next(iter(self._sessions.items()))
+                if not oldest.controller.terminal:
+                    break
+                del self._sessions[oldest_id]
             self._runner.start_session(session)
             return self._session_payload(session)
 
