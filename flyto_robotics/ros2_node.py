@@ -11,7 +11,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import rclpy
-from geometry_msgs.msg import Twist
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
@@ -19,6 +18,7 @@ from sensor_msgs.msg import Image, LaserScan
 from std_msgs.msg import String
 
 from .ai_planner import PlanValidationError, compile_workflow, load_plan
+from .ros2_cmd_vel import CMD_VEL_TYPE_AUTO, CmdVelChannel, validated_topic
 from .contracts import JobValidationError, load_job, write_json_atomic
 from .human_approval import (
     HumanDecisionAuthenticator,
@@ -152,28 +152,66 @@ class MissionNode(Node):
         self.exit_code = 3
         self.published_event_count = 0
 
-        self.command_publisher = self.create_publisher(Twist, "/flyto/cmd_vel", 10)
+        # Topics are parameters, defaulting to the bundled simulation layout. A
+        # real robot publishes /odom and /scan in the root namespace, and a node
+        # that hardcoded /flyto/* could only ever run against Gazebo: it would
+        # sit waiting for odometry that nobody publishes and fail the sensor gate
+        # with required_sensor_not_ready.
+        self.declare_parameter("cmd_vel_topic", "/flyto/cmd_vel")
+        self.declare_parameter("odom_topic", "/flyto/odom")
+        self.declare_parameter("scan_topic", "/flyto/scan")
+        self.declare_parameter("camera_topic", "/flyto/camera/image")
+        self.declare_parameter("human_decision_topic", "/flyto/human_decision")
+        self.declare_parameter("cmd_vel_type", CMD_VEL_TYPE_AUTO)
+
+        cmd_vel_topic = validated_topic(
+            str(self.get_parameter("cmd_vel_topic").value), "cmd_vel_topic"
+        )
+        odom_topic = validated_topic(
+            str(self.get_parameter("odom_topic").value), "odom_topic"
+        )
+        scan_topic = validated_topic(
+            str(self.get_parameter("scan_topic").value), "scan_topic"
+        )
+        camera_topic = validated_topic(
+            str(self.get_parameter("camera_topic").value), "camera_topic"
+        )
+
+        # ROS 2 Jazzy drives /cmd_vel with TwistStamped while the bundled Gazebo
+        # bridge uses Twist. Publishing the wrong type matches zero subscribers
+        # and DDS reports no error, so the robot silently ignores every command.
+        self.cmd_vel = CmdVelChannel(
+            self,
+            topic=cmd_vel_topic,
+            cmd_vel_type=str(self.get_parameter("cmd_vel_type").value),
+        )
         self.event_publisher = self.create_publisher(String, "/flyto/events", 20)
-        self.create_subscription(Odometry, "/flyto/odom", self._on_odometry, 10)
+        self.create_subscription(Odometry, odom_topic, self._on_odometry, 10)
         self.create_subscription(
             LaserScan,
-            "/flyto/scan",
+            scan_topic,
             self._on_scan,
             qos_profile_sensor_data,
         )
         self.create_subscription(
             Image,
-            "/flyto/camera/image",
+            camera_topic,
             self._on_image,
             qos_profile_sensor_data,
         )
         if self.requires_human_approval:
             self.create_subscription(
                 String,
-                "/flyto/human_decision",
+                validated_topic(
+                    str(self.get_parameter("human_decision_topic").value),
+                    "human_decision_topic",
+                ),
                 self._on_human_decision,
                 10,
             )
+        self.get_logger().info(
+            f"topics: cmd_vel={cmd_vel_topic} odom={odom_topic} scan={scan_topic}"
+        )
         self.create_timer(0.1, self._control_tick)
         self.get_logger().info(
             f"accepted robotics job {self.job.job_id} for robot {self.job.robot_id}"
@@ -285,7 +323,7 @@ class MissionNode(Node):
             self.published_event_count += 1
 
     def _publish_stop(self) -> None:
-        self.command_publisher.publish(Twist())
+        self.cmd_vel.stop()
 
     def _finish(self, now: float) -> None:
         if self.result_written:
@@ -383,10 +421,7 @@ class MissionNode(Node):
             line_scene=self.line_scene,
         )
         self._publish_new_events()
-        velocity = Twist()
-        velocity.linear.x = command.linear_x
-        velocity.angular.z = command.angular_z
-        self.command_publisher.publish(velocity)
+        self.cmd_vel.send(command.linear_x, command.angular_z)
         if self.controller.terminal:
             self._finish(now)
 

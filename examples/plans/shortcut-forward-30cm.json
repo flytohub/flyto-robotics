@@ -1,7 +1,7 @@
 {
   "contract_version": "flyto.robotics.plan.v1",
   "plan_id": "shortcut.forward.30cm.v1",
-  "robot_id": "flyto-rover-sim-001",
+  "robot_id": "flyto-tb3-lab-001",
   "goal": "前進三十公分後安全停止",
   "generated_by": {
     "kind": "human",
