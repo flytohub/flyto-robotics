@@ -226,6 +226,10 @@ class DeliverySession:
         self.sim_now = 0.0
         self.confirmation: dict[str, Any] | None = None
         self.thread: threading.Thread | None = None
+        # Observations the operator watches; the controller acts on its own
+        # copies, so these are strictly for the room.
+        self.minimum_range: float | None = None
+        self.scan: dict[str, Any] | None = None
 
 
 class SimulatedDeliveryRunner:
@@ -710,6 +714,12 @@ class DeliveryGateway:
                 "yaw": round(session.pose.yaw, 3),
             },
             "confirmation": session.confirmation,
+            "minimum_range": (
+                None
+                if session.minimum_range is None or session.minimum_range == float("inf")
+                else round(session.minimum_range, 3)
+            ),
+            "scan": session.scan,
             "events": [
                 event.to_dict() for event in controller.events[-MAX_SESSION_EVENTS:]
             ],

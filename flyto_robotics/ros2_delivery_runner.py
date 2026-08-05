@@ -89,6 +89,7 @@ class Ros2DeliverySessionNode(Node):
         self._minimum_range = math.inf
         self._finished = False
         self._requires_range = require_range
+        self._scan_snapshot: dict[str, Any] | None = None
 
         # Jazzy's TurtleBot3 driver subscribes with TwistStamped while the
         # bundled Gazebo bridge uses Twist. A type mismatch matches zero
@@ -127,6 +128,10 @@ class Ros2DeliverySessionNode(Node):
         self._last_pose = Pose2D(position.x, position.y, math.atan2(sin_yaw, cos_yaw))
         self._last_odometry_at = time.monotonic()
 
+    def scan_snapshot(self) -> dict[str, Any] | None:
+        """Latest range scan, or None when no sensor has reported."""
+        return self._scan_snapshot
+
     def _on_scan(self, message: LaserScan) -> None:
         valid = [
             value
@@ -136,6 +141,16 @@ class Ros2DeliverySessionNode(Node):
         ]
         self._minimum_range = min(valid, default=math.inf)
         self._last_scan_at = time.monotonic()
+        # Keep the raw sweep so an operator can see the shape of the room, not
+        # just the single number the controller acts on. The hub downsamples.
+        self._scan_snapshot = {
+            "ranges": [
+                value if math.isfinite(value) else None for value in message.ranges
+            ],
+            "angle_min": float(message.angle_min),
+            "angle_increment": float(message.angle_increment),
+            "range_max": float(message.range_max),
+        }
 
     def _send_velocity(self, linear_x: float, angular_z: float) -> None:
         self._cmd_vel.send(linear_x, angular_z)
