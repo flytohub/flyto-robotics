@@ -42,6 +42,13 @@ class SafetyLimits:
     max_linear_speed: float = 0.25
     max_angular_speed: float = 0.8
     obstacle_stop_distance: float = 0.55
+    # How close something may be beside the robot. Separate from the forward
+    # threshold because a wall the robot is driving *along* is not the same
+    # hazard as one it is driving *at*: an omnidirectional gate cannot tell them
+    # apart, so a 0.25 m stop distance makes any corridor under 50 cm
+    # impassable. Defaults to the forward distance, so a job that does not set
+    # it keeps the old behaviour exactly.
+    lateral_stop_distance: float | None = None
     pose_tolerance: float = 0.25
     mission_timeout_seconds: float = 180.0
     pickup_dwell_seconds: float = 2.0
@@ -133,6 +140,7 @@ def _safety(value: Any) -> SafetyLimits:
         "max_linear_speed",
         "max_angular_speed",
         "obstacle_stop_distance",
+        "lateral_stop_distance",
         "pose_tolerance",
         "mission_timeout_seconds",
         "pickup_dwell_seconds",
@@ -158,6 +166,16 @@ def _safety(value: Any) -> SafetyLimits:
             "safety.obstacle_stop_distance",
             minimum=0.15,
             maximum=2.0,
+        ),
+        lateral_stop_distance=(
+            _number(
+                data["lateral_stop_distance"],
+                "safety.lateral_stop_distance",
+                minimum=0.05,
+                maximum=2.0,
+            )
+            if data.get("lateral_stop_distance") is not None
+            else None
         ),
         pose_tolerance=_number(
             data.get("pose_tolerance", defaults.pose_tolerance),

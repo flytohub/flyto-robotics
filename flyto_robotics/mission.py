@@ -129,6 +129,9 @@ class MissionController:
         self.step_index = -1
         self.failure_reason: str | None = None
         self.obstacle_active = False
+        # Nothing beside until a tick says otherwise, so a guard reached before
+        # the first tick behaves as it always did.
+        self.lateral_range = math.inf
         self.safety_stop_count = 0
         self.line_acquired_at: float | None = None
         self.line_last_seen_at: float | None = None
@@ -318,15 +321,34 @@ class MissionController:
         return self.fail(reason, now)
 
     def _obstacle_guard(self, minimum_range: float, now: float) -> Command | None:
+        """Stop for what is ahead, and separately for what is too close beside.
+
+        Two thresholds because they are two hazards. Something in the robot's
+        path has to stop it early; a wall it is driving alongside only has to
+        stop it if it is about to be scraped. Judging both by the nearest return
+        in any direction — which is what a single scalar forces — means a
+        corridor narrower than twice the forward distance can never be entered,
+        and lowering the one threshold to fix that lowers the protection in
+        front too.
+        """
         limits = self.job.safety
-        if math.isfinite(minimum_range) and minimum_range < limits.obstacle_stop_distance:
+        lateral_limit = (
+            limits.lateral_stop_distance
+            if limits.lateral_stop_distance is not None
+            else limits.obstacle_stop_distance
+        )
+        ahead = math.isfinite(minimum_range) and minimum_range < limits.obstacle_stop_distance
+        beside = (
+            math.isfinite(self.lateral_range) and self.lateral_range < lateral_limit
+        )
+        if ahead or beside:
             if not self.obstacle_active:
                 self.obstacle_active = True
                 self.safety_stop_count += 1
                 self._record_event(
                     now,
                     "obstacle_stop",
-                    "range below configured stop distance",
+                    "obstacle ahead" if ahead else "obstacle alongside",
                 )
             return Command(0.0, 0.0, self.state, "obstacle_stop")
 
@@ -670,8 +692,15 @@ class MissionController:
         minimum_range: float,
         now: float,
         line_scene: LineScene | None = None,
+        lateral_range: float = math.inf,
     ) -> Command:
-        """Advance one closed-loop control step."""
+        """Advance one closed-loop control step.
+
+        ``minimum_range`` is what is ahead; ``lateral_range`` what is beside.
+        Omitting the second means nothing is beside, which is what every caller
+        written before the split already meant.
+        """
+        self.lateral_range = lateral_range
         if self.terminal:
             return Command(0.0, 0.0, self.state, "terminal")
         if self._elapsed(now) > self.job.safety.mission_timeout_seconds:
