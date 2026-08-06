@@ -1,0 +1,156 @@
+<?xml version="1.0"?>
+<!--
+  The demo arena: four zones in a 2x2 with aisles between them.
+
+  Dimensions come from the physical layout — 48 cm zones and
+  28 cm aisles — because the point of this world is to answer a
+  question about that layout rather than to look like it. Driven through the
+  real MissionController, a 28 cm aisle puts each wall
+  14.0 cm from the lidar at the robot's centre, which a single
+  omnidirectional 0.25 m gate refuses. Run it with lateral_stop_distance set and
+  it passes; run it without and it does not, and the difference is measurable
+  here without a robot on the floor.
+
+  The zones are solid blocks rather than floor markings on purpose: the lidar
+  has to see them, or the aisles are not aisles.
+-->
+<sdf version="1.9">
+  <world name="flyto_mission_arena">
+    <physics name="default_physics" type="dart">
+      <max_step_size>0.001</max_step_size>
+      <real_time_factor>1.0</real_time_factor>
+    </physics>
+    <gravity>0 0 -9.80665</gravity>
+
+    <plugin filename="gz-sim-physics-system" name="gz::sim::systems::Physics"/>
+    <plugin filename="gz-sim-user-commands-system" name="gz::sim::systems::UserCommands"/>
+    <plugin filename="gz-sim-scene-broadcaster-system" name="gz::sim::systems::SceneBroadcaster"/>
+    <plugin filename="gz-sim-sensors-system" name="gz::sim::systems::Sensors">
+      <render_engine>ogre2</render_engine>
+    </plugin>
+
+    <scene>
+      <ambient>0.8 0.8 0.8 1</ambient>
+      <background>0.85 0.87 0.9 1</background>
+    </scene>
+
+    <light type="directional" name="sun">
+      <pose>0 0 4 0 0 0</pose>
+      <diffuse>0.9 0.9 0.9 1</diffuse>
+      <direction>-0.3 -0.3 -1</direction>
+    </light>
+
+    <model name="floor">
+      <static>true</static>
+      <link name="link">
+        <collision name="c"><geometry><plane><normal>0 0 1</normal><size>6 6</size></plane></geometry></collision>
+        <visual name="v">
+          <geometry><plane><normal>0 0 1</normal><size>6 6</size></plane></geometry>
+          <material><ambient>0.9 0.9 0.88 1</ambient><diffuse>0.9 0.9 0.88 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+
+    <model name="zone_1">
+      <static>true</static>
+      <pose>-0.380 -0.380 0.110 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>0.480 0.480 0.220</size></box></geometry></collision>
+        <visual name="v">
+          <geometry><box><size>0.480 0.480 0.220</size></box></geometry>
+          <material><ambient>0.55 0.78 0.55 1</ambient><diffuse>0.55 0.78 0.55 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+    <model name="zone_2">
+      <static>true</static>
+      <pose>0.380 -0.380 0.110 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>0.480 0.480 0.220</size></box></geometry></collision>
+        <visual name="v">
+          <geometry><box><size>0.480 0.480 0.220</size></box></geometry>
+          <material><ambient>0.55 0.65 0.85 1</ambient><diffuse>0.55 0.65 0.85 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+    <model name="zone_3">
+      <static>true</static>
+      <pose>-0.380 0.380 0.110 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>0.480 0.480 0.220</size></box></geometry></collision>
+        <visual name="v">
+          <geometry><box><size>0.480 0.480 0.220</size></box></geometry>
+          <material><ambient>0.95 0.75 0.45 1</ambient><diffuse>0.95 0.75 0.45 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+    <model name="zone_4">
+      <static>true</static>
+      <pose>0.380 0.380 0.110 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>0.480 0.480 0.220</size></box></geometry></collision>
+        <visual name="v">
+          <geometry><box><size>0.480 0.480 0.220</size></box></geometry>
+          <material><ambient>0.72 0.62 0.88 1</ambient><diffuse>0.72 0.62 0.88 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+    <model name="frame_n">
+      <static>true</static>
+      <pose>0.000 0.620 0.110 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>1.260 0.020 0.220</size></box></geometry></collision>
+        <visual name="v">
+          <geometry><box><size>1.260 0.020 0.220</size></box></geometry>
+          <material><ambient>0.35 0.35 0.38 1</ambient><diffuse>0.35 0.35 0.38 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+    <model name="frame_s">
+      <static>true</static>
+      <pose>0.000 -0.620 0.110 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>1.260 0.020 0.220</size></box></geometry></collision>
+        <visual name="v">
+          <geometry><box><size>1.260 0.020 0.220</size></box></geometry>
+          <material><ambient>0.35 0.35 0.38 1</ambient><diffuse>0.35 0.35 0.38 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+    <model name="frame_e">
+      <static>true</static>
+      <pose>0.620 0.000 0.110 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>0.020 1.260 0.220</size></box></geometry></collision>
+        <visual name="v">
+          <geometry><box><size>0.020 1.260 0.220</size></box></geometry>
+          <material><ambient>0.35 0.35 0.38 1</ambient><diffuse>0.35 0.35 0.38 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+    <model name="frame_w_left">
+      <static>true</static>
+      <pose>-0.620 -0.550 0.110 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>0.020 0.380 0.220</size></box></geometry></collision>
+        <visual name="v">
+          <geometry><box><size>0.020 0.380 0.220</size></box></geometry>
+          <material><ambient>0.35 0.35 0.38 1</ambient><diffuse>0.35 0.35 0.38 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- Where the robot starts, matching the layout: outside the frame, facing
+         the south entrance to the centre aisle. -->
+    <model name="robot_start_marker">
+      <static>true</static>
+      <pose>0 -0.870 0.001 0 0 0</pose>
+      <link name="link">
+        <visual name="v">
+          <geometry><cylinder><radius>0.09</radius><length>0.002</length></cylinder></geometry>
+          <material><ambient>0.2 0.4 0.9 1</ambient><diffuse>0.2 0.4 0.9 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+  </world>
+</sdf>
