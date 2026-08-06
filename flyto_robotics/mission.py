@@ -109,6 +109,50 @@ def _clamp(value: float, minimum: float, maximum: float) -> float:
     return max(minimum, min(maximum, value))
 
 
+# What the robot is about to do. The guard needs this because a sector is only
+# dangerous in the direction of travel: the wall a robot drives alongside is not
+# the wall it drives into, and a robot reversing is not protected at all by
+# whatever is in front of it.
+INTENT_FORWARD = "forward"
+INTENT_REVERSE = "reverse"
+INTENT_ROTATE = "rotate"
+
+
+@dataclass(frozen=True)
+class RangeField:
+    """The nearest return in each direction, as the sensor saw it.
+
+    Every field defaults to infinity — absent means "nothing measured there",
+    never "nothing is there". A caller that supplies only ``closest`` gets the
+    old omnidirectional behaviour, which is what every caller written before
+    sectors existed meant.
+    """
+
+    forward: float = math.inf
+    left: float = math.inf
+    right: float = math.inf
+    rear: float = math.inf
+    closest: float = math.inf
+    directional: bool = False
+
+    @classmethod
+    def omnidirectional(cls, minimum_range: float) -> "RangeField":
+        """One reading in every direction, the shape callers used to pass."""
+        return cls(closest=minimum_range, directional=False)
+
+    def blocking(self, intent: str) -> tuple[float, str]:
+        """The range that matters for this motion, and what to call it."""
+        if intent == INTENT_REVERSE:
+            return self.rear, "behind"
+        if intent == INTENT_ROTATE:
+            # Rotating in place sweeps the whole footprint, so every side counts
+            # — a robot that turns into a wall it was safely parallel to has
+            # been let down by a guard that only watched where it was going.
+            return min(self.forward, self.left, self.right, self.rear), "in the turn"
+        return self.forward, "ahead"
+
+
+
 class MissionController:
     """Pure controller shared by deterministic dry-run and the ROS adapter."""
 
@@ -129,9 +173,6 @@ class MissionController:
         self.step_index = -1
         self.failure_reason: str | None = None
         self.obstacle_active = False
-        # Nothing beside until a tick says otherwise, so a guard reached before
-        # the first tick behaves as it always did.
-        self.lateral_range = math.inf
         self.safety_stop_count = 0
         self.line_acquired_at: float | None = None
         self.line_last_seen_at: float | None = None
@@ -320,50 +361,72 @@ class MissionController:
             return self.fail(f"replan_required:{reason}", now)
         return self.fail(reason, now)
 
-    def _obstacle_guard(self, minimum_range: float, now: float) -> Command | None:
-        """Stop for what is ahead, and separately for what is too close beside.
+    def _obstacle_guard(
+        self,
+        minimum_range: float | RangeField,
+        now: float,
+        *,
+        intent: str = INTENT_FORWARD,
+    ) -> Command | None:
+        """Two layers: what blocks this motion, and what is simply too close.
 
-        Two thresholds because they are two hazards. Something in the robot's
-        path has to stop it early; a wall it is driving alongside only has to
-        stop it if it is about to be scraped. Judging both by the nearest return
-        in any direction — which is what a single scalar forces — means a
-        corridor narrower than twice the forward distance can never be entered,
-        and lowering the one threshold to fix that lowers the protection in
-        front too.
+        The directional layer asks only about the direction of travel, because
+        an omnidirectional gate cannot enter a corridor narrower than twice its
+        threshold — the side walls trip it forever. The emergency layer keeps a
+        floor under that: whatever the robot is doing, nothing may be nearer
+        than a few centimetres in any direction, so relaxing the sides for a
+        narrow aisle never becomes permission to graze one.
         """
         limits = self.job.safety
+        field = (
+            minimum_range
+            if isinstance(minimum_range, RangeField)
+            else RangeField.omnidirectional(minimum_range)
+        )
+
+        emergency = limits.emergency_stop_distance
+        if math.isfinite(field.closest) and field.closest < emergency:
+            return self._raise_obstacle(now, "closer than the emergency distance")
+
+        if not field.directional:
+            # No sectors were measured, so the only honest reading is the
+            # nearest return anywhere. This is what every pre-sector caller and
+            # every pre-sector job still gets.
+            if math.isfinite(field.closest) and field.closest < limits.obstacle_stop_distance:
+                return self._raise_obstacle(now, "range below configured stop distance")
+            return self._clear_obstacle(now)
+
+        blocking, where = field.blocking(intent)
+        if math.isfinite(blocking) and blocking < limits.obstacle_stop_distance:
+            return self._raise_obstacle(now, f"obstacle {where}")
+
         lateral_limit = (
             limits.lateral_stop_distance
             if limits.lateral_stop_distance is not None
             else limits.obstacle_stop_distance
         )
-        ahead = math.isfinite(minimum_range) and minimum_range < limits.obstacle_stop_distance
-        beside = (
-            math.isfinite(self.lateral_range) and self.lateral_range < lateral_limit
-        )
-        if ahead or beside:
-            if not self.obstacle_active:
-                self.obstacle_active = True
-                self.safety_stop_count += 1
-                self._record_event(
-                    now,
-                    "obstacle_stop",
-                    "obstacle ahead" if ahead else "obstacle alongside",
-                )
-            return Command(0.0, 0.0, self.state, "obstacle_stop")
+        beside = min(field.left, field.right)
+        if math.isfinite(beside) and beside < lateral_limit:
+            return self._raise_obstacle(now, "obstacle alongside")
 
+        return self._clear_obstacle(now)
+
+    def _raise_obstacle(self, now: float, detail: str) -> Command:
+        if not self.obstacle_active:
+            self.obstacle_active = True
+            self.safety_stop_count += 1
+            self._record_event(now, "obstacle_stop", detail)
+        return Command(0.0, 0.0, self.state, "obstacle_stop")
+
+    def _clear_obstacle(self, now: float) -> None:
         if self.obstacle_active:
             self.obstacle_active = False
-            self._record_event(
-                now,
-                "path_clear",
-                "range recovered above stop distance",
-            )
+            self._record_event(now, "path_clear", "range recovered above stop distance")
         return None
 
     def _navigate(self, pose: Pose2D, minimum_range: float, now: float) -> Command:
         limits = self.job.safety
-        guarded = self._obstacle_guard(minimum_range, now)
+        guarded = self._obstacle_guard(minimum_range, now, intent=INTENT_FORWARD)
         if guarded is not None:
             return guarded
 
@@ -401,7 +464,13 @@ class MissionController:
         now: float,
     ) -> Command:
         """Move a bounded distance from a controller-captured odometry origin."""
-        guarded = self._obstacle_guard(minimum_range, now)
+        guarded = self._obstacle_guard(
+            minimum_range,
+            now,
+            intent=INTENT_REVERSE
+            if float(self._current_step().argument('distance_m') or 0.0) < 0
+            else INTENT_FORWARD,
+        )
         if guarded is not None:
             return guarded
 
@@ -455,7 +524,7 @@ class MissionController:
         now: float,
     ) -> Command:
         """Rotate a bounded angle from a controller-captured odometry origin."""
-        guarded = self._obstacle_guard(minimum_range, now)
+        guarded = self._obstacle_guard(minimum_range, now, intent=INTENT_ROTATE)
         if guarded is not None:
             return guarded
 
@@ -508,7 +577,7 @@ class MissionController:
         minimum_range: float,
         now: float,
     ) -> Command:
-        guarded = self._obstacle_guard(minimum_range, now)
+        guarded = self._obstacle_guard(minimum_range, now, intent=INTENT_FORWARD)
         if guarded is not None:
             return guarded
         step = self._current_step()
@@ -689,18 +758,17 @@ class MissionController:
         self,
         pose: Pose2D,
         *,
-        minimum_range: float,
+        minimum_range: float | RangeField,
         now: float,
         line_scene: LineScene | None = None,
-        lateral_range: float = math.inf,
     ) -> Command:
         """Advance one closed-loop control step.
 
-        ``minimum_range`` is what is ahead; ``lateral_range`` what is beside.
-        Omitting the second means nothing is beside, which is what every caller
-        written before the split already meant.
+        ``minimum_range`` is either the nearest return anywhere, as callers
+        written before sectors existed pass it, or a :class:`RangeField` giving
+        each direction separately. The first keeps the omnidirectional rule; the
+        second unlocks the directional one.
         """
-        self.lateral_range = lateral_range
         if self.terminal:
             return Command(0.0, 0.0, self.state, "terminal")
         if self._elapsed(now) > self.job.safety.mission_timeout_seconds:

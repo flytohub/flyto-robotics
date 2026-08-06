@@ -49,6 +49,11 @@ class SafetyLimits:
     # impassable. Defaults to the forward distance, so a job that does not set
     # it keeps the old behaviour exactly.
     lateral_stop_distance: float | None = None
+    # The floor under every relaxation. Whatever the robot is doing and however
+    # wide the aisle, nothing may be nearer than this in any direction —
+    # otherwise loosening the sides for a corridor quietly becomes permission to
+    # graze one.
+    emergency_stop_distance: float = 0.08
     pose_tolerance: float = 0.25
     mission_timeout_seconds: float = 180.0
     pickup_dwell_seconds: float = 2.0
@@ -141,6 +146,7 @@ def _safety(value: Any) -> SafetyLimits:
         "max_angular_speed",
         "obstacle_stop_distance",
         "lateral_stop_distance",
+        "emergency_stop_distance",
         "pose_tolerance",
         "mission_timeout_seconds",
         "pickup_dwell_seconds",
@@ -176,6 +182,12 @@ def _safety(value: Any) -> SafetyLimits:
             )
             if data.get("lateral_stop_distance") is not None
             else None
+        ),
+        emergency_stop_distance=_number(
+            data.get("emergency_stop_distance", defaults.emergency_stop_distance),
+            "safety.emergency_stop_distance",
+            minimum=0.03,
+            maximum=0.5,
         ),
         pose_tolerance=_number(
             data.get("pose_tolerance", defaults.pose_tolerance),
