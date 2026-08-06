@@ -39,16 +39,44 @@ always. Verified by rebooting: four nodes came back unattended.
 
 ## Not done
 
-### The arena run does not complete, and the corridor question is still open
+### The arena run now completes, and the aisle is passable
 
-A robot has now driven the arena, and it is stopping. Both jobs — the
-omnidirectional one and the one with a lateral limit — fail with `obstacle
-ahead` after 0.14–0.16 m, before reaching the aisle. The start pose or the
-south wall geometry is still wrong; two attempts at it were wrong in different
-ways, and the third has not been made. **No conclusion about 28 cm aisles
-should be drawn from this world until a run completes.**
+A TurtleBot3-sized robot drives a 28 cm aisle in the arena, in a fresh
+simulation per job:
 
-What the runs did establish, which is why they were worth doing:
+| Job | Result | Moved | Safety stops | Reason |
+|---|---|---|---|---|
+| `tb3-lab-shortcut` (omnidirectional 0.25) | failed | 0.000 m | 1 | obstacle alongside |
+| `mission-arena` (forward 0.25 / side 0.10 / emergency 0.08) | succeeded | 0.372 m | 0 | — |
+
+Two earlier attempts at this were wrong and are worth remembering. The first
+compared two jobs run back to back in one simulation, where the second starts
+where the first stopped — not a comparison at all. The second used a 42 cm
+rover in a 28 cm aisle, where success means only that the readings cleared the
+gate.
+
+The third attempt worked because it stopped guessing: park the robot in the
+aisle, run no mission, and read the sectors. That took one run and gave the
+answer.
+
+### The forward cone was wider than the aisle
+
+Parked mid-aisle, the sides read 0.120 and 0.125 m — the aisle half-width, as
+expected — but forward read 0.452 m where the aisle ahead was clear for 0.92 m.
+0.452 m is the distance to the corner of the zone diagonally beyond the
+intersection. A ±30° cone spans ±0.26 m at a quarter of a metre out, which is
+wider than the aisle, so the robot was reading corners it would pass and
+stopping for them.
+
+The cone now covers the width the robot actually sweeps and no more: ±15°,
+which is ±0.067 m at the 0.25 m stop distance, a Burger's half-width. Narrower
+would let something graze the corner of the chassis unseen.
+
+This is the second thing simulation caught that the unit tests could not, the
+first being that no node ever built a `RangeField`. Both were geometry and
+wiring rather than logic, which is exactly what a synthetic test cannot reach.
+
+What the runs also established:
 
 * The guard was unreachable. Both nodes passed a scalar, so every tick took
   the omnidirectional branch. The stop reason read "range below configured stop

@@ -118,13 +118,21 @@ INTENT_REVERSE = "reverse"
 INTENT_ROTATE = "rotate"
 
 
-# Sector half-widths in degrees, measured from straight ahead. Forward is wide
-# enough to cover the robot's own width at the stop distance — a narrower cone
-# would let a corner pass beside the beam and still be struck. The gaps between
-# the named sectors are deliberate: a return on the diagonal belongs to none of
-# them and is caught by the omnidirectional floor instead, which is exactly what
-# an aisle intersection produces.
-FORWARD_HALF_ANGLE_DEG = 30.0
+# Sector half-widths in degrees, measured from straight ahead.
+#
+# The forward cone covers the width the robot actually sweeps, and no more.
+# At 30 degrees it spans +/-0.26 m at a quarter of a metre out — wider than a
+# 28 cm aisle — so driving one it reads the far corners of the intersection and
+# stops for them, with nothing in its path. Measured in simulation: 0.452 m
+# forward where the aisle ahead was clear for 0.92 m, which is exactly the
+# distance to the corner diagonally beyond it.
+#
+# 15 degrees covers +/-0.067 m at the 0.25 m stop distance, which is a Burger's
+# half-width. Narrower would let something graze the corner of the chassis
+# unseen; wider reads walls the robot will pass.
+FORWARD_HALF_ANGLE_DEG = 15.0
+# The sides are wide bands because a wall is long: any part of it entering the
+# band is the same wall, and the nearest point is what matters.
 SIDE_HALF_ANGLE_DEG = 30.0
 
 

@@ -172,7 +172,7 @@
     <include>
       <uri>model://flyto_tb3_burger</uri>
       <name>flyto_tb3_burger</name>
-      <pose>0 -0.78 0 0 0 1.5708</pose>
+      <pose>0 -0.50 0 0 0 1.5708</pose>
     </include>
   </world>
 </sdf>
