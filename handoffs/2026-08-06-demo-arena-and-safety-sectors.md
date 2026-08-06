@@ -39,13 +39,48 @@ always. Verified by rebooting: four nodes came back unattended.
 
 ## Not done
 
-### The corridor answer is from synthetic sectors
+### The arena run does not complete, and the corridor question is still open
 
-Hand-computed values were fed into the real guard. **A robot has never driven
-through the arena.** An aisle intersection has four corners, and a robot
-crossing the middle sees them diagonally at distances shorter than the side
-walls — which the synthetic test does not model. The world loads headless
-(Gazebo 8.11.0, 200 iterations, exit 0); the rover has not been spawned in it.
+A robot has now driven the arena, and it is stopping. Both jobs — the
+omnidirectional one and the one with a lateral limit — fail with `obstacle
+ahead` after 0.14–0.16 m, before reaching the aisle. The start pose or the
+south wall geometry is still wrong; two attempts at it were wrong in different
+ways, and the third has not been made. **No conclusion about 28 cm aisles
+should be drawn from this world until a run completes.**
+
+What the runs did establish, which is why they were worth doing:
+
+* The guard was unreachable. Both nodes passed a scalar, so every tick took
+  the omnidirectional branch. The stop reason read "range below configured stop
+  distance" — the omnidirectional wording. Fixed; `sector_field` now feeds both.
+* Robot width matters and was wrong. `flyto_rover` is 42 cm and cannot fit a
+  28 cm aisle, so its "successful" run proved nothing. `flyto_tb3_burger` is
+  13.8 cm, with the LDS-03's 0.12 m minimum range and gaussian noise.
+* Two jobs run sequentially in one simulation are not comparable — the second
+  starts where the first stopped. An earlier pass-versus-fail comparison was an
+  artefact of exactly that and was retracted.
+
+An aisle intersection also has four corners, seen diagonally at shorter
+distances than the side walls: measured at 0.120 m against 0.174 m to the walls,
+with the 42 cm rover. That gap is real but the number needs remeasuring with
+the Burger.
+
+### Simulation is not the robot
+
+Same `MissionController`, same guard, same `ros2_node.py`, same contracts — so a
+logic fault found in one is a fault in the other, which is how the unreachable
+guard surfaced. Not the same machine:
+
+| | Simulation | Robot |
+|---|---|---|
+| `cmd_vel` type | `Twist` | `TwistStamped` |
+| Lidar | 360 samples, modelled noise | LDS-03, 399 reported |
+| Camera | present on the model | **none on this Burger** |
+| Traction, wheel slip, battery sag | absent | the source of the 28–30 mm shortfall |
+
+The `TwistStamped` difference matters most: the silent binding bug that cost
+hours on hardware cannot reproduce in simulation, because `Twist` is correct
+there.
 
 ### No shipped job sets a lateral distance
 
