@@ -1,0 +1,28 @@
+[Unit]
+Description=Flyto2 job runner (claims Space task jobs for this robot)
+After=network-online.target turtlebot3-bringup.service flyto-delivery.service
+Wants=network-online.target
+# The gateway is what actually drives the robot; claiming a job before it can
+# accept one only produces a failed job.
+Requires=flyto-delivery.service
+
+[Service]
+Type=simple
+User=ubuntu
+EnvironmentFile=/home/ubuntu/flyto-delivery.env
+Environment=PYTHONUNBUFFERED=1
+Environment=FLYTO_RUNNER_DATA_DIR=/home/ubuntu/.flyto
+Environment=FLYTO_PLAN_ROOT=/home/ubuntu/flyto-robotics/examples/plans
+ExecStart=/usr/bin/python3 /home/ubuntu/flyto_job_runner.py
+# always, not on-failure: the runner exits cleanly on a rejected credential and
+# on SIGTERM, and only the first of those should bring it back.
+Restart=always
+RestartSec=10
+StartLimitIntervalSec=300
+StartLimitBurst=20
+# It finishes the job in hand before stopping, so give it room.
+KillSignal=SIGTERM
+TimeoutStopSec=120
+
+[Install]
+WantedBy=multi-user.target
