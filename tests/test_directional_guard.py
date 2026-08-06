@@ -146,3 +146,48 @@ def test_a_job_that_sets_no_lateral_limit_keeps_the_forward_distance():
 def test_the_arena_aisles_are_passable(width):
     _, c = controller(lateral_stop_distance=0.10)
     assert drive(c, corridor(width)).linear_x > 0.0
+
+
+# -- the wire the tests missed -------------------------------------------
+
+
+def test_a_sweep_becomes_sectors_not_one_number():
+    """The gap that let a fixed guard stay unreachable: every test exercised
+    _obstacle_guard with a RangeField, and nothing asserted that anything ever
+    built one. The nodes fed it a scalar, so the directional path never ran."""
+    from flyto_robotics.mission import sector_field
+
+    n = 360
+    ranges = [2.0] * n
+    for i in range(n):
+        if abs(i - 90) <= 25 or abs(i - 270) <= 25:
+            ranges[i] = 0.14          # corridor walls
+        if abs(i - 45) <= 3 or abs(i - 315) <= 3:
+            ranges[i] = 0.12          # the corners of an intersection
+
+    field = sector_field(ranges, angle_min=0.0, angle_increment=math.radians(1.0))
+    assert field.directional is True
+    assert field.forward == pytest.approx(2.0)
+    assert field.left == pytest.approx(0.14)
+    assert field.right == pytest.approx(0.14)
+    assert field.closest == pytest.approx(0.12), "the diagonal belongs to no named sector"
+
+
+def test_a_sector_with_no_return_stays_unknown_rather_than_clear():
+    """Infinity means nothing was seen there, which is not the same as nothing
+    being there — but it is the only thing a sweep can say."""
+    from flyto_robotics.mission import sector_field
+
+    field = sector_field([math.inf] * 360, angle_min=0.0, angle_increment=math.radians(1.0))
+    assert field.forward == math.inf and field.closest == math.inf
+
+
+def test_out_of_band_returns_are_discarded():
+    from flyto_robotics.mission import sector_field
+
+    field = sector_field(
+        [0.001, 50.0, 0.30] + [math.inf] * 357,
+        angle_min=0.0, angle_increment=math.radians(1.0),
+        range_min=0.05, range_max=12.0,
+    )
+    assert field.forward == pytest.approx(0.30)

@@ -19,7 +19,7 @@ from rclpy.signals import SignalHandlerOptions
 from sensor_msgs.msg import LaserScan
 
 from .contracts import write_json_atomic
-from .mission import Pose2D, evaluate_sensor_gate
+from .mission import sector_field, Pose2D, evaluate_sensor_gate
 from .ros2_cmd_vel import (
     CMD_VEL_TYPE_AUTO,
     CMD_VEL_TYPES,
@@ -87,6 +87,7 @@ class Ros2DeliverySessionNode(Node):
         self._control_started = False
         self._clock_anchored = False
         self._minimum_range = math.inf
+        self._range_field = None
         self._finished = False
         self._requires_range = require_range
         self._scan_snapshot: dict[str, Any] | None = None
@@ -133,23 +134,27 @@ class Ros2DeliverySessionNode(Node):
         return self._scan_snapshot
 
     def _on_scan(self, message: LaserScan) -> None:
-        valid = [
-            value
-            for value in message.ranges
-            if math.isfinite(value)
-            and message.range_min <= value <= message.range_max
-        ]
-        self._minimum_range = min(valid, default=math.inf)
+        # Sectors, not one number: a global minimum cannot tell the wall the
+        # robot drives alongside from the one it drives into.
+        self._range_field = sector_field(
+            message.ranges,
+            angle_min=message.angle_min,
+            angle_increment=message.angle_increment,
+            range_min=message.range_min,
+            range_max=message.range_max,
+        )
+        self._minimum_range = self._range_field.closest
         self._last_scan_at = time.monotonic()
-        # Keep the raw sweep so an operator can see the shape of the room, not
-        # just the single number the controller acts on. The hub downsamples.
         self._scan_snapshot = {
             "ranges": [
-                value if math.isfinite(value) else None for value in message.ranges
+                round(value, 3)
+                if math.isfinite(value) and message.range_min <= value <= message.range_max
+                else None
+                for value in message.ranges
             ],
-            "angle_min": float(message.angle_min),
-            "angle_increment": float(message.angle_increment),
-            "range_max": float(message.range_max),
+            "angle_min": round(message.angle_min, 5),
+            "angle_step": round(message.angle_increment, 6),
+            "range_max": round(message.range_max, 2),
         }
 
     def _send_velocity(self, linear_x: float, angular_z: float) -> None:
@@ -263,7 +268,7 @@ class Ros2DeliverySessionNode(Node):
                     self._control_started = True
                     command = controller.tick(
                         self._last_pose,
-                        minimum_range=self._minimum_range,
+                        minimum_range=self._range_field or self._minimum_range,
                         now=now,
                     )
                     self._session.pose = self._last_pose

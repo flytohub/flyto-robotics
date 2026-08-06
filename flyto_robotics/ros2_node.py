@@ -25,7 +25,13 @@ from .human_approval import (
     HumanDecisionValidationError,
 )
 from .line_perception import LineScene, detect_line_scene
-from .mission import MissionController, Pose2D, evaluate_sensor_gate
+from .mission import (
+    MissionController,
+    Pose2D,
+    RangeField,
+    evaluate_sensor_gate,
+    sector_field,
+)
 from .semantic_map import SemanticLocationStore, SemanticMapValidationError
 from .workflow import MissionState, PrimitiveKind
 
@@ -148,6 +154,7 @@ class MissionNode(Node):
         self.camera_diagnostic_logged = False
         self.last_visible_colors: tuple[str, ...] = ()
         self.minimum_range = math.inf
+        self.range_field: RangeField | None = None
         self.result_written = False
         self.exit_code = 3
         self.published_event_count = 0
@@ -231,12 +238,17 @@ class MissionNode(Node):
         self.last_odometry_at = time.monotonic()
 
     def _on_scan(self, message: LaserScan) -> None:
-        valid = [
-            value
-            for value in message.ranges
-            if math.isfinite(value) and message.range_min <= value <= message.range_max
-        ]
-        self.minimum_range = min(valid, default=math.inf)
+        # Sectors, not one number. A single global minimum cannot tell the wall
+        # a robot drives alongside from the one it drives into, which makes any
+        # corridor narrower than twice the stop distance impassable.
+        self.range_field = sector_field(
+            message.ranges,
+            angle_min=message.angle_min,
+            angle_increment=message.angle_increment,
+            range_min=message.range_min,
+            range_max=message.range_max,
+        )
+        self.minimum_range = self.range_field.closest
         self.last_scan_at = time.monotonic()
 
     def _on_image(self, message: Image) -> None:
@@ -416,7 +428,7 @@ class MissionNode(Node):
         self.control_started = True
         command = self.controller.tick(
             self.last_pose,
-            minimum_range=self.minimum_range,
+            minimum_range=self.range_field or self.minimum_range,
             now=now,
             line_scene=self.line_scene,
         )

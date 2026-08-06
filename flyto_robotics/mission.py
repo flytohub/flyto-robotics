@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any, Literal, Sequence
 
 from .capabilities import SAFE_TEXT
 from .contracts import RESULT_CONTRACT_VERSION, DeliveryJob, StationPose
@@ -116,6 +116,57 @@ def _clamp(value: float, minimum: float, maximum: float) -> float:
 INTENT_FORWARD = "forward"
 INTENT_REVERSE = "reverse"
 INTENT_ROTATE = "rotate"
+
+
+# Sector half-widths in degrees, measured from straight ahead. Forward is wide
+# enough to cover the robot's own width at the stop distance — a narrower cone
+# would let a corner pass beside the beam and still be struck. The gaps between
+# the named sectors are deliberate: a return on the diagonal belongs to none of
+# them and is caught by the omnidirectional floor instead, which is exactly what
+# an aisle intersection produces.
+FORWARD_HALF_ANGLE_DEG = 30.0
+SIDE_HALF_ANGLE_DEG = 30.0
+
+
+def sector_field(
+    ranges: Sequence[float],
+    *,
+    angle_min: float,
+    angle_increment: float,
+    range_min: float = 0.0,
+    range_max: float = math.inf,
+) -> "RangeField":
+    """Turn one sweep into the nearest return per sector.
+
+    Pure, and taking plain numbers rather than a LaserScan, so the arithmetic
+    that decides whether a robot moves can be asserted without ROS present.
+
+    A sector with no valid return stays at infinity — meaning nothing was seen
+    there, which is not the same as nothing being there, but is the only thing
+    a sweep can say.
+    """
+    forward = left = right = rear = closest = math.inf
+    for index, value in enumerate(ranges):
+        if not math.isfinite(value) or not (range_min <= value <= range_max):
+            continue
+        closest = min(closest, value)
+        bearing = math.degrees(angle_min + angle_increment * index) % 360.0
+        if bearing <= FORWARD_HALF_ANGLE_DEG or bearing >= 360.0 - FORWARD_HALF_ANGLE_DEG:
+            forward = min(forward, value)
+        elif abs(bearing - 90.0) <= SIDE_HALF_ANGLE_DEG:
+            left = min(left, value)
+        elif abs(bearing - 270.0) <= SIDE_HALF_ANGLE_DEG:
+            right = min(right, value)
+        elif abs(bearing - 180.0) <= FORWARD_HALF_ANGLE_DEG:
+            rear = min(rear, value)
+    return RangeField(
+        forward=forward,
+        left=left,
+        right=right,
+        rear=rear,
+        closest=closest,
+        directional=True,
+    )
 
 
 @dataclass(frozen=True)
