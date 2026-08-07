@@ -35,8 +35,9 @@ def load_runner(monkeypatch, tmp_path, *, cloud: str, gateway: str):
 class Fake:
     """A loopback HTTP server that records what it was asked."""
 
-    def __init__(self, routes):
+    def __init__(self, routes, *, pass_headers=False):
         self.routes = routes
+        self.pass_headers = pass_headers
         self.seen: list[tuple[str, dict, dict]] = []
         outer = self
 
@@ -54,7 +55,13 @@ class Fake:
                 outer.seen.append((self.path, dict(self.headers), body))
                 for prefix, responder in outer.routes.items():
                     if self.path.startswith(prefix):
-                        status, payload = responder(self.path, body)
+                        if outer.pass_headers:
+                            status, payload = responder(
+                                self.path, body,
+                                {k.lower(): v for k, v in self.headers.items()},
+                            )
+                        else:
+                            status, payload = responder(self.path, body)
                         data = json.dumps(payload).encode()
                         self.send_response(status)
                         self.send_header("Content-Type", "application/json")
@@ -193,17 +200,23 @@ def test_a_job_with_no_plan_is_not_a_robot_job(monkeypatch, tmp_path):
 # -- carrying one out ----------------------------------------------------
 
 
-def make_cloud(completions):
-    def claim(path, body):
-        return 200, {"lease_id": "lease-1"}
+# What api/devices/routes_jobs.py actually reads a lease from. The fake used to
+# accept a completion carrying no lease at all, which is how the runner shipped
+# sending a header name — "X-Flyto-Lease" — that no route reads: every mission
+# ran, every report was refused 409, and these tests stayed green throughout.
+LEASE_HEADER = "x-flyto2-job-lease"
 
-    def complete(path, body):
+
+def make_cloud(completions):
+    def route(path, body, headers):
+        if path.endswith("/claim"):
+            return 200, {"lease_id": "lease-1"}
+        if headers.get(LEASE_HEADER) != "lease-1":
+            return 409, {"ok": False, "error": "Job lease is missing or invalid"}
         completions.append(body)
         return 200, {"ok": True}
 
-    return Fake({"/api/devices/jobs/": lambda p, b: (
-        (200, {"lease_id": "lease-1"}) if p.endswith("/claim") else complete(p, b)
-    )})
+    return Fake({"/api/devices/jobs/": route}, pass_headers=True)
 
 
 def test_a_robot_job_is_claimed_run_and_reported_succeeded(monkeypatch, tmp_path, gateway):
@@ -349,3 +362,26 @@ def test_the_gateways_own_terminal_state_is_recognised(monkeypatch, tmp_path):
     source = _Path(__file__).resolve().parents[1] / "deploy" / "flyto_job_runner.py"
     text = source.read_text()
     assert '"completed"' in text
+
+
+def test_the_lease_header_is_the_one_the_device_api_reads(monkeypatch, tmp_path, gateway):
+    """The claim's lease must go back under the header the route reads.
+
+    A guessed header name is indistinguishable from sending none: the mission
+    runs, the robot moves, and the completion is refused 409 — which is what
+    happened on the real API while these tests were green against a fake that
+    never checked.
+    """
+    completions: list[dict] = []
+    cloud = make_cloud(completions)
+    try:
+        runner = load_runner(monkeypatch, tmp_path, cloud=cloud.url, gateway=gateway.url)
+        assert runner.LEASE_HEADER == "x-flyto2-job-lease"
+        runner._handle({"job_id": "j6", "steps": [{"params": {"plan": PLAN}}]},
+                       {"device_id": "dev-1", "device_secret": "s-1"})
+        assert completions, "the completion was accepted, so the lease was recognised"
+        sent = [h for p, h, _ in cloud.seen if p.endswith("/complete")][0]
+        lowered = {k.lower(): v for k, v in sent.items()}
+        assert lowered.get("x-flyto2-job-lease") == "lease-1"
+    finally:
+        cloud.close()

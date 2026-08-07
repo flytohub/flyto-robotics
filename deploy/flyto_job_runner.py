@@ -69,6 +69,13 @@ TERMINAL_STATES = frozenset(
 )
 SUCCESS_STATES = frozenset({"completed", "succeeded"})
 
+# The header the device API reads a claim's lease from — api/devices/
+# routes_jobs.py's LEASE_HEADER. This runner sent "X-Flyto-Lease", which that
+# route does not read, so every completion was refused with 409 "Job lease is
+# missing or invalid" after the mission had already run. A guessed header name
+# is indistinguishable from no header at all.
+LEASE_HEADER = "x-flyto2-job-lease"
+
 _stopping = False
 
 
@@ -253,7 +260,15 @@ def _handle(job: dict[str, Any], credentials: dict[str, str]) -> None:
     claimed = _post(CLOUD_URL, f"/api/devices/jobs/{job_id}/claim", {}, headers)
     lease = claimed.get("lease_id")
     if lease:
-        headers = {**headers, "X-Flyto-Lease": str(lease)}
+        headers = {**headers, LEASE_HEADER: str(lease)}
+    else:
+        # The completion endpoint refuses a report with no lease (409), so a
+        # claim that returned none means this mission can never be reported.
+        # Saying so here beats driving the robot and discovering it afterwards.
+        logger.warning(
+            "job %s was claimed without a lease; the report will be refused",
+            job_id,
+        )
 
     plan = _plan_from(job)
     if plan is None:
@@ -273,18 +288,34 @@ def _handle(job: dict[str, Any], credentials: dict[str, str]) -> None:
         logger.exception("job %s failed", job_id)
         outcome = {"status": "failed", "detail": str(exc)[:300]}
 
-    _post(
-        CLOUD_URL,
-        f"/api/devices/jobs/{job_id}/complete",
-        _completion(
-            status=outcome["status"],
-            detail=outcome.get("detail"),
-            pose=outcome.get("pose"),
-            minimum_range=outcome.get("minimum_range"),
-        ),
-        headers,
+    body = _completion(
+        status=outcome["status"],
+        detail=outcome.get("detail"),
+        pose=outcome.get("pose"),
+        minimum_range=outcome.get("minimum_range"),
     )
-    logger.info("job %s reported %s: %s", job_id, outcome["status"], outcome.get("detail"))
+    try:
+        _post(CLOUD_URL, f"/api/devices/jobs/{job_id}/complete", body, headers)
+    except urllib.error.HTTPError as exc:
+        # A mission that ran and could not be reported is the worst state to
+        # be silent about: the robot moved, the schedule still thinks the step
+        # is running, and nothing in the log says why. Name it here rather
+        # than letting the poll loop swallow it as one more backoff.
+        logger.error(
+            "job %s ran (%s) but the report was refused: %s %s",
+            job_id,
+            outcome["status"],
+            exc.code,
+            _read_error_body(exc),
+        )
+        raise
+    logger.info(
+        "job %s reported %s: %s | evidence: %s",
+        job_id,
+        outcome["status"],
+        outcome.get("detail"),
+        [item["kind"] for item in body.get("variables", {}).get("evidence", [])],
+    )
 
 
 def _completion(
@@ -400,6 +431,16 @@ def main() -> int:
             if exc.code in (401, 403):
                 logger.error("credential rejected (%s); delete %s and pair again", exc.code, CREDENTIAL_FILE)
                 return 3
+            # Say what the server said. Backing off with only "retrying in 6s"
+            # is how a job that finished on the robot but could not be reported
+            # became an unreadable silence — the robot had moved, the mission
+            # was complete, and the log showed nothing but a retry.
+            logger.warning(
+                "%s %s: %s",
+                exc.code,
+                getattr(exc, "url", ""),
+                _read_error_body(exc),
+            )
             failures += 1
             _back_off(failures)
         except Exception:  # noqa: BLE001 - the loop must survive a bad poll
@@ -413,6 +454,13 @@ def main() -> int:
         pass
     logger.info("stopped")
     return 0
+
+
+def _read_error_body(exc: urllib.error.HTTPError) -> str:
+    try:
+        return exc.read().decode("utf-8", "replace")[:300]
+    except Exception:  # noqa: BLE001 - a body that cannot be read is not fatal
+        return "<no body>"
 
 
 def _back_off(failures: int) -> None:
