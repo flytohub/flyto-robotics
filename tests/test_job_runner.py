@@ -95,8 +95,11 @@ def gateway():
         return 200, {"session_id": "pln-test", "state": "running"}
 
     def session(path, body):
-        return 200, {"session_id": "pln-test", "state": "succeeded",
-                     "final_pose": {"x": 0.37}}
+        # Exactly what DeliveryGateway._session_payload emits: "status" (a
+        # MissionState value), "pose", and the lidar's own "minimum_range".
+        return 200, {"session_id": "pln-test", "status": "completed",
+                     "pose": {"x": 0.37, "y": 0.0, "yaw": 1.55},
+                     "minimum_range": 1.42}
 
     fake = Fake({"/v1/plans": start, "/v1/deliveries/": session})
     fake.state = state
@@ -222,10 +225,12 @@ def test_a_robot_job_is_claimed_run_and_reported_succeeded(monkeypatch, tmp_path
         # where the Space task sweep reads it. "succeeded" plus a "result"
         # field passed the fake but 422'd against the real contract.
         assert done["status"] == "success"
-        evidence = done["variables"]["evidence"]
-        assert evidence[0]["kind"] == "arrival.pose"
-        assert evidence[0]["usable"] is True
-        assert "0.37" in evidence[0]["detail"]
+        kinds = {item["kind"]: item for item in done["variables"]["evidence"]}
+        assert set(kinds) == {"arrival.pose", "clearance.measurement"}
+        assert kinds["arrival.pose"]["usable"] is True
+        assert "0.37" in kinds["arrival.pose"]["detail"]
+        # The passage-inspection half: a measurement, not a picture.
+        assert "1.42" in kinds["clearance.measurement"]["detail"]
     finally:
         cloud.close()
 
@@ -268,8 +273,8 @@ def test_an_unknown_outcome_is_not_reported_as_success(monkeypatch, tmp_path):
     completions: list[dict] = []
     cloud = make_cloud(completions)
     stuck = Fake({
-        "/v1/plans": lambda p, b: (200, {"session_id": "pln-1", "state": "running"}),
-        "/v1/deliveries/": lambda p, b: (200, {"session_id": "pln-1", "state": "running"}),
+        "/v1/plans": lambda p, b: (200, {"session_id": "pln-1", "status": "navigating"}),
+        "/v1/deliveries/": lambda p, b: (200, {"session_id": "pln-1", "status": "navigating"}),
     })
     try:
         runner = load_runner(monkeypatch, tmp_path, cloud=cloud.url, gateway=stuck.url)
@@ -309,3 +314,38 @@ def test_the_runner_needs_no_third_party_package():
         elif isinstance(node, ast.ImportFrom) and node.module:
             imported.add(node.module.split(".")[0])
     assert not (imported & FORBIDDEN), f"stdlib only, but found {imported & FORBIDDEN}"
+
+
+def test_a_failed_mission_reports_no_evidence_at_all(monkeypatch, tmp_path):
+    """A mission that did not finish must not have its last known pose written
+    down as an arrival, nor its last range reading as a clearance."""
+    completions: list[dict] = []
+    cloud = make_cloud(completions)
+    failing = Fake({
+        "/v1/plans": lambda p, b: (200, {"session_id": "pln-2", "status": "running"}),
+        "/v1/deliveries/": lambda p, b: (200, {
+            "session_id": "pln-2", "status": "failed",
+            "failure_reason": "obstacle_stop",
+            "pose": {"x": 0.1}, "minimum_range": 0.18,
+        }),
+    })
+    try:
+        runner = load_runner(monkeypatch, tmp_path, cloud=cloud.url, gateway=failing.url)
+        runner._handle({"job_id": "j5", "steps": [{"params": {"plan": PLAN}}]},
+                       {"device_id": "dev-1", "device_secret": "s-1"})
+        done = completions[-1]
+        assert done["status"] == "failed"
+        assert "obstacle_stop" in done["error_message"]
+        assert "evidence" not in done.get("variables", {})
+    finally:
+        cloud.close()
+        failing.close()
+
+
+def test_the_gateways_own_terminal_state_is_recognised(monkeypatch, tmp_path):
+    """MissionState.COMPLETED is "completed". Waiting for "succeeded" — which
+    no gateway sends — made every real mission time out as outcome unknown."""
+    from pathlib import Path as _Path
+    source = _Path(__file__).resolve().parents[1] / "deploy" / "flyto_job_runner.py"
+    text = source.read_text()
+    assert '"completed"' in text

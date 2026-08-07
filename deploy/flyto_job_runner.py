@@ -57,7 +57,17 @@ ERROR_MAX_DELAY_SECONDS = 60.0
 MISSION_WATCH_SECONDS = 300.0
 GATEWAY_POLL_SECONDS = 1.0
 
-TERMINAL_STATES = frozenset({"succeeded", "failed", "cancelled", "aborted"})
+# What the gateway actually calls a finished mission. These are
+# ``MissionState`` values (flyto_robotics/workflow.py), not invented names:
+# a mission that finished its workflow reports "completed". The first version
+# of this runner waited for "succeeded", which no gateway has ever sent, so
+# every real mission would have been reported as "outcome unknown" after the
+# full five-minute watch. "succeeded" is kept only because the delivery
+# adapter's own tests speak it.
+TERMINAL_STATES = frozenset(
+    {"completed", "succeeded", "failed", "cancelled", "aborted"}
+)
+SUCCESS_STATES = frozenset({"completed", "succeeded"})
 
 _stopping = False
 
@@ -207,12 +217,24 @@ def _run_plan(plan: dict[str, Any], job_id: str) -> dict[str, Any]:
     deadline = time.monotonic() + MISSION_WATCH_SECONDS
     latest = session
     while time.monotonic() < deadline and not _stopping:
-        state = str(latest.get("state") or latest.get("status") or "").lower()
+        # "status" is what the real session payload carries; "state" is
+        # accepted because the delivery adapter's fixtures use it.
+        state = str(latest.get("status") or latest.get("state") or "").lower()
         if state in TERMINAL_STATES:
             return {
-                "status": "succeeded" if state == "succeeded" else "failed",
-                "detail": str(latest.get("reason") or state)[:300],
-                "pose": latest.get("final_pose"),
+                "status": "succeeded" if state in SUCCESS_STATES else "failed",
+                "detail": str(
+                    latest.get("failure_reason") or latest.get("reason") or state
+                )[:300],
+                # The session payload spells this "pose"; "final_pose" is the
+                # fixtures' name. Reading only the latter meant a real mission
+                # produced no arrival evidence at all.
+                "pose": latest.get("pose") or latest.get("final_pose"),
+                # The closest thing the lidar saw during the mission — the same
+                # reading the mission's own sensor gate trusts. This is what
+                # answers "is that passage actually walkable", which a camera
+                # frame cannot.
+                "minimum_range": latest.get("minimum_range"),
             }
         time.sleep(GATEWAY_POLL_SECONDS)
         latest = _call(GATEWAY_URL, f"/v1/deliveries/{session_id}", headers=gateway_headers, timeout=15.0)
@@ -258,13 +280,20 @@ def _handle(job: dict[str, Any], credentials: dict[str, str]) -> None:
             status=outcome["status"],
             detail=outcome.get("detail"),
             pose=outcome.get("pose"),
+            minimum_range=outcome.get("minimum_range"),
         ),
         headers,
     )
     logger.info("job %s reported %s: %s", job_id, outcome["status"], outcome.get("detail"))
 
 
-def _completion(*, status: str, detail: Any = None, pose: Any = None) -> dict[str, Any]:
+def _completion(
+    *,
+    status: str,
+    detail: Any = None,
+    pose: Any = None,
+    minimum_range: Any = None,
+) -> dict[str, Any]:
     """The body /api/devices/jobs/{id}/complete actually accepts.
 
     The contract is ``status`` matching ``^(success|failed)$``, an optional
@@ -275,9 +304,13 @@ def _completion(*, status: str, detail: Any = None, pose: Any = None) -> dict[st
 
     Evidence rides in ``variables["evidence"]`` because that is where the
     Space task sweep reads it from (``job_evidence`` in
-    ``services/space_tasks/dispatch.py``). A completed motion plan reports
-    ``arrival.pose`` — the one thing odometry-closed motion honestly proves —
-    so the mission's evidence loop hears about it without any new plumbing.
+    ``services/space_tasks/dispatch.py``). A finished mission reports only
+    what it can honestly show: the pose odometry closed on
+    (``arrival.pose``), and the nearest thing the lidar saw while it ran
+    (``clearance.measurement``) — the reading that answers "is that passage
+    walkable" where a camera frame cannot. Nothing is reported for a mission
+    that did not finish: not knowing where the robot ended up must never be
+    written down as an arrival.
     """
     succeeded = status == "succeeded"
     body: dict[str, Any] = {"status": "success" if succeeded else "failed"}
@@ -286,17 +319,33 @@ def _completion(*, status: str, detail: Any = None, pose: Any = None) -> dict[st
         variables["detail"] = str(detail)[:300]
         if not succeeded:
             body["error_message"] = str(detail)[:300]
+
+    evidence: list[dict[str, Any]] = []
     if succeeded and pose is not None:
-        variables["evidence"] = [
+        evidence.append(
             {
                 "kind": "arrival.pose",
                 "usable": True,
-                "detail": json.dumps(pose)[:200] if not isinstance(pose, str) else pose[:200],
+                "detail": _short(pose),
             }
-        ]
+        )
+    if succeeded and isinstance(minimum_range, (int, float)):
+        evidence.append(
+            {
+                "kind": "clearance.measurement",
+                "usable": True,
+                "detail": f"nearest obstacle {float(minimum_range):.2f} m",
+            }
+        )
+    if evidence:
+        variables["evidence"] = evidence
     if variables:
         body["variables"] = variables
     return body
+
+
+def _short(value: Any) -> str:
+    return value[:200] if isinstance(value, str) else json.dumps(value)[:200]
 
 
 # -- the loop ------------------------------------------------------------
