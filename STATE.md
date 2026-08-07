@@ -201,6 +201,19 @@
 
 ## Known development behavior
 
+- A cloud-dispatched Space task now reaches this robot end to end, verified on
+  hardware 2026-08-08 00:05: the task queued a job, the runner claimed it, the
+  gateway ran `shortcut.turn.left.90deg.v1`, the robot turned, and the runner
+  reported `succeeded` with `arrival.pose` and `clearance.measurement`
+  (0.50 m, a real lidar reading). The cloud reconciled it, assessed the
+  mission short of `zone.overview`, and escalated a camera step on its own.
+  Seven defects sat between "written" and "proven", every one of them hidden
+  by a fixture more permissive than the service it stood in for — see
+  [handoffs/2026-08-08-cloud-to-robot-first-real-run.md](handoffs/2026-08-08-cloud-to-robot-first-real-run.md).
+  `flyto-delivery.service` is now in `deploy/systemd/` for the same reason the
+  bringup unit is: living only on the robot is how it kept a simulated rover's
+  identity across a hardware deployment.
+
 - Headless Gazebo's rendering server may need SIGTERM after the mission node
   finishes and launch begins shutdown. Mission completion, the zero-velocity
   stop, and atomic result write finish before shutdown.
