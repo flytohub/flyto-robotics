@@ -1,0 +1,51 @@
+[Unit]
+Description=TurtleBot3 hardware bringup (OpenCR + LDS lidar)
+After=network-online.target
+# The launch opens two serial ports the moment it starts. At boot they have not
+# always enumerated yet, so it used to exit before the devices existed — and
+# because it exited cleanly, Restart=on-failure never fired. The result was a
+# unit systemd reported as active with no processes and no log for that boot.
+StartLimitIntervalSec=300
+StartLimitBurst=20
+
+[Service]
+Type=simple
+User=ubuntu
+Environment=TURTLEBOT3_MODEL=burger
+Environment=LDS_MODEL=LDS-03
+Environment=ROS_DOMAIN_ID=30
+Environment=PYTHONUNBUFFERED=1
+# Wait for both devices rather than assuming them, then give the OpenCR board
+# a moment past that before anything tries to talk to it. The device file
+# appears the instant the kernel enumerates the USB-serial adapter; the
+# board's own firmware boot is a separate, slower thing behind it, and there
+# is no public way to probe the board's own readiness short of running the
+# same handshake turtlebot3_ros itself performs. This narrows the race, it
+# does not close it — see the launch wrapper below for what actually closes it.
+ExecStartPre=/bin/bash -c 'for i in $(seq 1 60); do [ -e /dev/ttyACM0 ] && [ -e /dev/tb3_lidar ] && exit 0; sleep 1; done; echo "bringup: /dev/ttyACM0 or /dev/tb3_lidar never appeared" >&2; exit 1'
+ExecStartPre=/bin/sleep 2
+# turtlebot3_bringup_supervised.launch.py, not ROBOTIS's robot.launch.py
+# directly: it includes the same launch and adds one thing ros2 launch does
+# not do by default — bring the whole group down the moment any one of its
+# three processes exits. Without that, a first-attempt OpenCR handshake
+# failure leaves turtlebot3_ros dead while lidar and robot_state_publisher
+# keep running, systemd sees the unit as continuously active, and
+# Restart=always below never fires. Verified 2026-08-07: this exact failure
+# happened on a cold boot and needed a manual restart to clear.
+#
+# Called by absolute path, not by package name. flyto_robotics is installed
+# here with `pip install -e .`, not colcon, so it carries no ament resource
+# index entry — `ros2 launch flyto_robotics <file>` reports "Package not
+# found" on this robot. `ros2 launch` resolves a path argument directly
+# without needing one, which this deployment shape actually supports.
+ExecStart=/bin/bash -lc 'source /opt/ros/jazzy/setup.bash && exec ros2 launch /home/ubuntu/flyto-robotics/launch/turtlebot3_bringup_supervised.launch.py'
+# always, not on-failure: a clean exit is exactly how this failed silently,
+# and the wrapper above turns "one node died" into the whole group exiting —
+# which must be retried the same way a crash is.
+Restart=always
+RestartSec=5
+KillSignal=SIGINT
+TimeoutStopSec=20
+
+[Install]
+WantedBy=multi-user.target
