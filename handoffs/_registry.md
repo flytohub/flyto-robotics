@@ -8,3 +8,4 @@ us, and what the next person should not rediscover.
 |---|---|---|
 | 2026-08-05 | [TurtleBot3 commissioning and the keyboard-shortcut loop](2026-08-05-turtlebot3-bringup.md) | Robot fully provisioned on Jazzy with LDS-03; goal resolution, `turn_relative` and the four arrow cards landed; three non-obvious traps documented |
 | 2026-08-06 | Demo arena, directional safety | `2026-08-06-demo-arena-and-safety-sectors.md` | Active |
+| 2026-08-07 | [Bringup: boot race fixed, silent hang is not](2026-08-07-bringup-boot-race-and-silent-hang.md) | OpenCR handshake race merged (`main`) and verified via forced kill + systemd auto-recovery; a second failure — the same node hangs alive with every topic dead after a real motor command — found live the same day, watchdog fix designed but not written |
