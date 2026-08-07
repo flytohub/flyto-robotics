@@ -139,6 +139,40 @@ None of this is written. The only work done so far on it was reading
 `evaluate_sensor_gate` for the pattern to reuse — no launch-file changes, no
 systemd unit changes, no tests.
 
+> **Update (same day, later session): implemented AND verified on the robot.**
+> The watchdog is built exactly as designed — `flyto_robotics/
+> bringup_watchdog.py` (pure decision function `evaluate_bringup_watchdog` +
+> clock-free `WatchdogTicker` + a thin rclpy runner), added to
+> `turtlebot3_bringup_supervised.launch.py` as a fourth tracked process, with
+> the unit switched to `Type=notify`, `NotifyAccess=all`, `WatchdogSec=15`,
+> `TimeoutStartSec=120`. Unit tests in `tests/test_bringup_watchdog.py` cover
+> wait/arm/ping/starve, the full hang-shaped lifecycle, and the sd_notify
+> datagram.
+>
+> Steps 1–3 below were then all executed live:
+>
+> 1. The robot was found still in this exact hang (`active`, `NRestarts=0`,
+>    no `/odom`). Deploying the unit and restarting cleared it.
+> 2. Two deployment realities surfaced and are fixed in the same change:
+>    `flyto_robotics` is **not** pip-installed on the robot (the delivery
+>    unit finds it via `WorkingDirectory`), so the watchdog `ExecuteProcess`
+>    sets `cwd` from the launch file's own path — without it the module
+>    exits 1 with ModuleNotFoundError and the supervisor cycles the group.
+>    And rclpy surfaces SIGTERM as `ExternalShutdownException`, which must be
+>    caught or every clean stop logs a crash traceback.
+> 3. Induced the real failure shape at 22:04:58: `sudo kill -STOP` on the
+>    live `turtlebot3_ros` PID — process alive, every topic silent.
+>    Observed: `+5s` "withholding watchdog pings", `+20s` systemd `Watchdog
+>    timeout (limit 15s)!`, stop escalation to SIGKILL (a stopped process
+>    ignores SIGINT), restart at `+50s`, `READY=1` on first `/odom` at
+>    `+56s`, `/odom` back at 20.01 Hz. `NRestarts` 0→1, `Result=watchdog`,
+>    zero manual intervention.
+>
+> A note for future `ros2 topic hz` checks over SSH: export
+> `ROS_DOMAIN_ID=30` first — a bare sourced shell sits on domain 0 and
+> reports a healthy topic as "not published yet", the same class of false
+> negative as the short-window mistake warned about below.
+
 ## State of the robot right now
 
 As of this write-up, `turtlebot3-bringup.service` is still `active` with

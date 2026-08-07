@@ -27,10 +27,27 @@ after power-on, which is exactly what a manual restart confirmed the same day.
 This wraps rather than forks ROBOTIS's launch file, so a future upstream
 change to robot.launch.py is picked up automatically instead of drifting from
 a copy.
+
+OnProcessExit covers a process that dies. On 2026-08-07 turtlebot3_ros also
+hung *while alive* — same PID, every topic silent — which nothing here can
+see. The bringup_watchdog process below covers that: it pings systemd's
+watchdog only while /odom stays fresh, so a silent hang starves the timer and
+systemd restarts the whole unit. It must live in this launch group (not a
+separate unit) so it shares the service's cgroup and $NOTIFY_SOCKET; being a
+tracked process here also means the supervisor catches the watchdog itself
+dying, for free.
 """
 
+import sys
+from pathlib import Path
+
 from ament_index_python.packages import get_package_share_directory
-from launch.actions import EmitEvent, IncludeLaunchDescription, RegisterEventHandler
+from launch.actions import (
+    EmitEvent,
+    ExecuteProcess,
+    IncludeLaunchDescription,
+    RegisterEventHandler,
+)
 from launch.event_handlers import OnProcessExit
 from launch.events import Shutdown
 from launch.launch_description_sources import PythonLaunchDescriptionSource
@@ -43,6 +60,21 @@ def generate_launch_description():
         PythonLaunchDescriptionSource(
             get_package_share_directory("turtlebot3_bringup") + "/launch/robot.launch.py"
         )
+    )
+
+    # Run by module with the interpreter running this launch, cwd'd to the
+    # repo this file lives in. flyto_robotics is not pip-installed on the
+    # robot at all — the unit loads this file by absolute path, and the
+    # delivery service finds the package the same way, via
+    # WorkingDirectory=/home/ubuntu/flyto-robotics. Deriving the cwd from
+    # __file__ keeps that working no matter what directory the unit or a
+    # by-hand `ros2 launch` happens to run from (this exact miss made the
+    # first deploy exit 1 with ModuleNotFoundError).
+    watchdog = ExecuteProcess(
+        cmd=[sys.executable, "-m", "flyto_robotics.bringup_watchdog"],
+        name="bringup_watchdog",
+        cwd=str(Path(__file__).resolve().parents[1]),
+        output="screen",
     )
 
     def shut_down_on_exit(event, context):
@@ -65,4 +97,4 @@ def generate_launch_description():
         OnProcessExit(target_action=None, on_exit=shut_down_on_exit)
     )
 
-    return LaunchDescription([upstream, shutdown_on_any_exit])
+    return LaunchDescription([upstream, watchdog, shutdown_on_any_exit])

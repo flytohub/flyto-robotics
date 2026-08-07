@@ -9,7 +9,26 @@ StartLimitIntervalSec=300
 StartLimitBurst=20
 
 [Service]
-Type=simple
+# notify, not simple: the launch group includes bringup_watchdog (see the
+# launch wrapper), which defers READY=1 until the first /odom message (or a
+# 10s startup grace) and then pings WATCHDOG=1 only while /odom stays fresh.
+# This is what catches the 2026-08-07 failure OnProcessExit cannot see:
+# turtlebot3_ros hung while alive — same PID, every topic silent, nothing
+# exited. When /odom goes stale the watchdog stops pinging, the timer below
+# expires, systemd kills the whole cgroup, and Restart=always starts it clean.
+Type=notify
+# The ping comes from a sibling process inside the launch group, not the main
+# ros2 launch PID, so the default NotifyAccess=main would discard it.
+NotifyAccess=all
+# Detection latency after /odom goes stale is the watchdog's 5s freshness
+# window plus this. 15s total ≈ 20s to an automatic restart — the same hang
+# previously lasted until someone restarted the service by hand.
+WatchdogSec=15
+# ExecStartPre may legitimately take up to ~62s waiting for serial devices,
+# and READY=1 now arrives up to ~10s after launch. The default 90s start
+# timeout leaves too little margin on a slow cold boot; a start that is
+# genuinely stuck still starves WatchdogSec afterwards.
+TimeoutStartSec=120
 User=ubuntu
 Environment=TURTLEBOT3_MODEL=burger
 Environment=LDS_MODEL=LDS-03

@@ -210,12 +210,24 @@
 - `turtlebot3-bringup.service` can lose `/odom` two distinct ways. A boot-time
   OpenCR handshake race is fixed on `main` (the whole launch group now exits
   if any of its three processes dies, so `Restart=always` gets a chance).
-  A second, unfixed failure was found live on 2026-08-07: `turtlebot3_ros`
-  can hang alive — process running, no crash, every topic it publishes goes
-  silent — after a real motor command completes. `OnProcessExit` cannot catch
-  this; nothing exited. See
+  A second failure was found live on 2026-08-07: `turtlebot3_ros` can hang
+  alive — process running, no crash, every topic it publishes goes silent —
+  after a real motor command completes. `OnProcessExit` cannot catch this;
+  nothing exited. The fix is now written: `flyto_robotics/bringup_watchdog.py`
+  runs inside the supervised launch group, defers `READY=1` until the first
+  `/odom`, and pings systemd's `WATCHDOG=1` only while `/odom` stays fresh;
+  the unit is `Type=notify` + `NotifyAccess=all` + `WatchdogSec=15`, so a
+  silent hang starves the timer and `Restart=always` recovers it (~20s).
+  Decision logic is unit-tested (`tests/test_bringup_watchdog.py`), and the
+  fix is verified on the real robot (2026-08-07 evening): `SIGSTOP` on the
+  live `turtlebot3_ros` PID — alive but silent, the exact hang shape —
+  produced stale-detect at +5s, `Watchdog timeout (limit 15s)!` at +20s, a
+  full cgroup kill, and an automatic restart back to `/odom` at 20 Hz in
+  ~56s with zero manual intervention (`NRestarts` 0→1, `Result=watchdog`).
+  Deployment note: the robot has no pip install of `flyto_robotics`; the
+  launch file runs the watchdog with `cwd` derived from its own path. See
   [handoffs/2026-08-07-bringup-boot-race-and-silent-hang.md](handoffs/2026-08-07-bringup-boot-race-and-silent-hang.md)
-  for the evidence and the watchdog design that would close it (not written).
+  for the evidence and the design.
 
 ## Required before a competition field demo
 
