@@ -19,7 +19,7 @@ from rclpy.signals import SignalHandlerOptions
 from sensor_msgs.msg import LaserScan
 
 from .contracts import write_json_atomic
-from .mission import sector_field, Pose2D, evaluate_sensor_gate
+from .mission import closest_range, sector_field, Pose2D, evaluate_sensor_gate
 from .ros2_cmd_vel import (
     CMD_VEL_TYPE_AUTO,
     CMD_VEL_TYPES,
@@ -272,6 +272,17 @@ class Ros2DeliverySessionNode(Node):
                         now=now,
                     )
                     self._session.pose = self._last_pose
+                    # The session exposes minimum_range, and nothing was ever
+                    # writing it on this backend: the closest lidar return was
+                    # computed, handed to the controller, and then dropped, so
+                    # every ROS-backed mission reported minimum_range: null no
+                    # matter what it drove past. Recorded here, beside pose,
+                    # because it is the same kind of fact — what the robot
+                    # observed while it ran — and it is what answers "was that
+                    # passage actually clear" for anything reading the session.
+                    self._session.minimum_range = closest_range(
+                        self._range_field, self._minimum_range
+                    )
                     self._session.sim_now = now
                     if controller.terminal:
                         finished_result = self.finish_locked(now)
@@ -412,3 +423,4 @@ class Ros2DeliveryRunner:
             self._executor = None
         if rclpy.ok():
             rclpy.shutdown()
+

@@ -500,3 +500,31 @@ def test_qr_scan_session_mismatch_is_rejected() -> None:
         )
         assert status == 400
         assert body["error"] == "qr_scan_invalid"
+
+
+# -- what the session says the lidar saw ---------------------------------
+
+
+def test_closest_range_reports_what_the_lidar_measured():
+    """The ROS backend computed the nearest return, handed it to the
+    controller, and dropped it — so every ROS-backed session reported
+    minimum_range: null no matter what it drove past."""
+    from types import SimpleNamespace
+
+    from flyto_robotics.mission import closest_range as _closest_range
+
+    assert _closest_range(SimpleNamespace(closest=1.42), float("inf")) == 1.42
+    # Falls back to the scalar the runner keeps alongside the sector field.
+    assert _closest_range(None, 0.8) == 0.8
+
+
+def test_an_unmeasured_range_stays_absent_rather_than_becoming_a_number():
+    """Infinity means "the sensor had nothing to say" inside the controller.
+    Letting it out as a number would read as a wide open corridor."""
+    from types import SimpleNamespace
+
+    from flyto_robotics.mission import closest_range as _closest_range
+
+    assert _closest_range(SimpleNamespace(closest=float("inf")), float("inf")) is None
+    assert _closest_range(None, float("inf")) is None
+    assert _closest_range(SimpleNamespace(closest=None), float("nan")) is None
