@@ -29,13 +29,13 @@ change to robot.launch.py is picked up automatically instead of drifting from
 a copy.
 """
 
-from launch import LaunchDescription
+from ament_index_python.packages import get_package_share_directory
 from launch.actions import EmitEvent, IncludeLaunchDescription, RegisterEventHandler
 from launch.event_handlers import OnProcessExit
 from launch.events import Shutdown
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch_ros.actions import Node
-from ament_index_python.packages import get_package_share_directory
+
+from launch import LaunchDescription
 
 
 def generate_launch_description():
