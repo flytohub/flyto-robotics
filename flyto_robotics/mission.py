@@ -53,6 +53,27 @@ def evaluate_sensor_gate(
     return "wait"
 
 
+def closest_range(range_field: Any, fallback: float) -> float | None:
+    """The nearest return the lidar reported, or None when it saw nothing.
+
+    Infinity is how "nothing measured there" is spelled inside the controller,
+    and it must not travel outward as a number: a session claiming a clearance
+    of ``inf`` reads as a wide open corridor when it actually means the sensor
+    had nothing to say. None is the honest answer, and the delivery session
+    payload already treats it that way.
+
+    Lives here rather than in the ROS backend that calls it, for the same
+    reason :func:`evaluate_sensor_gate` does: it is a decision about what a
+    reading means, and it must be testable without a robot.
+    """
+    closest = getattr(range_field, "closest", None)
+    if not isinstance(closest, (int, float)) or not math.isfinite(closest):
+        closest = fallback
+    if not isinstance(closest, (int, float)) or not math.isfinite(closest):
+        return None
+    return float(closest)
+
+
 @dataclass(frozen=True)
 class Pose2D:
     x: float
