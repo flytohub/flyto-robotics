@@ -216,7 +216,16 @@ def test_a_robot_job_is_claimed_run_and_reported_succeeded(monkeypatch, tmp_path
         sent = gateway.state["plans"][0]
         assert sent["contract_version"] == "flyto.cloud.plan-run-request.v1"
         assert sent["plan"]["plan_id"] == PLAN["plan_id"]
-        assert completions[-1]["status"] == "succeeded"
+        done = completions[-1]
+        # The body the real /complete route accepts: status matches
+        # ^(success|failed)$, and evidence rides in variables["evidence"]
+        # where the Space task sweep reads it. "succeeded" plus a "result"
+        # field passed the fake but 422'd against the real contract.
+        assert done["status"] == "success"
+        evidence = done["variables"]["evidence"]
+        assert evidence[0]["kind"] == "arrival.pose"
+        assert evidence[0]["usable"] is True
+        assert "0.37" in evidence[0]["detail"]
     finally:
         cloud.close()
 
@@ -230,7 +239,7 @@ def test_a_job_this_device_cannot_run_is_failed_with_a_reason(monkeypatch, tmp_p
         runner._handle({"job_id": "j2", "steps": [{"params": {"url": "https://x"}}]},
                        {"device_id": "dev-1", "device_secret": "s-1"})
         assert completions[-1]["status"] == "failed"
-        assert "robot plans only" in completions[-1]["error"]
+        assert "robot plans only" in completions[-1]["error_message"]
         assert gateway.state["plans"] == [], "nothing should reach the robot"
     finally:
         cloud.close()
@@ -268,8 +277,11 @@ def test_an_unknown_outcome_is_not_reported_as_success(monkeypatch, tmp_path):
         runner.GATEWAY_POLL_SECONDS = 0.05
         runner._handle({"job_id": "j4", "steps": [{"params": {"plan": PLAN}}]},
                        {"device_id": "dev-1", "device_secret": "s-1"})
-        assert completions[-1]["status"] == "failed"
-        assert "unknown" in completions[-1]["result"]["detail"]
+        done = completions[-1]
+        assert done["status"] == "failed"
+        assert "unknown" in done["error_message"]
+        assert "evidence" not in (done.get("variables") or {}), \
+            "an unknown outcome must not claim an arrival"
     finally:
         cloud.close()
         stuck.close()
