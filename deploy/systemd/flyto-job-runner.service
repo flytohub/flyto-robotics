@@ -13,7 +13,13 @@ EnvironmentFile=/home/ubuntu/flyto-delivery.env
 Environment=PYTHONUNBUFFERED=1
 Environment=FLYTO_RUNNER_DATA_DIR=/home/ubuntu/.flyto
 Environment=FLYTO_PLAN_ROOT=/home/ubuntu/flyto-robotics/examples/plans
-ExecStart=/usr/bin/python3 /home/ubuntu/flyto_job_runner.py
+# The runner inside the deployed tree, not a copy beside it. A second copy at
+# /home/ubuntu/flyto_job_runner.py is what the unit used to run, and rsync
+# updates the tree — so the robot kept executing a stale runner after every
+# deploy. It cost one live mission: the fixed runner knew the gateway says
+# "completed", the stale one was still waiting for "succeeded" and would have
+# timed out at five minutes reporting "outcome unknown".
+ExecStart=/usr/bin/python3 /home/ubuntu/flyto-robotics/deploy/flyto_job_runner.py
 # always, not on-failure: the runner exits cleanly on a rejected credential and
 # on SIGTERM, and only the first of those should bring it back.
 Restart=always
