@@ -18,19 +18,26 @@ Environment=FLYTO_PLAN_ROOT=/home/ubuntu/flyto-robotics/examples/plans
 # is where the two are tied together. It must match the robot_id in the job
 # the delivery gateway was started with.
 Environment=FLYTO_ROBOTICS_ROBOT_ID=flyto-tb3-lab-001
-# flyto-modules-robotics on the path rather than installed: it is pure Python
-# with no dependencies, this machine has no pip, and the deployment here is an
-# rsync of trees. The runner reads one thing from it — the table that says
-# which module identifier means which plan — which the workflow engine reads
-# on the other side, so the canvas and the robot cannot disagree.
-Environment=PYTHONPATH=/home/ubuntu/flyto-modules-robotics/src
+# The runner reads one thing from flyto-modules-robotics — the table that says
+# which module identifier means which plan, which the workflow engine reads on
+# the other side, so the canvas and the robot cannot disagree about what a
+# step means.
+#
+# It comes from PyPI, into a venv of its own, pinned. It used to be a
+# PYTHONPATH pointing at an rsync'd working tree, which meant the robot ran
+# whatever happened to be in a developer's checkout — uncommitted edits
+# included — and an upgrade was a side effect of a file copy rather than a
+# decision. Provisioned with:
+#
+#   python3 -m venv /home/ubuntu/.flyto/runner-venv
+#   /home/ubuntu/.flyto/runner-venv/bin/pip install "flyto-modules-robotics==0.1.0"
 # The runner inside the deployed tree, not a copy beside it. A second copy at
 # /home/ubuntu/flyto_job_runner.py is what the unit used to run, and rsync
 # updates the tree — so the robot kept executing a stale runner after every
 # deploy. It cost one live mission: the fixed runner knew the gateway says
 # "completed", the stale one was still waiting for "succeeded" and would have
 # timed out at five minutes reporting "outcome unknown".
-ExecStart=/usr/bin/python3 /home/ubuntu/flyto-robotics/deploy/flyto_job_runner.py
+ExecStart=/home/ubuntu/.flyto/runner-venv/bin/python /home/ubuntu/flyto-robotics/deploy/flyto_job_runner.py
 # always, not on-failure: the runner exits cleanly on a rejected credential and
 # on SIGTERM, and only the first of those should bring it back.
 Restart=always
