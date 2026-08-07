@@ -207,6 +207,15 @@
 - A new Gazebo generation can briefly expose bootstrap sensor samples from an
   older ROS graph. The mission adapter now uses monotonic freshness and a
   one-second stabilization window before allowing its first nonzero command.
+- `turtlebot3-bringup.service` can lose `/odom` two distinct ways. A boot-time
+  OpenCR handshake race is fixed on `main` (the whole launch group now exits
+  if any of its three processes dies, so `Restart=always` gets a chance).
+  A second, unfixed failure was found live on 2026-08-07: `turtlebot3_ros`
+  can hang alive — process running, no crash, every topic it publishes goes
+  silent — after a real motor command completes. `OnProcessExit` cannot catch
+  this; nothing exited. See
+  [handoffs/2026-08-07-bringup-boot-race-and-silent-hang.md](handoffs/2026-08-07-bringup-boot-race-and-silent-hang.md)
+  for the evidence and the watchdog design that would close it (not written).
 
 ## Required before a competition field demo
 
