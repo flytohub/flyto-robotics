@@ -4,6 +4,16 @@ All notable project changes are recorded here.
 
 ## Unreleased
 
+- Added `flyto_robotics/bringup_watchdog.py`: an `/odom`-freshness watchdog
+  bundled into `turtlebot3_bringup_supervised.launch.py` and wired to
+  systemd's own watchdog protocol (`Type=notify`, `NotifyAccess=all`,
+  `WatchdogSec=15`). Catches the 2026-08-07 silent hang — `turtlebot3_ros`
+  alive but every topic dead — that `OnProcessExit` cannot see: stale `/odom`
+  starves the watchdog timer, systemd kills the cgroup, `Restart=always`
+  recovers it. Decision logic is a pure function with unit tests, and the
+  whole path is verified on the real robot: an induced alive-but-silent
+  `turtlebot3_ros` (SIGSTOP) was detected, killed and recovered to `/odom`
+  at 20 Hz in ~56s with zero manual intervention.
 - Extracted `CmdVelChannel` into `flyto_robotics/ros2_cmd_vel.py` so the
   delivery runner and the shortcut controller share one velocity publisher.
   The shortcut node still hardcoded `Twist` on a hardcoded topic, which would
