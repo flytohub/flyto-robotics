@@ -239,7 +239,7 @@ def _handle(job: dict[str, Any], credentials: dict[str, str]) -> None:
         _post(
             CLOUD_URL,
             f"/api/devices/jobs/{job_id}/complete",
-            {"status": "failed", "error": "this device runs robot plans only"},
+            _completion(status="failed", detail="this device runs robot plans only"),
             headers,
         )
         return
@@ -254,13 +254,49 @@ def _handle(job: dict[str, Any], credentials: dict[str, str]) -> None:
     _post(
         CLOUD_URL,
         f"/api/devices/jobs/{job_id}/complete",
-        {
-            "status": outcome["status"],
-            "result": {"detail": outcome.get("detail"), "pose": outcome.get("pose")},
-        },
+        _completion(
+            status=outcome["status"],
+            detail=outcome.get("detail"),
+            pose=outcome.get("pose"),
+        ),
         headers,
     )
     logger.info("job %s reported %s: %s", job_id, outcome["status"], outcome.get("detail"))
+
+
+def _completion(*, status: str, detail: Any = None, pose: Any = None) -> dict[str, Any]:
+    """The body /api/devices/jobs/{id}/complete actually accepts.
+
+    The contract is ``status`` matching ``^(success|failed)$``, an optional
+    ``error_message``, and ``variables`` — the dict a workflow's own output
+    lands in. The first version of this runner sent ``status: "succeeded"``
+    and a ``result`` field, both of which that model rejects or ignores; it
+    had only ever been tested against a fake cloud that accepted anything.
+
+    Evidence rides in ``variables["evidence"]`` because that is where the
+    Space task sweep reads it from (``job_evidence`` in
+    ``services/space_tasks/dispatch.py``). A completed motion plan reports
+    ``arrival.pose`` — the one thing odometry-closed motion honestly proves —
+    so the mission's evidence loop hears about it without any new plumbing.
+    """
+    succeeded = status == "succeeded"
+    body: dict[str, Any] = {"status": "success" if succeeded else "failed"}
+    variables: dict[str, Any] = {}
+    if detail:
+        variables["detail"] = str(detail)[:300]
+        if not succeeded:
+            body["error_message"] = str(detail)[:300]
+    if succeeded and pose is not None:
+        variables["evidence"] = [
+            {
+                "kind": "arrival.pose",
+                "usable": True,
+                "detail": json.dumps(pose)[:200] if not isinstance(pose, str) else pose[:200],
+            }
+        ]
+    if variables:
+        body["variables"] = variables
+    return body
 
 
 # -- the loop ------------------------------------------------------------
