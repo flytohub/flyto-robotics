@@ -1,0 +1,41 @@
+# Flyto AI Space delivery gateway — the process that owns the robot.
+#
+# This unit lived only on the robot until 2026-08-08, and that is exactly how
+# it came to run a simulated rover's identity on real hardware: it was deployed
+# with --job examples/jobs/ai-space-delivery.json, whose robot_id is
+# flyto-rover-sim-001, so every lab plan (flyto-tb3-lab-001) was refused and
+# the mission ran under a safety envelope looser than this TurtleBot3 warrants
+# — 0.35 m/s and a 0.45 m obstacle stop, against the lab job's 0.2 m/s and
+# 0.25 m. The job below is the physical robot's own.
+#
+# --confirmation-timeout must fit inside the job's mission_timeout_seconds
+# (30 s for the lab job); the gateway refuses to start otherwise.
+[Unit]
+Description=Flyto AI Space delivery gateway (loopback)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/flyto-robotics
+EnvironmentFile=/home/ubuntu/flyto-delivery.env
+Environment=PYTHONUNBUFFERED=1
+Environment=ROS_DOMAIN_ID=30
+Environment=TURTLEBOT3_MODEL=burger
+# ros2 backend needs the Jazzy environment; bash -lc keeps the sourced setup.
+ExecStart=/bin/bash -lc 'source /opt/ros/jazzy/setup.bash && exec python3 -m flyto_robotics.cli serve-delivery \
+  --job examples/jobs/tb3-lab-shortcut.json \
+  --semantic-map examples/maps/hospital-ward-delivery.json \
+  --semantic-map-id hospital.ward-delivery.v1 \
+  --backend ros2 \
+  --confirmation-timeout 25 \
+  --odom-topic /odom --scan-topic /scan --cmd-vel-topic /cmd_vel'
+Restart=on-failure
+RestartSec=5
+# Give the mission its final zero-velocity stop before the process dies.
+KillSignal=SIGTERM
+TimeoutStopSec=20
+
+[Install]
+WantedBy=multi-user.target
