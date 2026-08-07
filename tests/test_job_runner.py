@@ -385,3 +385,50 @@ def test_the_lease_header_is_the_one_the_device_api_reads(monkeypatch, tmp_path,
         assert lowered.get("x-flyto2-job-lease") == "lease-1"
     finally:
         cloud.close()
+
+
+# -- a step authored on the canvas ---------------------------------------
+
+
+TURN_STEP = {"id": "sweep", "module": "robotics.turn", "params": {"degrees": 90}}
+
+
+def test_a_canvas_authored_motion_step_becomes_a_plan(monkeypatch, tmp_path):
+    """The runner holds no table of its own: it asks the package that owns the
+    module identifiers, so the canvas and the robot cannot disagree about what
+    a step means."""
+    pytest.importorskip("flyto_modules_robotics.steps")
+    monkeypatch.setenv("FLYTO_ROBOTICS_ROBOT_ID", "flyto-tb3-lab-001")
+    runner = load_runner(monkeypatch, tmp_path, cloud="http://127.0.0.1:1", gateway="http://127.0.0.1:1")
+
+    plan = runner._plan_from({"job_id": "j", "steps": [TURN_STEP]})
+    assert plan["robot_id"] == "flyto-tb3-lab-001"
+    assert plan["steps"][0]["capability"] == "turn_relative"
+    assert plan["steps"][-1]["capability"] == "safe_stop", "every plan ends stopped"
+
+
+def test_without_a_robot_id_the_step_is_refused_rather_than_guessed(monkeypatch, tmp_path):
+    """The gateway checks a plan's robot_id against its own job, so a guess
+    here only becomes a refusal further from the cause."""
+    pytest.importorskip("flyto_modules_robotics.steps")
+    monkeypatch.delenv("FLYTO_ROBOTICS_ROBOT_ID", raising=False)
+    runner = load_runner(monkeypatch, tmp_path, cloud="http://127.0.0.1:1", gateway="http://127.0.0.1:1")
+    assert runner._plan_from({"job_id": "j", "steps": [TURN_STEP]}) is None
+
+
+def test_a_step_the_package_does_not_know_is_still_not_a_robot_job(monkeypatch, tmp_path):
+    monkeypatch.setenv("FLYTO_ROBOTICS_ROBOT_ID", "flyto-tb3-lab-001")
+    runner = load_runner(monkeypatch, tmp_path, cloud="http://127.0.0.1:1", gateway="http://127.0.0.1:1")
+    assert runner._plan_from(
+        {"job_id": "j", "steps": [{"module": "browser.click", "params": {"selector": "#go"}}]}
+    ) is None
+
+
+def test_an_unbuildable_motion_step_is_refused_not_approximated(monkeypatch, tmp_path):
+    """A distance out of bounds must not become the nearest allowed distance."""
+    pytest.importorskip("flyto_modules_robotics.steps")
+    monkeypatch.setenv("FLYTO_ROBOTICS_ROBOT_ID", "flyto-tb3-lab-001")
+    runner = load_runner(monkeypatch, tmp_path, cloud="http://127.0.0.1:1", gateway="http://127.0.0.1:1")
+    assert runner._plan_from(
+        {"job_id": "j", "steps": [{"module": "robotics.move", "params": {"distance_m": 99}}]}
+    ) is None

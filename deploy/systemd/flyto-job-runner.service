@@ -13,6 +13,17 @@ EnvironmentFile=/home/ubuntu/flyto-delivery.env
 Environment=PYTHONUNBUFFERED=1
 Environment=FLYTO_RUNNER_DATA_DIR=/home/ubuntu/.flyto
 Environment=FLYTO_PLAN_ROOT=/home/ubuntu/flyto-robotics/examples/plans
+# Which robot this is. A canvas-authored motion step says how far to go, not
+# who goes; the gateway checks a plan's robot_id against its own job, so this
+# is where the two are tied together. It must match the robot_id in the job
+# the delivery gateway was started with.
+Environment=FLYTO_ROBOTICS_ROBOT_ID=flyto-tb3-lab-001
+# flyto-modules-robotics on the path rather than installed: it is pure Python
+# with no dependencies, this machine has no pip, and the deployment here is an
+# rsync of trees. The runner reads one thing from it — the table that says
+# which module identifier means which plan — which the workflow engine reads
+# on the other side, so the canvas and the robot cannot disagree.
+Environment=PYTHONPATH=/home/ubuntu/flyto-modules-robotics/src
 # The runner inside the deployed tree, not a copy beside it. A second copy at
 # /home/ubuntu/flyto_job_runner.py is what the unit used to run, and rsync
 # updates the tree — so the robot kept executing a stale runner after every
