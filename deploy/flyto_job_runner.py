@@ -177,9 +177,11 @@ def _headers(credentials: dict[str, str]) -> dict[str, str]:
 def _plan_from(job: dict[str, Any]) -> dict[str, Any] | None:
     """The robot plan this job carries, or None if it is not a robot job.
 
-    Two shapes are accepted: a step whose params hold a plan outright, and a
-    step naming a plan file already on this robot. Anything else is not
-    something this runner can carry out, and saying so is better than guessing.
+    Three shapes are accepted, in the order a job is most likely to carry
+    them: a step whose params hold a plan outright, a step naming a plan file
+    already on this robot, and a step authored on the canvas as one of the
+    ``robotics.*`` motion steps. Anything else is not something this runner
+    can carry out, and saying so is better than guessing.
     """
     for step in job.get("steps") or []:
         params = step.get("params") or step.get("arguments") or {}
@@ -195,7 +197,53 @@ def _plan_from(job: dict[str, Any]) -> dict[str, Any] | None:
             resolved = (root / candidate.name).resolve()
             if resolved.parent == root and resolved.is_file():
                 return json.loads(resolved.read_text())
+        authored = _authored_plan(step, params)
+        if authored is not None:
+            return authored
     return None
+
+
+def _authored_plan(step: dict[str, Any], params: dict[str, Any]) -> dict[str, Any] | None:
+    """The plan a canvas-authored motion step describes, if this is one.
+
+    The mapping from a step to a plan is not written here. It lives in
+    flyto-modules-robotics, beside the module identifiers it gives meaning
+    to, and the workflow engine reads the same table on the other side. One
+    table, two readers: a copy here would be free to drift, and the drift
+    would be invisible until a robot moved differently from what the canvas
+    said.
+
+    That package is pure Python with no dependencies, so installing it on a
+    Pi costs nothing and pulls in no engine. Absent, this returns None and the
+    job is reported as one this device cannot run — which is true, and better
+    than a plan assembled from guesses.
+    """
+    try:
+        from flyto_modules_robotics.steps import plan_for_step, step_module_id
+    except ImportError:
+        return None
+
+    module_id = step_module_id(step)
+    if not module_id:
+        return None
+
+    robot_id = os.getenv("FLYTO_ROBOTICS_ROBOT_ID", "").strip()
+    if not robot_id:
+        # The gateway checks a plan's robot_id against the job it was started
+        # with, so a guess here becomes a refusal there, one layer further from
+        # the cause.
+        logger.warning(
+            "step %s is a robotics step, but FLYTO_ROBOTICS_ROBOT_ID is not set "
+            "on this robot; cannot say which robot the plan is for",
+            module_id,
+        )
+        return None
+
+    try:
+        return plan_for_step(module_id, params, robot_id=robot_id)
+    except Exception:  # noqa: BLE001 - a plan that cannot be built is not run
+        logger.warning("step %s could not be built into a plan", module_id, exc_info=True)
+        return None
 
 
 def _run_plan(plan: dict[str, Any], job_id: str) -> dict[str, Any]:

@@ -201,6 +201,20 @@
 
 ## Known development behavior
 
+- A step authored on the Flyto2 canvas now reaches this robot as itself. The
+  job runner accepts a third shape alongside an inline plan and a plan file: a
+  `robotics.*` motion step, which it turns into a plan by asking
+  `flyto_modules_robotics.steps` — the same table the workflow engine reads on
+  the other side, so the canvas and the robot cannot disagree about what a
+  step means. That package is pure Python with no dependencies and is put on
+  `PYTHONPATH` by the unit rather than installed, since this machine has no
+  pip. `FLYTO_ROBOTICS_ROBOT_ID` says which robot the plan is for; without it
+  the step is refused rather than guessed, because the gateway checks a plan's
+  robot_id against its own job and a guess only becomes a refusal one layer
+  further from the cause. Verified 2026-08-08: a `robotics.turn` step
+  dispatched as a Space task ran as `workflow.turn.left.90deg.v1` and reported
+  `arrival.pose` and `clearance.measurement`.
+
 - A cloud-dispatched Space task now reaches this robot end to end, verified on
   hardware 2026-08-08 00:05: the task queued a job, the runner claimed it, the
   gateway ran `shortcut.turn.left.90deg.v1`, the robot turned, and the runner
