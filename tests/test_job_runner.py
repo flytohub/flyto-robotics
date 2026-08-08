@@ -57,7 +57,8 @@ class Fake:
                     if self.path.startswith(prefix):
                         if outer.pass_headers:
                             status, payload = responder(
-                                self.path, body,
+                                self.path,
+                                body,
                                 {k.lower(): v for k, v in self.headers.items()},
                             )
                         else:
@@ -104,9 +105,12 @@ def gateway():
     def session(path, body):
         # Exactly what DeliveryGateway._session_payload emits: "status" (a
         # MissionState value), "pose", and the lidar's own "minimum_range".
-        return 200, {"session_id": "pln-test", "status": "completed",
-                     "pose": {"x": 0.37, "y": 0.0, "yaw": 1.55},
-                     "minimum_range": 1.42}
+        return 200, {
+            "session_id": "pln-test",
+            "status": "completed",
+            "pose": {"x": 0.37, "y": 0.0, "yaw": 1.55},
+            "minimum_range": 1.42,
+        }
 
     fake = Fake({"/v1/plans": start, "/v1/deliveries/": session})
     fake.state = state
@@ -119,8 +123,7 @@ PLAN = {
     "plan_id": "shortcut.forward.40cm.v1",
     "robot_id": "flyto-tb3-lab-001",
     "goal": "move forward",
-    "steps": [{"step_id": "s", "capability": "move_relative",
-               "arguments": {"distance_m": 0.4}}],
+    "steps": [{"step_id": "s", "capability": "move_relative", "arguments": {"distance_m": 0.4}}],
 }
 
 
@@ -128,8 +131,14 @@ PLAN = {
 
 
 def test_pairing_stores_the_credential_once_and_never_the_code(monkeypatch, tmp_path):
-    cloud = Fake({"/api/devices/pair/claim":
-                  lambda p, b: (200, {"device_id": "dev-1", "device_secret": "s-1"})})
+    cloud = Fake(
+        {
+            "/api/devices/pair/claim": lambda p, b: (
+                200,
+                {"device_id": "dev-1", "device_secret": "s-1"},
+            )
+        }
+    )
     try:
         monkeypatch.setenv("FLYTO_PAIRING_CODE", "CODE-123")
         runner = load_runner(monkeypatch, tmp_path, cloud=cloud.url, gateway="http://127.0.0.1:1")
@@ -143,20 +152,25 @@ def test_pairing_stores_the_credential_once_and_never_the_code(monkeypatch, tmp_
         assert "CODE-123" not in stored.read_text()
         assert monkeypatch  # keep the fixture alive
         import os
+
         assert "FLYTO_PAIRING_CODE" not in os.environ
     finally:
         cloud.close()
 
 
 def test_pairing_without_a_code_says_where_to_get_one(monkeypatch, tmp_path):
-    runner = load_runner(monkeypatch, tmp_path, cloud="http://127.0.0.1:1", gateway="http://127.0.0.1:1")
+    runner = load_runner(
+        monkeypatch, tmp_path, cloud="http://127.0.0.1:1", gateway="http://127.0.0.1:1"
+    )
     monkeypatch.delenv("FLYTO_PAIRING_CODE", raising=False)
     with pytest.raises(runner.RunnerError, match="Pair a device"):
         runner._pair()
 
 
 def test_the_device_credential_is_the_only_thing_sent_afterwards(monkeypatch, tmp_path):
-    runner = load_runner(monkeypatch, tmp_path, cloud="http://127.0.0.1:1", gateway="http://127.0.0.1:1")
+    runner = load_runner(
+        monkeypatch, tmp_path, cloud="http://127.0.0.1:1", gateway="http://127.0.0.1:1"
+    )
     headers = runner._headers({"device_id": "dev-1", "device_secret": "s-1"})
     assert headers == {"Authorization": "Bearer device:dev-1.s-1"}
 
@@ -165,13 +179,17 @@ def test_the_device_credential_is_the_only_thing_sent_afterwards(monkeypatch, tm
 
 
 def test_a_plan_carried_inline_is_used(monkeypatch, tmp_path):
-    runner = load_runner(monkeypatch, tmp_path, cloud="http://127.0.0.1:1", gateway="http://127.0.0.1:1")
+    runner = load_runner(
+        monkeypatch, tmp_path, cloud="http://127.0.0.1:1", gateway="http://127.0.0.1:1"
+    )
     job = {"job_id": "j1", "steps": [{"params": {"plan": PLAN}}]}
     assert runner._plan_from(job)["plan_id"] == PLAN["plan_id"]
 
 
 def test_a_plan_named_by_file_is_read_from_the_plans_directory(monkeypatch, tmp_path):
-    runner = load_runner(monkeypatch, tmp_path, cloud="http://127.0.0.1:1", gateway="http://127.0.0.1:1")
+    runner = load_runner(
+        monkeypatch, tmp_path, cloud="http://127.0.0.1:1", gateway="http://127.0.0.1:1"
+    )
     root = tmp_path / "plans"
     root.mkdir(parents=True, exist_ok=True)
     (root / "forward.json").write_text(json.dumps(PLAN))
@@ -185,14 +203,18 @@ def test_a_plan_named_by_file_is_read_from_the_plans_directory(monkeypatch, tmp_
 )
 def test_a_job_cannot_name_a_file_outside_the_plans_directory(monkeypatch, tmp_path, reference):
     """A job arrives over the network; it must not choose what this reads."""
-    runner = load_runner(monkeypatch, tmp_path, cloud="http://127.0.0.1:1", gateway="http://127.0.0.1:1")
+    runner = load_runner(
+        monkeypatch, tmp_path, cloud="http://127.0.0.1:1", gateway="http://127.0.0.1:1"
+    )
     (tmp_path / "plans").mkdir(parents=True, exist_ok=True)
     job = {"job_id": "j1", "steps": [{"params": {"plan_path": reference}}]}
     assert runner._plan_from(job) is None
 
 
 def test_a_job_with_no_plan_is_not_a_robot_job(monkeypatch, tmp_path):
-    runner = load_runner(monkeypatch, tmp_path, cloud="http://127.0.0.1:1", gateway="http://127.0.0.1:1")
+    runner = load_runner(
+        monkeypatch, tmp_path, cloud="http://127.0.0.1:1", gateway="http://127.0.0.1:1"
+    )
     assert runner._plan_from({"job_id": "j1", "steps": [{"params": {"url": "https://x"}}]}) is None
     assert runner._plan_from({"job_id": "j1"}) is None
 
@@ -224,8 +246,10 @@ def test_a_robot_job_is_claimed_run_and_reported_succeeded(monkeypatch, tmp_path
     cloud = make_cloud(completions)
     try:
         runner = load_runner(monkeypatch, tmp_path, cloud=cloud.url, gateway=gateway.url)
-        runner._handle({"job_id": "j1", "steps": [{"params": {"plan": PLAN}}]},
-                       {"device_id": "dev-1", "device_secret": "s-1"})
+        runner._handle(
+            {"job_id": "j1", "steps": [{"params": {"plan": PLAN}}]},
+            {"device_id": "dev-1", "device_secret": "s-1"},
+        )
 
         assert "/api/devices/jobs/j1/claim" in cloud.paths()
         # The plan reached the gateway, wrapped in the contract it expects.
@@ -254,8 +278,10 @@ def test_a_job_this_device_cannot_run_is_failed_with_a_reason(monkeypatch, tmp_p
     cloud = make_cloud(completions)
     try:
         runner = load_runner(monkeypatch, tmp_path, cloud=cloud.url, gateway=gateway.url)
-        runner._handle({"job_id": "j2", "steps": [{"params": {"url": "https://x"}}]},
-                       {"device_id": "dev-1", "device_secret": "s-1"})
+        runner._handle(
+            {"job_id": "j2", "steps": [{"params": {"url": "https://x"}}]},
+            {"device_id": "dev-1", "device_secret": "s-1"},
+        )
         assert completions[-1]["status"] == "failed"
         assert "robot plans only" in completions[-1]["error_message"]
         assert gateway.state["plans"] == [], "nothing should reach the robot"
@@ -268,11 +294,15 @@ def test_a_gateway_refusal_fails_the_job_rather_than_retrying(monkeypatch, tmp_p
     becomes a collision."""
     completions: list[dict] = []
     cloud = make_cloud(completions)
-    refusing = Fake({"/v1/plans": lambda p, b: (400, {"detail": "a plan that moves must end with safe_stop"})})
+    refusing = Fake(
+        {"/v1/plans": lambda p, b: (400, {"detail": "a plan that moves must end with safe_stop"})}
+    )
     try:
         runner = load_runner(monkeypatch, tmp_path, cloud=cloud.url, gateway=refusing.url)
-        runner._handle({"job_id": "j3", "steps": [{"params": {"plan": PLAN}}]},
-                       {"device_id": "dev-1", "device_secret": "s-1"})
+        runner._handle(
+            {"job_id": "j3", "steps": [{"params": {"plan": PLAN}}]},
+            {"device_id": "dev-1", "device_secret": "s-1"},
+        )
         assert completions[-1]["status"] == "failed"
         assert len([p for p in refusing.paths() if p == "/v1/plans"]) == 1, "sent once, not retried"
     finally:
@@ -285,10 +315,12 @@ def test_an_unknown_outcome_is_not_reported_as_success(monkeypatch, tmp_path):
     to move, and it is certainly not success."""
     completions: list[dict] = []
     cloud = make_cloud(completions)
-    stuck = Fake({
-        "/v1/plans": lambda p, b: (200, {"session_id": "pln-1", "status": "navigating"}),
-        "/v1/deliveries/": lambda p, b: (200, {"session_id": "pln-1", "status": "navigating"}),
-    })
+    stuck = Fake(
+        {
+            "/v1/plans": lambda p, b: (200, {"session_id": "pln-1", "status": "navigating"}),
+            "/v1/deliveries/": lambda p, b: (200, {"session_id": "pln-1", "status": "navigating"}),
+        }
+    )
     try:
         runner = load_runner(monkeypatch, tmp_path, cloud=cloud.url, gateway=stuck.url)
         # The gateway in this test never states a bound, so the fallback is
@@ -296,13 +328,16 @@ def test_an_unknown_outcome_is_not_reported_as_success(monkeypatch, tmp_path):
         # how the suite hung for five minutes instead of failing.
         runner.DEFAULT_MISSION_WATCH_SECONDS = 0.2
         runner.GATEWAY_POLL_SECONDS = 0.05
-        runner._handle({"job_id": "j4", "steps": [{"params": {"plan": PLAN}}]},
-                       {"device_id": "dev-1", "device_secret": "s-1"})
+        runner._handle(
+            {"job_id": "j4", "steps": [{"params": {"plan": PLAN}}]},
+            {"device_id": "dev-1", "device_secret": "s-1"},
+        )
         done = completions[-1]
         assert done["status"] == "failed"
         assert "unknown" in done["error_message"]
-        assert "evidence" not in (done.get("variables") or {}), \
+        assert "evidence" not in (done.get("variables") or {}), (
             "an unknown outcome must not claim an arrival"
+        )
     finally:
         cloud.close()
         stuck.close()
@@ -317,10 +352,29 @@ def test_the_runner_needs_no_third_party_package():
     # and would make this test silently weaker on an older interpreter. These
     # are exactly what connected_runner.py drags in.
     FORBIDDEN = {
-        "RestrictedPython", "anthropic", "boto3", "botocore", "core",
-        "cryptography", "dotenv", "fastapi", "firebase_admin", "flyto_blueprint",
-        "google", "httpx", "hvac", "jwt", "psutil", "pydantic", "redis",
-        "requests", "stripe", "websockets", "yaml", "playwright", "rclpy",
+        "RestrictedPython",
+        "anthropic",
+        "boto3",
+        "botocore",
+        "core",
+        "cryptography",
+        "dotenv",
+        "fastapi",
+        "firebase_admin",
+        "flyto_blueprint",
+        "google",
+        "httpx",
+        "hvac",
+        "jwt",
+        "psutil",
+        "pydantic",
+        "redis",
+        "requests",
+        "stripe",
+        "websockets",
+        "yaml",
+        "playwright",
+        "rclpy",
     }
     tree = ast.parse(RUNNER_PATH.read_text())
     imported = set()
@@ -337,18 +391,27 @@ def test_a_failed_mission_reports_no_evidence_at_all(monkeypatch, tmp_path):
     down as an arrival, nor its last range reading as a clearance."""
     completions: list[dict] = []
     cloud = make_cloud(completions)
-    failing = Fake({
-        "/v1/plans": lambda p, b: (200, {"session_id": "pln-2", "status": "running"}),
-        "/v1/deliveries/": lambda p, b: (200, {
-            "session_id": "pln-2", "status": "failed",
-            "failure_reason": "obstacle_stop",
-            "pose": {"x": 0.1}, "minimum_range": 0.18,
-        }),
-    })
+    failing = Fake(
+        {
+            "/v1/plans": lambda p, b: (200, {"session_id": "pln-2", "status": "running"}),
+            "/v1/deliveries/": lambda p, b: (
+                200,
+                {
+                    "session_id": "pln-2",
+                    "status": "failed",
+                    "failure_reason": "obstacle_stop",
+                    "pose": {"x": 0.1},
+                    "minimum_range": 0.18,
+                },
+            ),
+        }
+    )
     try:
         runner = load_runner(monkeypatch, tmp_path, cloud=cloud.url, gateway=failing.url)
-        runner._handle({"job_id": "j5", "steps": [{"params": {"plan": PLAN}}]},
-                       {"device_id": "dev-1", "device_secret": "s-1"})
+        runner._handle(
+            {"job_id": "j5", "steps": [{"params": {"plan": PLAN}}]},
+            {"device_id": "dev-1", "device_secret": "s-1"},
+        )
         done = completions[-1]
         assert done["status"] == "failed"
         assert "obstacle_stop" in done["error_message"]
@@ -362,6 +425,7 @@ def test_the_gateways_own_terminal_state_is_recognised(monkeypatch, tmp_path):
     """MissionState.COMPLETED is "completed". Waiting for "succeeded" — which
     no gateway sends — made every real mission time out as outcome unknown."""
     from pathlib import Path as _Path
+
     source = _Path(__file__).resolve().parents[1] / "deploy" / "flyto_job_runner.py"
     text = source.read_text()
     assert '"completed"' in text
@@ -380,8 +444,10 @@ def test_the_lease_header_is_the_one_the_device_api_reads(monkeypatch, tmp_path,
     try:
         runner = load_runner(monkeypatch, tmp_path, cloud=cloud.url, gateway=gateway.url)
         assert runner.LEASE_HEADER == "x-flyto2-job-lease"
-        runner._handle({"job_id": "j6", "steps": [{"params": {"plan": PLAN}}]},
-                       {"device_id": "dev-1", "device_secret": "s-1"})
+        runner._handle(
+            {"job_id": "j6", "steps": [{"params": {"plan": PLAN}}]},
+            {"device_id": "dev-1", "device_secret": "s-1"},
+        )
         assert completions, "the completion was accepted, so the lease was recognised"
         sent = [h for p, h, _ in cloud.seen if p.endswith("/complete")][0]
         lowered = {k.lower(): v for k, v in sent.items()}
@@ -402,7 +468,9 @@ def test_a_canvas_authored_motion_step_becomes_a_plan(monkeypatch, tmp_path):
     a step means."""
     pytest.importorskip("flyto_modules_robotics.steps")
     monkeypatch.setenv("FLYTO_ROBOTICS_ROBOT_ID", "flyto-tb3-lab-001")
-    runner = load_runner(monkeypatch, tmp_path, cloud="http://127.0.0.1:1", gateway="http://127.0.0.1:1")
+    runner = load_runner(
+        monkeypatch, tmp_path, cloud="http://127.0.0.1:1", gateway="http://127.0.0.1:1"
+    )
 
     plan = runner._plan_from({"job_id": "j", "steps": [TURN_STEP]})
     assert plan["robot_id"] == "flyto-tb3-lab-001"
@@ -415,26 +483,38 @@ def test_without_a_robot_id_the_step_is_refused_rather_than_guessed(monkeypatch,
     here only becomes a refusal further from the cause."""
     pytest.importorskip("flyto_modules_robotics.steps")
     monkeypatch.delenv("FLYTO_ROBOTICS_ROBOT_ID", raising=False)
-    runner = load_runner(monkeypatch, tmp_path, cloud="http://127.0.0.1:1", gateway="http://127.0.0.1:1")
+    runner = load_runner(
+        monkeypatch, tmp_path, cloud="http://127.0.0.1:1", gateway="http://127.0.0.1:1"
+    )
     assert runner._plan_from({"job_id": "j", "steps": [TURN_STEP]}) is None
 
 
 def test_a_step_the_package_does_not_know_is_still_not_a_robot_job(monkeypatch, tmp_path):
     monkeypatch.setenv("FLYTO_ROBOTICS_ROBOT_ID", "flyto-tb3-lab-001")
-    runner = load_runner(monkeypatch, tmp_path, cloud="http://127.0.0.1:1", gateway="http://127.0.0.1:1")
-    assert runner._plan_from(
-        {"job_id": "j", "steps": [{"module": "browser.click", "params": {"selector": "#go"}}]}
-    ) is None
+    runner = load_runner(
+        monkeypatch, tmp_path, cloud="http://127.0.0.1:1", gateway="http://127.0.0.1:1"
+    )
+    assert (
+        runner._plan_from(
+            {"job_id": "j", "steps": [{"module": "browser.click", "params": {"selector": "#go"}}]}
+        )
+        is None
+    )
 
 
 def test_an_unbuildable_motion_step_is_refused_not_approximated(monkeypatch, tmp_path):
     """A distance out of bounds must not become the nearest allowed distance."""
     pytest.importorskip("flyto_modules_robotics.steps")
     monkeypatch.setenv("FLYTO_ROBOTICS_ROBOT_ID", "flyto-tb3-lab-001")
-    runner = load_runner(monkeypatch, tmp_path, cloud="http://127.0.0.1:1", gateway="http://127.0.0.1:1")
-    assert runner._plan_from(
-        {"job_id": "j", "steps": [{"module": "robotics.move", "params": {"distance_m": 99}}]}
-    ) is None
+    runner = load_runner(
+        monkeypatch, tmp_path, cloud="http://127.0.0.1:1", gateway="http://127.0.0.1:1"
+    )
+    assert (
+        runner._plan_from(
+            {"job_id": "j", "steps": [{"module": "robotics.move", "params": {"distance_m": 99}}]}
+        )
+        is None
+    )
 
 
 def test_the_watch_window_comes_from_the_mission_not_a_constant(monkeypatch, tmp_path):
@@ -443,9 +523,14 @@ def test_the_watch_window_comes_from_the_mission_not_a_constant(monkeypatch, tmp
     allows 600s, so a fixed 300s would call a legitimately running mission
     unknown at half time — and the cloud takes that "failed" at face value.
     """
-    runner = load_runner(monkeypatch, tmp_path, cloud="http://127.0.0.1:1", gateway="http://127.0.0.1:1")
+    runner = load_runner(
+        monkeypatch, tmp_path, cloud="http://127.0.0.1:1", gateway="http://127.0.0.1:1"
+    )
 
     assert runner._watch_seconds({"mission_timeout_seconds": 600.0}) == 620.0
     # A gateway that does not say falls back rather than waiting forever.
     assert runner._watch_seconds({}) == runner.DEFAULT_MISSION_WATCH_SECONDS
-    assert runner._watch_seconds({"mission_timeout_seconds": 0}) == runner.DEFAULT_MISSION_WATCH_SECONDS
+    assert (
+        runner._watch_seconds({"mission_timeout_seconds": 0})
+        == runner.DEFAULT_MISSION_WATCH_SECONDS
+    )

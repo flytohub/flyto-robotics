@@ -17,6 +17,7 @@ WORD = re.compile(r"[^\W_]+", re.UNICODE)
 MANIFEST_CONTRACT_VERSION = "flyto.capability-manifest.v1"
 ROUTE_CONTRACT_VERSION = "flyto.capability-route.v1"
 GOAL_FRAME_CONTRACT_VERSION = "flyto.goal-frame.v1"
+EXECUTION_CATALOG_CONTRACT_VERSION = "flyto.robotics.capability-catalog.v1"
 
 
 class CapabilityValidationError(ValueError):
@@ -493,6 +494,48 @@ class CapabilityRegistry:
             separators=(",", ":"),
         )
         return f"sha256:{hashlib.sha256(payload.encode('utf-8')).hexdigest()}"
+
+    def execution_catalog(self) -> dict[str, object]:
+        """Project approved runtime capabilities without granting motor authority."""
+        capabilities: list[dict[str, object]] = []
+        for manifest in self.catalog():
+            arguments = manifest["arguments"]
+            schema_payload = json.dumps(
+                arguments,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            capabilities.append(
+                {
+                    "capability_id": manifest["canonical_id"],
+                    "runtime_name": manifest["runtime_name"],
+                    "version": manifest["version"],
+                    "executor_kind": "flyto-robotics",
+                    "approval_status": "APPROVED",
+                    "safety_class": manifest["safety_class"],
+                    "requires_safe_stop": "robot_motion" in manifest["side_effects"],
+                    "required_observations": manifest["required_observations"],
+                    "required_resources": manifest["required_resources"],
+                    "required_permissions": manifest["required_permissions"],
+                    "arguments": arguments,
+                    "schema_hash": hashlib.sha256(
+                        schema_payload.encode("utf-8")
+                    ).hexdigest(),
+                }
+            )
+        payload = json.dumps(
+            capabilities,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return {
+            "contract_version": EXECUTION_CATALOG_CONTRACT_VERSION,
+            "registry_revision": 1,
+            "capabilities": capabilities,
+            "contract_hash": hashlib.sha256(payload.encode("utf-8")).hexdigest(),
+        }
 
     def route(
         self,

@@ -1,5 +1,45 @@
 # Decisions
 
+## 2026-08-08 — Installed resources describe themselves to Cloud
+
+Decision: an installation publishes `flyto.resource-manifest.v1` and
+`flyto.resource-telemetry.v1` through the exact existing paired-device
+identity. The manifest carries adapter identity, generic capability IDs,
+bounded setting descriptors, telemetry schemas, and presentation semantics.
+Secret settings may report only whether they are configured; their values are
+invalid contract data. Cloud stores a bounded latest sample per declared
+channel and exposes no command or actuator route on this surface. Simulation
+and real hardware use the same contracts and differ only by deployment
+provenance.
+
+Reason: a TurtleBot-, ROS-topic-, or fixed-field Cloud screen would have to be
+rewritten for every camera, arm, vehicle, simulator, and future adapter. A
+resource-owned schema lets one installation populate Cloud while keeping
+credentials and real-time control local, preserving the existing deterministic
+mission and safe-stop boundary.
+
+Presentation kinds are deliberately open, bounded identifiers rather than an
+enum. This lets software-workflow and future hardware adapters add semantics
+without changing the transport contract or forcing a Cloud release. Unknown
+kinds must remain inert and readable through the generic Cloud fallback.
+
+## 2026-08-08 — Judges draw mission cards; Robotics validates execution only
+
+Decision: Zone and Objective cards are physical competition inputs drawn by
+judges. An operator records the exact result as `card_source=judge_draw`.
+Robotics exposes no draw, shuffle, or random-task API and accepts only a
+versioned dispatch bound to immutable plan and assignment revisions, a current
+approved capability snapshot, and a READY Z1–Z4 plus START calibration.
+Movement dispatches end in `safe_stop`. Robotics action receipts are
+content-addressed `action.execution` observations and explicitly cannot satisfy
+the separate card evidence contract.
+
+Reason: allowing the product to draw its own task would weaken the competition
+challenge and make demonstrations irreproducible. Separating human challenge
+selection, control-plane planning, resource assignment, deterministic robot
+execution, and evidence-based completion also prevents action success from
+being misreported as mission success.
+
 ## 2026-08-01 — Robot MCP evidence is per-case, tiered, and content-addressed
 
 Decision: a release campaign contains at least 101 distinct cases. Every case

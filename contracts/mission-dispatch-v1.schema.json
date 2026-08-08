@@ -1,0 +1,134 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://flyto2.com/contracts/flyto.robotics.mission-dispatch.v1.schema.json",
+  "title": "Flyto Robotics Mission Dispatch v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract_version",
+    "task_id",
+    "space_id",
+    "objective_id",
+    "zone_id",
+    "zone_marker_id",
+    "card_source",
+    "resource_id",
+    "evidence_requirements",
+    "calibration",
+    "plan_revision",
+    "plan_hash",
+    "assignment_revision",
+    "capability_registry_hash",
+    "steps"
+  ],
+  "properties": {
+    "contract_version": { "const": "flyto.robotics.mission-dispatch.v1" },
+    "task_id": { "$ref": "#/$defs/identifier" },
+    "space_id": { "$ref": "#/$defs/identifier" },
+    "objective_id": { "$ref": "#/$defs/identifier" },
+    "zone_id": { "$ref": "#/$defs/identifier" },
+    "zone_marker_id": { "enum": ["Z1", "Z2", "Z3", "Z4"] },
+    "card_source": { "const": "judge_draw" },
+    "resource_id": { "$ref": "#/$defs/identifier" },
+    "evidence_requirements": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 16,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/evidence_kind" }
+    },
+    "calibration": { "$ref": "#/$defs/calibration" },
+    "plan_revision": { "type": "integer", "minimum": 1, "maximum": 1000000 },
+    "plan_hash": { "$ref": "#/$defs/hash" },
+    "assignment_revision": { "type": "integer", "minimum": 1, "maximum": 1000000 },
+    "capability_registry_hash": { "$ref": "#/$defs/hash" },
+    "steps": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 100,
+      "items": { "$ref": "#/$defs/step" }
+    }
+  },
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,127}$"
+    },
+    "hash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "evidence_kind": {
+      "enum": [
+        "action.execution",
+        "zone.overview",
+        "passage.clearance",
+        "device.identifier",
+        "arrival.pose",
+        "handover.confirmation",
+        "human.approval"
+      ]
+    },
+    "marker": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["marker_id", "x", "y", "yaw", "confidence", "source", "observed_at"],
+      "properties": {
+        "marker_id": { "$ref": "#/$defs/identifier" },
+        "x": { "type": "number", "minimum": -100000, "maximum": 100000 },
+        "y": { "type": "number", "minimum": -100000, "maximum": 100000 },
+        "yaw": { "type": "number", "minimum": -6.284, "maximum": 6.284 },
+        "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+        "source": { "enum": ["apriltag", "overhead_camera", "manual"] },
+        "observed_at": { "type": "string", "minLength": 1, "maxLength": 64 }
+      }
+    },
+    "calibration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contract_version",
+        "calibration_id",
+        "revision",
+        "coordinate_frame",
+        "status",
+        "markers",
+        "created_at",
+        "created_by",
+        "contract_hash"
+      ],
+      "properties": {
+        "contract_version": { "const": "flyto.space-calibration.v1" },
+        "calibration_id": { "$ref": "#/$defs/identifier" },
+        "revision": { "type": "integer", "minimum": 1, "maximum": 1000000 },
+        "coordinate_frame": { "$ref": "#/$defs/identifier" },
+        "status": { "const": "READY" },
+        "markers": {
+          "type": "array",
+          "minItems": 5,
+          "maxItems": 65,
+          "items": { "$ref": "#/$defs/marker" }
+        },
+        "created_at": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "created_by": { "type": "string", "maxLength": 128 },
+        "contract_hash": { "$ref": "#/$defs/hash" }
+      }
+    },
+    "step": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["step_id", "capability_id", "executor_kind", "arguments", "evidence_outputs"],
+      "properties": {
+        "step_id": { "$ref": "#/$defs/identifier" },
+        "capability_id": { "$ref": "#/$defs/identifier" },
+        "executor_kind": { "const": "flyto-robotics" },
+        "arguments": { "type": "object" },
+        "evidence_outputs": {
+          "type": "array",
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/evidence_kind" }
+        }
+      }
+    }
+  }
+}

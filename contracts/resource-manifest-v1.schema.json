@@ -1,0 +1,122 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://flyto2.com/contracts/resource-manifest-v1.schema.json",
+  "title": "Flyto2 installed resource manifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract",
+    "resource_id",
+    "resource_type",
+    "display_name",
+    "revision",
+    "adapter",
+    "deployment_mode",
+    "capability_ids",
+    "settings",
+    "telemetry_channels",
+    "observed_at",
+    "contract_hash"
+  ],
+  "properties": {
+    "contract": { "const": "flyto.resource-manifest.v1" },
+    "resource_id": { "$ref": "#/$defs/identifier" },
+    "resource_type": { "$ref": "#/$defs/identifier" },
+    "display_name": { "type": "string", "minLength": 1, "maxLength": 200 },
+    "revision": { "type": "integer", "minimum": 1, "maximum": 1000000 },
+    "adapter": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["adapter_id", "version", "provider"],
+      "properties": {
+        "adapter_id": { "$ref": "#/$defs/identifier" },
+        "version": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "provider": { "type": "string", "maxLength": 128 }
+      }
+    },
+    "deployment_mode": { "enum": ["real", "simulation", "hybrid"] },
+    "capability_ids": {
+      "type": "array",
+      "maxItems": 128,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/identifier" }
+    },
+    "settings": {
+      "type": "array",
+      "maxItems": 128,
+      "items": { "$ref": "#/$defs/setting" }
+    },
+    "telemetry_channels": {
+      "type": "array",
+      "maxItems": 128,
+      "items": { "$ref": "#/$defs/channel" }
+    },
+    "observed_at": { "type": "string", "minLength": 1, "maxLength": 64 },
+    "contract_hash": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+  },
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,127}$"
+    },
+    "setting": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "setting_id",
+        "display_name",
+        "value_kind",
+        "value",
+        "configured",
+        "secret",
+        "mutable",
+        "unit",
+        "options",
+        "description"
+      ],
+      "properties": {
+        "setting_id": { "$ref": "#/$defs/identifier" },
+        "display_name": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "value_kind": { "enum": ["string", "integer", "number", "boolean", "enum"] },
+        "value": { "type": ["string", "integer", "number", "boolean", "null"] },
+        "configured": { "type": "boolean" },
+        "secret": { "type": "boolean" },
+        "mutable": { "type": "boolean" },
+        "unit": { "type": "string", "maxLength": 32 },
+        "options": {
+          "type": "array",
+          "maxItems": 64,
+          "items": { "type": "string", "minLength": 1, "maxLength": 200 }
+        },
+        "description": { "type": "string", "maxLength": 500 }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "secret": { "const": true } }, "required": ["secret"] },
+          "then": { "properties": { "value": { "type": "null" } } }
+        }
+      ]
+    },
+    "channel": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["channel_id", "display_name", "payload_schema", "presentation", "max_age_seconds"],
+      "properties": {
+        "channel_id": { "$ref": "#/$defs/identifier" },
+        "display_name": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "payload_schema": { "type": "object", "maxProperties": 128 },
+        "presentation": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "unit", "precision"],
+          "properties": {
+            "kind": { "$ref": "#/$defs/identifier" },
+            "unit": { "type": "string", "maxLength": 32 },
+            "precision": { "type": "integer", "minimum": 0, "maximum": 8 }
+          }
+        },
+        "max_age_seconds": { "type": "number", "minimum": 0.1, "maximum": 86400 }
+      }
+    }
+  }
+}

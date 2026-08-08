@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, Literal, Sequence
+from typing import Any, Literal
 
 from .capabilities import SAFE_TEXT
 from .contracts import RESULT_CONTRACT_VERSION, DeliveryJob, StationPose
@@ -18,9 +19,7 @@ from .workflow import (
     hospital_delivery_workflow,
 )
 
-TERMINAL_STATES = frozenset(
-    {MissionState.COMPLETED, MissionState.FAILED, MissionState.CANCELLED}
-)
+TERMINAL_STATES = frozenset({MissionState.COMPLETED, MissionState.FAILED, MissionState.CANCELLED})
 
 SensorGateDecision = Literal["wait", "ready", "fail_not_ready", "fail_stale"]
 
@@ -177,7 +176,7 @@ def sector_field(
     angle_increment: float,
     range_min: float = 0.0,
     range_max: float = math.inf,
-) -> "RangeField":
+) -> RangeField:
     """Turn one sweep into the nearest return per sector.
 
     Pure, and taking plain numbers rather than a LaserScan, so the arithmetic
@@ -229,7 +228,7 @@ class RangeField:
     directional: bool = False
 
     @classmethod
-    def omnidirectional(cls, minimum_range: float) -> "RangeField":
+    def omnidirectional(cls, minimum_range: float) -> RangeField:
         """One reading in every direction, the shape callers used to pass."""
         return cls(closest=minimum_range, directional=False)
 
@@ -243,7 +242,6 @@ class RangeField:
             # been let down by a guard that only watched where it was going.
             return min(self.forward, self.left, self.right, self.rear), "in the turn"
         return self.forward, "ahead"
-
 
 
 class MissionController:
@@ -427,9 +425,7 @@ class MissionController:
         self.turn_origin_yaw = None
         self.clear_since = None
         self.clearance_blocked = False
-        target_detail = (
-            f" at {step.station.station_id}" if step.station is not None else ""
-        )
+        target_detail = f" at {step.station.station_id}" if step.station is not None else ""
         self._transition(
             step.active_state,
             now,
@@ -561,7 +557,7 @@ class MissionController:
             minimum_range,
             now,
             intent=INTENT_REVERSE
-            if float(self._current_step().argument('distance_m') or 0.0) < 0
+            if float(self._current_step().argument("distance_m") or 0.0) < 0
             else INTENT_FORWARD,
         )
         if guarded is not None:
@@ -677,9 +673,7 @@ class MissionController:
         color = str(step.argument("color"))
         minimum_follow = float(step.argument("minimum_follow_seconds", 0.5))
         target = line_scene.get(color) if line_scene is not None else None
-        followed_for = (
-            now - self.line_acquired_at if self.line_acquired_at is not None else 0.0
-        )
+        followed_for = now - self.line_acquired_at if self.line_acquired_at is not None else 0.0
 
         completion = str(step.argument("completion", "line_end"))
         next_color = step.argument("next_color")
@@ -725,9 +719,7 @@ class MissionController:
             return Command(0.0, 0.0, self.state, f"waiting_for_{color}")
 
         lost_for = now - (self.line_last_seen_at or now)
-        transition_search_seconds = float(
-            step.argument("transition_search_seconds", 1.5)
-        )
+        transition_search_seconds = float(step.argument("transition_search_seconds", 1.5))
         if completion == "next_color" and lost_for < transition_search_seconds:
             transition_speed = min(
                 0.10,
