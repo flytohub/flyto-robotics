@@ -2,6 +2,43 @@
 
 ## Current
 
+- Card-free recovery is now an installation invariant rather than an ad-hoc
+  card-edit procedure. The idempotent installer enables Pi USB gadget Ethernet
+  at `10.77.0.1`, stable per-device MAC addresses, local DHCP, existing
+  key-only SSH, a read-only diagnostic portal, and a one-minute doctor timer.
+  The doctor produces privacy-bounded `flyto.resource-telemetry.v1` snapshots
+  for current health and the last failure. Stable reasons distinguish
+  provisioning, Wi-Fi association, DHCP, route, DNS, Cloud reachability, and
+  robot-service failures. This layer is observation/management only and adds
+  no actuator or credential endpoint. Host-side contract tests pass; the
+  installer still requires one physical Pi deployment/reboot verification.
+
+- Installed adapters can now publish generic Cloud resource state through
+  `flyto-resource-agent`. The versioned `flyto.resource-manifest.v1` contract
+  carries capability IDs, non-secret setting values, secret configured-state,
+  telemetry schemas, and semantic presentation hints;
+  `flyto.resource-telemetry.v1` carries bounded content-addressed latest
+  samples. The publisher uses the existing exact paired-device bearer,
+  requires HTTPS or loopback HTTP, refuses redirect credential forwarding, and
+  exposes no command or motor endpoint. Real and simulated installations share
+  the same contract shape. Presentation kinds are open safe identifiers, with
+  generic fallback for kinds Cloud does not yet enhance. Contract schemas and
+  focused tests are included.
+
+- Mission Stations now have a transport-neutral robot execution boundary.
+  `GET /v1/capabilities` publishes a content-addressed, APPROVED projection of
+  the existing atomic registry; `POST /v1/missions/validate` accepts only the
+  matching snapshot, explicit `flyto-robotics` executor steps, bounded
+  arguments, exact plan/assignment revisions, and a READY venue calibration.
+  The dispatch records `card_source=judge_draw`: judges draw the physical Zone
+  and Objective cards, an operator records them, and Robotics never draws or
+  randomizes the task.
+- Physical dispatch fails closed unless calibration contains Z1, Z2, Z3, Z4,
+  and START. Movement must end in `safe_stop`; raw actuator fields and unknown
+  capabilities are rejected before any controller or adapter starts. Action
+  receipts use `action.execution` with `task_completion_eligible=false`, so a
+  successful robot step cannot falsely complete a task whose judge-card
+  evidence is still missing.
 - Independent project boundary selected.
 - Reference stack: ROS 2 Jazzy, Gazebo Harmonic, Ubuntu 24.04.
 - Initial scenario: synthetic pharmacy-to-ward autonomous delivery.

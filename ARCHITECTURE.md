@@ -12,6 +12,106 @@
 - Gazebo and physical bases expose the same velocity, odometry, and range
   semantics to the adapter.
 
+## Installed resource registration and telemetry
+
+`flyto-resource-agent` is the outbound-only installation boundary between any
+adapter and Flyto Cloud. It publishes two independent JSON contracts:
+
+```text
+local adapter
+  → flyto.resource-manifest.v1
+      identity + adapter version + capabilities
+      non-secret settings (secret settings expose configured=true only)
+      telemetry schemas + bounded presentation semantics
+  → paired-device HTTPS identity
+  → Flyto Cloud resource inventory
+
+local adapter observations
+  → flyto.resource-telemetry.v1
+      resource + channel + monotonic sequence + quality + bounded payload
+  → Flyto Cloud latest-sample read model
+```
+
+Real hardware and simulation emit the same envelopes. Only
+`deployment_mode=real|simulation|hybrid` and adapter provenance differ. Cloud
+does not receive ROS topic names, implementation modules, network endpoints,
+credentials, or raw actuator commands. Presentation kinds are bounded safe
+identifiers, so an adapter may publish a namespaced future kind such as
+`partner.timeline.v2`. Cloud may enhance known kinds with reusable primitives;
+unknown kinds remain inert data rendered through the generic fallback.
+
+The paired-device credential is read from an owner-only installation file at
+request time, sent only in the HTTPS Authorization header, never included in a
+manifest or telemetry body, and never followed across redirects. Manifest
+revisions and telemetry sequences advance independently. Telemetry is a
+read-only observation path; mission dispatch, approval, leasing, safe-stop,
+and evidence continue through their existing versioned control contracts.
+
+## Permanent recovery and diagnostic boundary
+
+Cloud dispatch and resource publication are outbound-only. When the robot has
+no usable network, Cloud cannot query the cause of that same network loss. A
+one-time installation therefore creates a separate, local recovery boundary:
+
+```text
+system observations (no raw logs, SSID, IP, or credential)
+  → stable diagnostic reason + action codes
+  → flyto.resource-telemetry.v1
+      ├── latest + last-failure snapshots on the robot
+      ├── generic outbound Cloud resource telemetry when internet exists
+      └── read-only HTTP on USB gadget address 10.77.0.1
+
+operator laptop → USB gadget Ethernet → local portal / existing key-only SSH
+```
+
+The USB path is management-only. It exposes neither job dispatch nor motor
+control, does not bridge or masquerade traffic, and does not accept Wi-Fi or
+Cloud credentials. The diagnostic classifier is deterministic and ordered:
+provisioning, interface, association, address, route, DNS, Cloud reachability,
+then robot-service health. Ethernet or another healthy uplink satisfies the
+network gate even when Wi-Fi itself is dormant.
+
+The current and last-failure snapshots share the same generic resource
+telemetry contract used by simulation and other installed adapters. Cloud may
+render known diagnostic fields, but Robotics owns reason production and Cloud
+must retain a generic fallback. If the recovery surface is removed, mission
+execution and the outbound job runner remain unchanged.
+
+## Mission Stations dispatch boundary
+
+```text
+judge physically draws Zone + Objective cards
+  → operator records exact card IDs in the control plane
+  → immutable Task / Plan revision / Assignment revision
+  → venue calibration revision (Z1–Z4 + START)
+  → flyto.robotics.mission-dispatch.v1
+  → registry snapshot + schema + policy validation
+  → deterministic controller / perception adapter
+  → action.execution receipt (never task-completing evidence)
+  → separate card-defined evidence evaluation in the control plane
+```
+
+Robotics never draws cards and has no random-task endpoint. It consumes one
+already selected judge-card contract and validates only the execution slice.
+`executor_kind` is explicit; the gateway does not infer which engine should
+run a step. The capability catalog projects only locally registered atomic
+capabilities as `APPROVED` and content-addresses both each argument schema and
+the complete reviewed snapshot.
+
+Portable stations have stable marker identities rather than fixed venue
+coordinates. A READY calibration must contain Z1, Z2, Z3, Z4, and START, with
+its content hash verified before dispatch. AprilTag, overhead-camera, and
+manual calibration sources share that contract. The same dispatch is consumed
+for simulation and physical hardware; only the lower adapter changes.
+
+Raw velocity, PWM, ROS-topic, and arbitrary-command fields are absent from the
+schema and rejected by the parser. Any movement-bearing dispatch ends in the
+existing `safe_stop` primitive. A step success is emitted as a nested
+Cloud-compatible `action.execution` observation inside a versioned Robotics
+envelope; it is explicitly marked `task_completion_eligible=false`. Only the
+control plane can decide whether independent judge-card evidence completes the
+Task.
+
 ## AI-native atomic composition
 
 The dependency direction is one-way:

@@ -1,0 +1,41 @@
+minimumLimaVersion: 2.0.0
+
+base:
+  - template:ubuntu-24.04
+
+vmType: vz
+arch: aarch64
+cpus: 4
+memory: 4GiB
+disk: 48GiB
+mountType: virtiofs
+
+containerd:
+  system: false
+  user: false
+
+mounts:
+  - location: "{{.Param.Repo}}"
+    mountPoint: /mnt/flyto-robotics
+    writable: false
+
+audio:
+  device: none
+video:
+  display: none
+
+hostResolver:
+  enabled: true
+  ipv6: false
+
+env:
+  ROS_DOMAIN_ID: "30"
+  TURTLEBOT3_MODEL: burger
+
+param:
+  Repo: /tmp
+
+message: |
+  Flyto TurtleBot3 Gazebo lab is ready.
+  The host source is mounted read-only at /mnt/flyto-robotics.
+  Use the repository run/stop/verify scripts instead of starting Docker.

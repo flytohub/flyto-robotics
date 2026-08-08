@@ -29,6 +29,7 @@ What it deliberately does not do:
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
@@ -71,9 +72,7 @@ GATEWAY_POLL_SECONDS = 1.0
 # every real mission would have been reported as "outcome unknown" after the
 # full five-minute watch. "succeeded" is kept only because the delivery
 # adapter's own tests speak it.
-TERMINAL_STATES = frozenset(
-    {"completed", "succeeded", "failed", "cancelled", "aborted"}
-)
+TERMINAL_STATES = frozenset({"completed", "succeeded", "failed", "cancelled", "aborted"})
 SUCCESS_STATES = frozenset({"completed", "succeeded"})
 
 # The header the device API reads a claim's lease from — api/devices/
@@ -115,8 +114,12 @@ def _call(
         return json.loads(body) if body else {}
 
 
-def _post(base: str, path: str, payload: Any, headers: dict[str, str], timeout: float = 35.0) -> Any:
-    return _call(base, path, payload=payload if payload is not None else {}, headers=headers, timeout=timeout)
+def _post(
+    base: str, path: str, payload: Any, headers: dict[str, str], timeout: float = 35.0
+) -> Any:
+    return _call(
+        base, path, payload=payload if payload is not None else {}, headers=headers, timeout=timeout
+    )
 
 
 # -- credentials ---------------------------------------------------------
@@ -200,7 +203,9 @@ def _plan_from(job: dict[str, Any]) -> dict[str, Any] | None:
             candidate = Path(reference)
             # Confined to the plans directory: a job must not be able to name an
             # arbitrary path on this machine.
-            root = Path(os.getenv("FLYTO_PLAN_ROOT", "/home/ubuntu/flyto-robotics/examples/plans")).resolve()
+            root = Path(
+                os.getenv("FLYTO_PLAN_ROOT", "/home/ubuntu/flyto-robotics/examples/plans")
+            ).resolve()
             resolved = (root / candidate.name).resolve()
             if resolved.parent == root and resolved.is_file():
                 return json.loads(resolved.read_text())
@@ -286,9 +291,7 @@ def _run_plan(plan: dict[str, Any], job_id: str) -> dict[str, Any]:
         if state in TERMINAL_STATES:
             return {
                 "status": "succeeded" if state in SUCCESS_STATES else "failed",
-                "detail": str(
-                    latest.get("failure_reason") or latest.get("reason") or state
-                )[:300],
+                "detail": str(latest.get("failure_reason") or latest.get("reason") or state)[:300],
                 # The session payload spells this "pose"; "final_pose" is the
                 # fixtures' name. Reading only the latter meant a real mission
                 # produced no arrival evidence at all.
@@ -300,7 +303,9 @@ def _run_plan(plan: dict[str, Any], job_id: str) -> dict[str, Any]:
                 "minimum_range": latest.get("minimum_range"),
             }
         time.sleep(GATEWAY_POLL_SECONDS)
-        latest = _call(GATEWAY_URL, f"/v1/deliveries/{session_id}", headers=gateway_headers, timeout=15.0)
+        latest = _call(
+            GATEWAY_URL, f"/v1/deliveries/{session_id}", headers=gateway_headers, timeout=15.0
+        )
 
     # Not knowing an outcome is not the same as the mission having failed, and
     # the gateway still owns the robot. Report it as what it is.
@@ -475,7 +480,13 @@ def main() -> int:
         try:
             now = time.monotonic()
             if now - last_heartbeat >= HEARTBEAT_INTERVAL_SECONDS:
-                _post(CLOUD_URL, f"/api/devices/{credentials['device_id']}/heartbeat", {}, headers, timeout=15.0)
+                _post(
+                    CLOUD_URL,
+                    f"/api/devices/{credentials['device_id']}/heartbeat",
+                    {},
+                    headers,
+                    timeout=15.0,
+                )
                 last_heartbeat = now
 
             body = _post(
@@ -493,7 +504,9 @@ def main() -> int:
                 time.sleep(IDLE_DELAY_SECONDS)
         except urllib.error.HTTPError as exc:
             if exc.code in (401, 403):
-                logger.error("credential rejected (%s); delete %s and pair again", exc.code, CREDENTIAL_FILE)
+                logger.error(
+                    "credential rejected (%s); delete %s and pair again", exc.code, CREDENTIAL_FILE
+                )
                 return 3
             # Say what the server said. Backing off with only "retrying in 6s"
             # is how a job that finished on the robot but could not be reported
@@ -512,10 +525,10 @@ def main() -> int:
             logger.warning("poll failed", exc_info=True)
             _back_off(failures)
 
-    try:
-        _post(CLOUD_URL, f"/api/devices/{credentials['device_id']}/offline", {}, headers, timeout=10.0)
-    except Exception:  # noqa: BLE001 - going offline politely is best effort
-        pass
+    with contextlib.suppress(Exception):
+        _post(
+            CLOUD_URL, f"/api/devices/{credentials['device_id']}/offline", {}, headers, timeout=10.0
+        )
     logger.info("stopped")
     return 0
 
