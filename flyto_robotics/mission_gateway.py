@@ -7,14 +7,27 @@ import hmac
 import ipaddress
 import json
 import math
+import os
 import re
 import threading
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Any
 
 from .capabilities import CapabilityRegistry, CapabilityValidationError
+from .safety_profile import (
+    CONSTRAINABLE,
+    DEFAULT_AUDIT_PATH,
+    DEFAULT_PROFILE_PATH,
+    PROFILE_CONTRACT_VERSION,
+    SafetyProfileError,
+    audit_tail,
+    load_profile,
+    update_profile,
+)
 
 MISSION_DISPATCH_CONTRACT_VERSION = "flyto.robotics.mission-dispatch.v1"
 CALIBRATION_CONTRACT_VERSION = "flyto.space-calibration.v1"
@@ -301,6 +314,14 @@ class MissionGateway:
         self.port = port
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
+        # Outside the deployed tree: a site limit inside it would be replaced
+        # by the next git pull, which is the opposite of what it is for.
+        self.safety_profile_path = Path(
+            os.getenv("FLYTO_SAFETY_PROFILE", DEFAULT_PROFILE_PATH)
+        )
+        self.safety_audit_path = Path(
+            os.getenv("FLYTO_SAFETY_PROFILE_AUDIT", DEFAULT_AUDIT_PATH)
+        )
 
     @property
     def address(self) -> tuple[str, int]:
@@ -335,6 +356,8 @@ class MissionGateway:
                     self._send(401, {"error": "unauthorized"})
                 elif self.path == "/v1/capabilities":
                     self._send(200, gateway.registry.execution_catalog())
+                elif self.path == "/v1/safety-profile":
+                    self._send(200, gateway.safety_profile_view())
                 else:
                     self._send(404, {"error": "not_found"})
 
@@ -342,7 +365,7 @@ class MissionGateway:
                 if not self._authorized():
                     self._send(401, {"error": "unauthorized"})
                     return
-                if self.path != "/v1/missions/validate":
+                if self.path not in ("/v1/missions/validate", "/v1/safety-profile"):
                     self._send(404, {"error": "not_found"})
                     return
                 try:
@@ -351,6 +374,18 @@ class MissionGateway:
                     length = 0
                 if not 1 <= length <= 262_144:
                     self._send(400, {"error": "invalid_body_length"})
+                    return
+                if self.path == "/v1/safety-profile":
+                    try:
+                        payload = json.loads(self.rfile.read(length))
+                        record = gateway.update_safety_profile(payload)
+                    except (json.JSONDecodeError, SafetyProfileError) as exc:
+                        self._send(
+                            400,
+                            {"error": "safety_profile_invalid", "detail": str(exc)[:200]},
+                        )
+                        return
+                    self._send(200, {"ok": True, "change": record})
                     return
                 try:
                     payload = json.loads(self.rfile.read(length))
@@ -366,6 +401,45 @@ class MissionGateway:
         self._server = ThreadingHTTPServer((self.host, self.port), Handler)
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
         self._thread.start()
+
+    # -- the installation's own safety limits ----------------------------
+
+    def safety_profile_view(self) -> dict[str, object]:
+        """The limits in force here, and how they came to be that way.
+
+        Returned together on purpose: a limit without its history invites
+        "who set this to 0.2?" and no way to answer.
+        """
+        return {
+            "contract_version": PROFILE_CONTRACT_VERSION,
+            "limits": load_profile(self.safety_profile_path),
+            "constrainable": dict(CONSTRAINABLE),
+            "recent_changes": audit_tail(self.safety_audit_path),
+        }
+
+    def update_safety_profile(self, payload: object) -> dict[str, object]:
+        """Set the site limits, recording who and why.
+
+        Takes effect at the next job load. A mission already running resolved
+        its limits when it started, so this cannot reach into one in flight —
+        which is why nothing here needs to take a lock.
+        """
+        if not isinstance(payload, Mapping):
+            raise SafetyProfileError("body must be a JSON object")
+        unknown = sorted(set(payload) - {"limits", "changed_by", "reason"})
+        if unknown:
+            raise SafetyProfileError(f"unexpected fields: {', '.join(unknown)}")
+        limits = payload.get("limits")
+        if not isinstance(limits, Mapping):
+            raise SafetyProfileError("limits must be an object")
+        return update_profile(
+            self.safety_profile_path,
+            self.safety_audit_path,
+            limits=limits,
+            changed_by=str(payload.get("changed_by", "")),
+            reason=str(payload.get("reason", "")),
+            at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        )
 
     def stop(self) -> None:
         if self._server is None:
