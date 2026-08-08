@@ -47,6 +47,36 @@ revisions and telemetry sequences advance independently. Telemetry is a
 read-only observation path; mission dispatch, approval, leasing, safe-stop,
 and evidence continue through their existing versioned control contracts.
 
+## Permanent recovery and diagnostic boundary
+
+Cloud dispatch and resource publication are outbound-only. When the robot has
+no usable network, Cloud cannot query the cause of that same network loss. A
+one-time installation therefore creates a separate, local recovery boundary:
+
+```text
+system observations (no raw logs, SSID, IP, or credential)
+  → stable diagnostic reason + action codes
+  → flyto.resource-telemetry.v1
+      ├── latest + last-failure snapshots on the robot
+      ├── generic outbound Cloud resource telemetry when internet exists
+      └── read-only HTTP on USB gadget address 10.77.0.1
+
+operator laptop → USB gadget Ethernet → local portal / existing key-only SSH
+```
+
+The USB path is management-only. It exposes neither job dispatch nor motor
+control, does not bridge or masquerade traffic, and does not accept Wi-Fi or
+Cloud credentials. The diagnostic classifier is deterministic and ordered:
+provisioning, interface, association, address, route, DNS, Cloud reachability,
+then robot-service health. Ethernet or another healthy uplink satisfies the
+network gate even when Wi-Fi itself is dormant.
+
+The current and last-failure snapshots share the same generic resource
+telemetry contract used by simulation and other installed adapters. Cloud may
+render known diagnostic fields, but Robotics owns reason production and Cloud
+must retain a generic fallback. If the recovery surface is removed, mission
+execution and the outbound job runner remain unchanged.
+
 ## Mission Stations dispatch boundary
 
 ```text

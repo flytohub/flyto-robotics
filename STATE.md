@@ -2,6 +2,17 @@
 
 ## Current
 
+- Card-free recovery is now an installation invariant rather than an ad-hoc
+  card-edit procedure. The idempotent installer enables Pi USB gadget Ethernet
+  at `10.77.0.1`, stable per-device MAC addresses, local DHCP, existing
+  key-only SSH, a read-only diagnostic portal, and a one-minute doctor timer.
+  The doctor produces privacy-bounded `flyto.resource-telemetry.v1` snapshots
+  for current health and the last failure. Stable reasons distinguish
+  provisioning, Wi-Fi association, DHCP, route, DNS, Cloud reachability, and
+  robot-service failures. This layer is observation/management only and adds
+  no actuator or credential endpoint. Host-side contract tests pass; the
+  installer still requires one physical Pi deployment/reboot verification.
+
 - Installed adapters can now publish generic Cloud resource state through
   `flyto-resource-agent`. The versioned `flyto.resource-manifest.v1` contract
   carries capability IDs, non-secret setting values, secret configured-state,

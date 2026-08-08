@@ -1,0 +1,21 @@
+[Unit]
+Description=Flyto read-only USB recovery portal
+After=systemd-networkd.service flyto-robot-doctor.service
+Wants=flyto-robot-doctor.service
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/flyto-robotics
+ExecStart=/usr/bin/python3 -m flyto_robotics.recovery_portal --host 10.77.0.1 --port 8770
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=read-only
+ProtectSystem=strict
+RestrictAddressFamilies=AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target
+

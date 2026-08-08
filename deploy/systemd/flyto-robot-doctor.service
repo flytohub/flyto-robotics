@@ -1,0 +1,16 @@
+[Unit]
+Description=Flyto robot network and service diagnostic snapshot
+After=network.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/ubuntu/flyto-robotics
+EnvironmentFile=/etc/flyto/robot-recovery.env
+ExecStart=/usr/bin/python3 -m flyto_robotics.robot_doctor --resource-id ${FLYTO_ROBOT_RESOURCE_ID} --cloud-url ${FLYTO_CLOUD_URL}
+UMask=0022
+StateDirectory=flyto-robot
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=read-only
+ProtectSystem=strict
+ReadWritePaths=/var/lib/flyto-robot
