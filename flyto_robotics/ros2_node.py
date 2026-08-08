@@ -404,8 +404,11 @@ class MissionNode(Node):
             blocking = unready_sensors(
                 last_seen=last_seen, now=steady_now, freshness_timeout=timeout
             )
-            if self.last_pose is None:
-                blocking.append("odometry: no pose parsed from any message")
+            # Only worth saying when messages ARE arriving: that is a different
+            # fault (unusable payload) from silence, and needs a different fix.
+            # Reporting both for a topic nobody publishes reads as two problems.
+            if self.last_pose is None and self.last_odometry_at is not None:
+                blocking.append("odometry: messages arriving but no pose parsed")
             self.get_logger().error(
                 f"{reason} after {steady_now - self.started_at_steady:.1f}s: "
                 + (
