@@ -706,3 +706,15 @@ post-change verification requirements.
 
 See `PRODUCT.md` for the full product positioning, examples, current
 implementation, differentiation, and roadmap.
+
+## Licence
+
+Apache-2.0. See [LICENSE](LICENSE).
+
+This repository is the reference implementation of the robot side of the Flyto2
+contract, and it is licensed so it can be copied. A vendor integrating their own
+hardware is expected to fork it, keep the capability contract and the safe-stop
+guarantee, and replace the driver underneath — that is the intended use, not an
+edge case. The companion workflow steps ship separately in
+[flyto-modules-robotics](https://github.com/flytohub/flyto-modules-robotics),
+also Apache-2.0.
