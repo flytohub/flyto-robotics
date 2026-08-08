@@ -86,32 +86,92 @@ with them and is covered now too.
 Both regression tests were confirmed to **fail against the previous behaviour**
 before being kept. A test that has never been red is not evidence.
 
-## What is suspected and NOT proven
+## The probe hypothesis was wrong
 
-**That the clearance probe is what delays discovery.** The correlation is
-perfect across six runs, and the mechanism is plausible — the probe joins and
-leaves the DDS graph immediately before the mission node comes up. But the
-decisive experiment (`left` *with* a probe in front of it, which should then
-fail) was never run: **the robot went off the network mid-diagnosis** and did
-not come back.
+An earlier revision of this handoff suspected the clearance probe of delaying
+discovery: the correlation was perfect across the first six runs and the
+mechanism was plausible. **Twelve alternating runs on the robot refuted it**,
+with a fixed 5s quiet gap before each mission so the previous mission's
+teardown was not the variable:
 
-`scripts/move-robot.sh` pauses 2s between probe and mission
-(`DISCOVERY_SETTLE_SECONDS`), and its comment says the link is unproven. If the
-pause turns out to be unnecessary, delete it — do not leave it as folklore.
+| arm | n | median | max | over 1s |
+|---|---|---|---|---|
+| no probe | 6 | 2.108s | 2.598s | 4 |
+| probe first | 6 | 2.067s | 2.471s | 5 |
+
+No difference. The 2s settle pause has been removed from
+`scripts/move-robot.sh`; the comment there now records why, so nobody adds it
+back on the same reasoning.
+
+## What is actually going on, with the arithmetic
+
+**Odometry discovery latency is intrinsic and wildly variable** — 0.007s to
+2.598s across those twelve runs, and 9.1s in the original failing `backward`.
+Nothing in front of it changes the number.
+
+The budget it runs against is tighter than it looks. `ros2_node` declares
+`sensor_startup_grace_seconds = 10.0` and `sensor_stabilization_seconds = 1.0`,
+and `evaluate_sensor_gate` requires the sensors to stay fresh for the
+stabilization window *before* the grace expires. So the real budget for
+discovery is **9.0s, not 10s**.
+
+Odometry arrived at **9.1s** in the `backward` run. It missed by 0.1 second.
+The `forward` run never saw odometry at all inside the window. Both then failed
+`required_sensor_not_ready` — correctly. The gate was doing its job on a robot
+whose discovery was late.
+
+That failure said only `failed  x=None y=None yaw=None`, which is why this took
+a day to read. It now names the sensor and how late it was
+(`mission.unready_sensors`, tested). The result contract keeps the same reason
+code; only the operator-facing log gained the detail.
+
+**Not yet decided: whether 10.0s is the right grace.** Discovery has been
+observed at 9.1s, so the current default fails roughly whenever the tail is
+hit. Raising it is safe in the sense that the node publishes a stop and refuses
+to move for the whole waiting period — it only extends patience, never
+permission. It has been left alone because it is a safety parameter and the
+choice is the owner's, not something to change while diagnosing something else.
+
+## Verified on the robot
+
+Both refusal paths were run on the real machine after the fix was deployed:
+
+```
+clearance front: 0.21 m
+REFUSED: needs 0.70 m to move 0.40 m safely.                      exit 3
+
+clearance front: unreadable (no usable lidar return)
+REFUSED: cannot see front. No usable return on /no_such_scan in 20s,
+         so there is no clearance to check.                        exit 4
+```
+
+The second is the case that previously reported 99 m and drove. The robot did
+not move in either.
+
+`/cmd_vel` binding was observed settling on `TwistStamped` in every one of the
+twelve runs, with no `no subscriber` warning — the type resolution is behaving.
+
+## Where the robot is
+
+Measured with the new module, all four sectors:
+
+| front | left | rear | right |
+|---|---|---|---|
+| 0.21 m | 0.54 m | 0.41 m | 1.32 m |
+
+**It is in a corner.** 0.21 m is inside the controller's own stop distance, so
+even a turn in place trips a safety stop — every one of the twelve runs above
+ended `failed` with `safety_stops=1`, which is the safety system working, not
+a defect. Nothing will drive until it is physically moved; right is the only
+open side.
 
 ## What the next person must do
 
-1. **Run the experiment above.** It is one command and it either confirms or
-   kills the hypothesis.
-2. **The robot still has the old `~/move.sh`** with the fail-open in it.
-   Replace it with `scripts/move-robot.sh`. The checkout is a real git clone
-   now, so a pull is enough.
-3. **Neither fix has run on hardware.** Everything here is verified against
-   tests and code; nothing in this handoff was demonstrated on the robot.
-   `make verify` passes — ruff clean, 428 passed, 3 skipped.
-4. **The robot was boxed in** at 0.36 m front and rear when last measured. Move
-   it before expecting `forward` to do anything except refuse — which, after
-   these changes, is what it will correctly do.
+1. **Move the robot into open space.** Every motion test is meaningless until
+   then, and a `failed` result there means "correctly refused", not "broken".
+2. **Decide on `sensor_startup_grace_seconds`.** See the arithmetic above: the
+   effective budget is 9.0s and discovery has been seen at 9.1s.
+3. `make verify` passes — ruff clean, 435 passed, 3 skipped.
 
 ## Two notes on the tooling
 

@@ -52,6 +52,42 @@ def evaluate_sensor_gate(
     return "wait"
 
 
+def unready_sensors(
+    *,
+    last_seen: dict[str, float | None],
+    now: float,
+    freshness_timeout: float,
+) -> list[str]:
+    """Name the sensors holding the gate shut, in operator language.
+
+    :func:`evaluate_sensor_gate` answers whether to drive. It deliberately does
+    not say why, because the control loop does not need to know. An operator
+    does: a mission that prints only ``failed`` leaves them guessing at which
+    of odometry, lidar and camera never showed up, and the guess is usually
+    wrong. Discovery latency here has been measured between 7ms and 9.1s
+    against a 9s effective budget, so "which one was late" is the whole
+    question when a run fails.
+
+    :param last_seen: sensor name to the monotonic time of its last sample, or
+        ``None`` if none has ever arrived.
+    :param now: current monotonic time.
+    :param freshness_timeout: how old a sample may be and still count.
+    :returns: one line per sensor that is missing or stale, in the order given.
+        Empty when every sensor is present and fresh — which is a real answer
+        too: it means the gate is waiting on the stabilization window, not on
+        a sensor.
+    """
+    report: list[str] = []
+    for name, sample_time in last_seen.items():
+        if sample_time is None:
+            report.append(f"{name}: never arrived")
+            continue
+        age = now - sample_time
+        if age > freshness_timeout:
+            report.append(f"{name}: last sample {age:.1f}s ago")
+    return report
+
+
 def closest_range(range_field: Any, fallback: float) -> float | None:
     """The nearest return the lidar reported, or None when it saw nothing.
 
