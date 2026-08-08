@@ -1,14 +1,18 @@
-# Flyto Robotics
+<p align="center">
+  <img src="docs/assets/flyto2-logo.png" alt="Flyto2" width="96" height="96">
+</p>
 
-Flyto Robotics is an AI-native, composable capability runtime for robots.
+# Flyto2 Robotics
+
+Flyto2 Robotics is an AI-native, composable capability runtime for robots.
 A person describes an outcome in natural language; an LLM or agent selects
 registered atomic abilities and returns a versioned plan; a strict validator
 compiles that plan into deterministic, safety-bounded execution.
 
-“先走藍線，再走黃線，最後走紫線並安全停止” is the first visible example,
-not the product boundary. The same architecture can compose navigation,
-inspection, recognition, manipulation, speech, human approval, recovery, and
-C/C++/Python-backed tools.
+"Follow the blue line, then the yellow, then the purple, and stop safely" is
+the first visible example, not the product boundary. The same architecture
+composes navigation, inspection, recognition, manipulation, speech, human
+approval, recovery, and C/C++/Python-backed tools.
 
 The repository also retains its first synthetic hospital delivery mission:
 
@@ -19,7 +23,7 @@ The repository also retains its first synthetic hospital delivery mission:
 5. stop for obstacles and resume when the path is clear;
 6. write a machine-readable result.
 
-The repository is deliberately independent from Flyto Cloud. Cloud can dispatch
+The repository is deliberately independent from Flyto2 Cloud. Cloud can dispatch
 the example JSON as a device job, but neither project imports the other.
 
 ## What is included
@@ -29,7 +33,7 @@ the example JSON as a device job, but neither project imports the other.
 - a ROS 2 Jazzy bridge and mission-controller launch file;
 - `flyto.robotics.job.v1`, `plan.v1`, and `result.v1` JSON Schemas;
 - `flyto.resource-manifest.v1` and `flyto.resource-telemetry.v1` contracts plus
-  an outbound installed-resource publisher for Flyto Cloud;
+  an outbound installed-resource publisher for Flyto2 Cloud;
 - a one-time USB recovery installation with stable local networking,
   key-only SSH, read-only diagnostics, and persistent failure reason codes;
 - the strict `ai-space-resource-plan.v1` boundary that binds an exact
@@ -124,9 +128,9 @@ python3 -m flyto_robotics.resource_binding \
 It proves the mission state transitions and result envelope; it does not claim
 Gazebo physics evidence.
 
-### Publish installed resources to Flyto Cloud
+### Publish installed resources to Flyto2 Cloud
 
-After the installation claims an existing Flyto Cloud pairing code, keep the
+After the installation claims an existing Flyto2 Cloud pairing code, keep the
 returned device secret in an owner-only file and run:
 
 ```bash
@@ -149,10 +153,9 @@ resource surface is observation-only and does not add a motor command path.
 resource-triggered replan, then executes that exact final plan in the
 multi-camera hospital world. It injects obstacle and camera faults, records
 active-resource handoff video, and fails unless all Physical AI closure checks
-pass. A loopback Flyto AI planner must be running and its URL is supplied
+pass. A loopback Flyto2 AI planner must be running and its URL is supplied
 through `FLYTO_ROBOTICS_PLANNER_URL`; the showcase never labels a fixture as a
 live model result. See
-[`docs/AI4ALL_SHOWCASE.md`](docs/AI4ALL_SHOWCASE.md) for the product narrative,
 truth boundary, and evidence layout.
 
 ## Atomic and composable by default
@@ -173,7 +176,7 @@ goal + observations
   → language/modality adapter emits flyto.goal-frame.v1
   → runtime/robot/sensor/permission hard filters
   → exact intent/affordance/effect/event rank + bounded shortlist
-  → trusted Flyto Blueprint hints + Flyto Core discovery metadata
+  → trusted Flyto2 Blueprint hints + Flyto2 Core discovery metadata
   → LLM-selected plan JSON from the shortlist only
   → schema and registry validation
   → immutable WorkflowPlan
@@ -194,11 +197,11 @@ rejected.
 Semantic locations use the same separation:
 
 ```text
-“記住這裡是護理站”
+"Remember this place as the nurse station"
   → Goal Frame selects save_current_location
   → current trusted odometry is stored under a stable location ID
 
-“去護理站”
+"Go to the nurse station"
   → Goal Frame selects navigate_to_location
   → LLM emits only the registered location ID
   → validator resolves its pose from the trusted map
@@ -305,7 +308,7 @@ The standard profile maps the existing executable navigation atoms to Nav2's
 cancellable `NavigateToPose` action. Every adapter must declare both simulation
 and hardware support, so the mission contract cannot fork between Gazebo and a
 physical robot. MoveIt 2 and ros2_control action types are allowlisted for later
-adapters, but a manifest is rejected until its Flyto capability is actually
+adapters, but a manifest is rejected until its Flyto2 capability is actually
 registered; the pairing report therefore cannot claim an integration that the
 runtime cannot execute.
 
@@ -423,7 +426,7 @@ FLYTO_ROBOTICS_STRESS_SOAK_RUNS=50 make nav2-stress
 export FLYTO_ROBOTICS_PLANNER_URL=https://planner.example.com/v1/robot-plan
 export FLYTO_ROBOTICS_PLANNER_TOKEN=...
 python3 -m flyto_robotics.cli plan-ai \
-  --goal "先走藍線，再走黃線，再走紫線，遇到障礙先停下" \
+  --goal "follow the blue line, then the yellow, then the purple, stopping for obstacles" \
   --robot-id flyto-rover-sim-001 \
   --output results/ai-plan.json
 ```
@@ -479,7 +482,7 @@ ros2 topic pub --once /flyto/human_decision std_msgs/msg/String \
 
 The environment secret must be present in both the mission-controller process
 and the trusted signer. In production, end users must not receive the shared
-key: an authenticated Flyto gateway should apply RBAC, derive the actor ID, and
+key: an authenticated Flyto2 gateway should apply RBAC, derive the actor ID, and
 sign the envelope after approval.
 
 Python composition types are exported from `flyto_robotics`: `WorkflowStep`,
@@ -488,11 +491,11 @@ Python composition types are exported from `flyto_robotics`: `WorkflowStep`,
 
 ### Semantic location example
 
-Build the exact provider-neutral request Flyto AI sends to a planner:
+Build the exact provider-neutral request Flyto2 AI sends to a planner:
 
 ```bash
 python3 -m flyto_robotics.cli planner-request \
-  --goal "先去藍線終點，再去黃線終點，最後去紫線終點並安全停止" \
+  --goal "go to the end of the blue line, then the yellow, then the purple, and stop safely" \
   --robot-id flyto-rover-sim-001 \
   --goal-frame examples/goal-frames/semantic-location-sequence.json \
   --semantic-map examples/maps/atomic-color-route.json \
@@ -654,7 +657,7 @@ that the exact reviewed workflow ID started. Unknown bindings, workflow
 mismatches, control-thread acknowledgement timeouts, socket loss, stale
 sensors, and dead-man expiry all fail closed.
 
-## Flyto Cloud boundary
+## Flyto2 Cloud boundary
 
 Dispatch the job JSON to a registered edge device as a normal batch execution.
 The device command is:
@@ -670,10 +673,10 @@ file conforms to `contracts/result-v1.schema.json`, so Cloud can upload it as
 execution evidence without knowing ROS message types.
 
 ```text
-Flyto Cloud
+Flyto2 Cloud
     │ versioned JSON job
     ▼
-Flyto device runner
+Flyto2 device runner
     │ starts process / captures exit code
     ▼
 flyto-robotics mission controller
@@ -681,7 +684,7 @@ flyto-robotics mission controller
     ▼                         │
 Gazebo rover or real ROS 2 base
     │
-    └── versioned JSON result ──► Flyto Cloud evidence
+    └── versioned JSON result ──► Flyto2 Cloud evidence
 ```
 
 ## Safety and scope
@@ -693,7 +696,7 @@ infection-control review, cybersecurity review, and site acceptance testing.
 
 HMAC proves that a trusted signer produced the decision; it does not by itself
 implement hospital user authentication or authorization. Production key
-custody, rotation, audit retention, RBAC, and revocation belong in the Flyto
+custody, rotation, audit retention, RBAC, and revocation belong in the Flyto2
 control plane or another trusted approval gateway.
 
 The competition supply-chain restriction must be evaluated against the final
@@ -704,8 +707,6 @@ physical BOM. Simulation assets do not establish hardware compliance.
 See `CONTRIBUTING.md` for the pre-change exploration, atomicity, safety, and
 post-change verification requirements.
 
-See `PRODUCT.md` for the full product positioning, examples, current
-implementation, differentiation, and roadmap.
 
 ## Licence
 
