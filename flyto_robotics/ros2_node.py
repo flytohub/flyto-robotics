@@ -30,6 +30,7 @@ from .mission import (
     RangeField,
     evaluate_sensor_gate,
     sector_field,
+    unready_sensors,
 )
 from .ros2_cmd_vel import CMD_VEL_TYPE_AUTO, CmdVelChannel, validated_topic
 from .semantic_map import SemanticLocationStore, SemanticMapValidationError
@@ -390,6 +391,29 @@ class MissionNode(Node):
                 "required_sensor_stale"
                 if sensor_decision == "fail_stale"
                 else "required_sensor_not_ready"
+            )
+            # Say which one. The result contract keeps the same reason code, but
+            # an operator reading only "failed" cannot tell a late lidar from a
+            # late odometry, and the two have nothing to do with each other.
+            last_seen: dict[str, float | None] = {
+                "odometry": self.last_odometry_at,
+                "scan": self.last_scan_at,
+            }
+            if self.requires_camera:
+                last_seen["camera"] = self.last_image_at
+            blocking = unready_sensors(
+                last_seen=last_seen, now=steady_now, freshness_timeout=timeout
+            )
+            if self.last_pose is None:
+                blocking.append("odometry: no pose parsed from any message")
+            self.get_logger().error(
+                f"{reason} after {steady_now - self.started_at_steady:.1f}s: "
+                + (
+                    "; ".join(blocking)
+                    if blocking
+                    else f"every sensor present, but not continuously fresh for "
+                    f"the {stabilization:.1f}s stabilization window"
+                )
             )
             self.controller.fail(reason, now)
             self._publish_new_events()

@@ -90,12 +90,12 @@ PY
   set -e
   [ "$probe_status" -eq 0 ] || exit "$probe_status"
 
-  # The probe joins and leaves the DDS graph, and the mission node comes up
-  # immediately afterwards. Missions launched straight after a probe have been
-  # seen taking 9s to discover /odom — against a 3s window — where the same
-  # mission with no probe in front of it discovered it in 4ms. The link is
-  # suspected, not proven; the pause costs a second and removes the variable.
-  sleep "${DISCOVERY_SETTLE_SECONDS:-2}"
+  # No settle pause here on purpose. It was suspected that the probe's DDS
+  # teardown delayed the mission's discovery, so a pause was added. Twelve
+  # alternating runs on the robot refuted it: median odometry discovery was
+  # 2.11s without a preceding probe and 2.07s with one. The latency is
+  # intrinsic and highly variable (7ms to 2.6s in that sample, 9.1s seen
+  # earlier), and nothing this script does in front of it moves the number.
 fi
 
 python3 - "$PLAN" <<'PY'
