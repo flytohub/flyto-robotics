@@ -1,8 +1,20 @@
 from __future__ import annotations
 
+import json
+import re
+from pathlib import Path
+
 import pytest
 
-from flyto_robotics.mission import evaluate_sensor_gate, unready_sensors
+from flyto_robotics.mission import (
+    DEFAULT_SENSOR_FRESHNESS_TIMEOUT_SECONDS,
+    DEFAULT_SENSOR_STABILIZATION_SECONDS,
+    DEFAULT_SENSOR_STARTUP_GRACE_SECONDS,
+    evaluate_sensor_gate,
+    unready_sensors,
+)
+
+SOURCE_DIR = Path(__file__).resolve().parents[1] / "flyto_robotics"
 
 
 @pytest.mark.parametrize(
@@ -116,3 +128,90 @@ class TestUnreadySensors:
             "scan: never arrived",
             "odometry: never arrived",
         ]
+
+
+class TestSensorWindowDefaults:
+    """The two windows must stay asymmetric, and the reason is not obvious.
+
+    Someone tuning "the sensor timeout" will reach for whichever constant they
+    find first. These assertions exist to make the wrong one fail loudly.
+    """
+
+    def test_startup_grace_is_far_more_patient_than_the_freshness_timeout(
+        self,
+    ) -> None:
+        """Waiting is free before anything moves; it is not, during.
+
+        Every tick inside the startup grace publishes a stop, so extending it
+        costs only how fast a broken robot is reported. The freshness timeout
+        governs a robot already under power, where the same slack would mean
+        steering on second-old obstacle data.
+        """
+        assert (
+            DEFAULT_SENSOR_STARTUP_GRACE_SECONDS
+            >= 10 * DEFAULT_SENSOR_FRESHNESS_TIMEOUT_SECONDS
+        )
+
+    def test_the_grace_clears_the_measured_discovery_tail(self) -> None:
+        """Measured on the lab robot: p95 3.58s, max 3.60s, 9.1s degraded.
+
+        The effective discovery budget is the grace minus the stabilization
+        window that has to fit inside it, which is what made a 10s grace mean
+        9s of discovery — and 9.1s was observed. It missed by 0.1 second.
+        """
+        budget = (
+            DEFAULT_SENSOR_STARTUP_GRACE_SECONDS
+            - DEFAULT_SENSOR_STABILIZATION_SECONDS
+        )
+        assert budget > 9.1, "the worst latency seen here must not be a coin flip"
+
+    def test_the_grace_leaves_the_shortest_job_something_to_drive_with(self) -> None:
+        """Discovery is spent out of the mission's own budget.
+
+        The gate does not tick the controller while it waits, but `started_at`
+        was stamped at construction, so the wait is already on the clock when
+        the first tick lands. A grace at or above the mission timeout would
+        leave no time to move, or could never fire at all — which would make
+        raising it look like a fix while changing nothing.
+        """
+        timeouts = []
+        for job in sorted((SOURCE_DIR.parent / "examples/jobs").glob("*.json")):
+            data = json.loads(job.read_text())
+            timeout = (data.get("safety") or {}).get("mission_timeout_seconds")
+            if timeout is None:
+                timeout = data.get("mission_timeout_seconds")
+            if timeout is not None:
+                timeouts.append((job.name, float(timeout)))
+
+        assert timeouts, "no example job declares a mission timeout"
+        name, shortest = min(timeouts, key=lambda pair: pair[1])
+        assert shortest / 2 >= DEFAULT_SENSOR_STARTUP_GRACE_SECONDS, (
+            f"{name} allows {shortest}s for the whole mission; a "
+            f"{DEFAULT_SENSOR_STARTUP_GRACE_SECONDS}s startup grace leaves too "
+            "little of it to actually move"
+        )
+
+    def test_stabilization_fits_inside_the_grace(self) -> None:
+        assert (
+            DEFAULT_SENSOR_STABILIZATION_SECONDS
+            < DEFAULT_SENSOR_STARTUP_GRACE_SECONDS
+        )
+
+    def test_both_ros_nodes_declare_the_same_grace(self) -> None:
+        """They used to disagree: 10.0s in one, 5.0s in the other.
+
+        The shortcut node — the one behind the arrow cards — had the tighter
+        budget, against a measured 3.60s worst case. Neither file may hardcode
+        its own number again.
+        """
+        for name in ("ros2_node.py", "shortcut_ros2_node.py"):
+            source = (SOURCE_DIR / name).read_text()
+            declaration = re.search(
+                r'declare_parameter\(\s*\n?\s*"sensor_startup_grace_seconds",\s*([^\n)]+)',
+                source,
+            )
+            assert declaration, f"{name} does not declare the grace"
+            assert (
+                declaration.group(1).strip()
+                == "DEFAULT_SENSOR_STARTUP_GRACE_SECONDS"
+            ), f"{name} hardcodes its own grace instead of sharing the constant"

@@ -25,6 +25,9 @@ from .human_approval import (
 )
 from .line_perception import LineScene, detect_line_scene
 from .mission import (
+    DEFAULT_SENSOR_FRESHNESS_TIMEOUT_SECONDS,
+    DEFAULT_SENSOR_STABILIZATION_SECONDS,
+    DEFAULT_SENSOR_STARTUP_GRACE_SECONDS,
     MissionController,
     Pose2D,
     RangeField,
@@ -65,9 +68,15 @@ class MissionNode(Node):
         self.declare_parameter("plan_file", "")
         self.declare_parameter("semantic_map_file", "")
         self.declare_parameter("semantic_map_id", "")
-        self.declare_parameter("odometry_timeout_seconds", 1.0)
-        self.declare_parameter("sensor_startup_grace_seconds", 10.0)
-        self.declare_parameter("sensor_stabilization_seconds", 1.0)
+        self.declare_parameter(
+            "odometry_timeout_seconds", DEFAULT_SENSOR_FRESHNESS_TIMEOUT_SECONDS
+        )
+        self.declare_parameter(
+            "sensor_startup_grace_seconds", DEFAULT_SENSOR_STARTUP_GRACE_SECONDS
+        )
+        self.declare_parameter(
+            "sensor_stabilization_seconds", DEFAULT_SENSOR_STABILIZATION_SECONDS
+        )
         self.declare_parameter("gazebo_physics", False)
         self.declare_parameter("obstacle_injected", False)
         self.declare_parameter("human_approval_injected", False)
