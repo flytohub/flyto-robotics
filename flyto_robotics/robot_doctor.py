@@ -30,6 +30,12 @@ SERVICE_NAMES = (
     "flyto-delivery.service",
     "flyto-job-runner.service",
     "turtlebot3-bringup.service",
+    # The portal is how an operator reaches a robot that has lost the network,
+    # so it is the one service whose failure is hardest to notice from outside.
+    # It was left off this list and spent three hours in a restart loop while
+    # the doctor reported services.healthy true — a health check that does not
+    # watch the recovery path will always look best exactly when it is wrong.
+    "flyto-recovery-portal.service",
 )
 
 

@@ -160,3 +160,59 @@ def test_the_script_round_trips_on_a_host_that_has_systemd_creds(tmp_path):
         pytest.skip("provisioning needs root")
     assert result.returncode == 0, result.stderr
     assert output.stat().st_mode & 0o777 == 0o600
+
+
+class TestItDoesNotTouchDirectoriesItDidNotMake:
+    """Found by running it: `install -d -m 0700 "$(dirname "$OUTPUT")"` with
+    --output under /tmp set /tmp itself to 0700 root on a live robot, locking
+    every other user out. Creating a directory is this script's business;
+    re-permissioning an existing one is not."""
+
+    def code(self) -> str:
+        """The script with comment lines dropped.
+
+        The comment explains the hazard by quoting the line that caused it, and
+        a guard that reads its own explanation as a violation would force the
+        explanation out — losing the one thing that stops someone restoring the
+        bug deliberately.
+        """
+        return "\n".join(
+            line
+            for line in SCRIPT.read_text().splitlines()
+            if not line.lstrip().startswith("#")
+        )
+
+    def test_it_only_creates_a_directory_that_is_absent(self):
+        body = self.code()
+        assert 'if [ ! -d "$OUTPUT_DIR" ]; then' in body
+        assert body.count("install -d -m 0700") == 1, (
+            "an unconditional install -d is what caused this"
+        )
+
+    def test_the_hazard_is_recorded_where_someone_would_undo_it(self):
+        assert "/tmp itself into 0700 root" in SCRIPT.read_text()
+
+    def test_it_still_creates_the_default_location(self, tmp_path):
+        """A fresh /etc/flyto must still come out owner-only."""
+        target = tmp_path / "etc" / "flyto"
+        result = subprocess.run(
+            ["bash", "-c", f'OUTPUT="{target}/device.cred"; '
+             'OUTPUT_DIR="$(dirname "$OUTPUT")"; '
+             '[ ! -d "$OUTPUT_DIR" ] && install -d -m 0700 "$OUTPUT_DIR"'],
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0, result.stderr
+        assert target.stat().st_mode & 0o777 == 0o700
+
+    def test_an_existing_directory_keeps_its_mode(self, tmp_path):
+        shared = tmp_path / "shared"
+        shared.mkdir(mode=0o1777)
+        before = shared.stat().st_mode & 0o7777
+        subprocess.run(
+            ["bash", "-c", f'OUTPUT="{shared}/device.cred"; '
+             'OUTPUT_DIR="$(dirname "$OUTPUT")"; '
+             '[ ! -d "$OUTPUT_DIR" ] && install -d -m 0700 "$OUTPUT_DIR"; true'],
+            check=True,
+        )
+        assert shared.stat().st_mode & 0o7777 == before, "a shared directory was re-permissioned"
