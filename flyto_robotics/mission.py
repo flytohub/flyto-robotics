@@ -23,6 +23,43 @@ TERMINAL_STATES = frozenset({MissionState.COMPLETED, MissionState.FAILED, Missio
 
 SensorGateDecision = Literal["wait", "ready", "fail_not_ready", "fail_stale"]
 
+# The two sensor windows are deliberately asymmetric, and conflating them is
+# how a robot ends up both twitchy and unsafe.
+#
+# STARTUP GRACE is a deadline, not a delay. Nothing has moved yet, every tick
+# publishes a stop, and a healthy robot becomes ready the instant its sensors
+# arrive — so raising this does not slow a good start by a millisecond. It only
+# extends how long we are willing to wait before declaring the sensor absent.
+# Waiting longer therefore costs nothing except how quickly a genuinely broken
+# robot is reported, and the failure now names which sensor was missing.
+#
+# It cannot simply be made enormous, though, because it is spent out of the
+# mission's own budget. While the gate says "wait", MissionController.tick is
+# never called — but `started_at` was stamped at construction, so every second
+# of discovery is already on the clock when the first tick finally lands. A
+# grace equal to the mission timeout would leave nothing to drive with, and a
+# grace larger than it could never fire at all.
+#
+# Measured on the lab TurtleBot3 over 30 samples: first /odom at median 1.84s,
+# p95 3.58s, max 3.60s, in a bimodal distribution (either the first DDS
+# announcement is caught immediately, or the next round is waited for). A
+# degraded network the same day produced 9.1s.
+#
+# 15s covers that 9.1s worst case with room, is four times the measured p95,
+# and still leaves half of a 30s mission — the tightest job here — for the
+# motion itself, which a 90 degree turn or a 40 cm step does in about five.
+DEFAULT_SENSOR_STARTUP_GRACE_SECONDS = 15.0
+
+# FRESHNESS TIMEOUT is the safety-relevant one: how stale a sample may be while
+# the robot is under power and moving. It must stay tight, and raising it to
+# match the grace above would mean driving on second-old obstacle data.
+DEFAULT_SENSOR_FRESHNESS_TIMEOUT_SECONDS = 1.0
+
+# STABILIZATION is how long every sensor must stay fresh before the first
+# command. It fits *inside* the startup grace, so the real discovery budget is
+# the grace minus this — which is what made a 10s grace mean 9s of discovery.
+DEFAULT_SENSOR_STABILIZATION_SECONDS = 1.0
+
 
 def evaluate_sensor_gate(
     *,
@@ -218,24 +255,67 @@ def sector_field(
     Pure, and taking plain numbers rather than a LaserScan, so the arithmetic
     that decides whether a robot moves can be asserted without ROS present.
 
-    A sector with no valid return stays at infinity — meaning nothing was seen
-    there, which is not the same as nothing being there, but is the only thing
-    a sweep can say.
+    A sector with no valid return stays at infinity, and infinity alone cannot
+    say why. Three different sweeps used to produce exactly the same all-inf
+    field as an open corridor: a stalled rotor publishing zeros, a covered
+    sensor publishing sub-``range_min`` returns, and a wall closer than
+    ``range_min``. Every threshold downstream then read that as room.
+
+    So each beam is classified rather than merely filtered. A beam past
+    ``range_max`` (or ``+inf``, which is how most drivers spell "no echo") is a
+    definite answer: nothing is out there within reach. A beam that is NaN,
+    non-positive, or below ``range_min`` is not an answer at all. A sector in
+    which *no* beam gave a definite answer is reported in
+    :attr:`RangeField.blind`, and a caller that would have driven on infinity
+    can refuse instead.
     """
     forward = left = right = rear = closest = math.inf
+    # Per sector: did any beam yield a definite answer, and were there beams at
+    # all? A sector the sweep never covered is left alone — that is geometry,
+    # not sensor failure, and calling it blind would strand a limited-field-of-
+    # view robot that was never guarded there in the first place.
+    definite = {"forward": False, "left": False, "right": False, "rear": False}
+    covered = {"forward": False, "left": False, "right": False, "rear": False}
+
     for index, value in enumerate(ranges):
-        if not math.isfinite(value) or not (range_min <= value <= range_max):
-            continue
-        closest = min(closest, value)
         bearing = math.degrees(angle_min + angle_increment * index) % 360.0
         if bearing <= FORWARD_HALF_ANGLE_DEG or bearing >= 360.0 - FORWARD_HALF_ANGLE_DEG:
-            forward = min(forward, value)
+            sector = "forward"
         elif abs(bearing - 90.0) <= SIDE_HALF_ANGLE_DEG:
-            left = min(left, value)
+            sector = "left"
         elif abs(bearing - 270.0) <= SIDE_HALF_ANGLE_DEG:
-            right = min(right, value)
+            sector = "right"
         elif abs(bearing - 180.0) <= FORWARD_HALF_ANGLE_DEG:
+            sector = "rear"
+        else:
+            sector = None
+
+        if sector is not None:
+            covered[sector] = True
+
+        if math.isnan(value):
+            continue
+        if value > range_max:
+            # Includes +inf. Nothing within reach, which is an answer.
+            if sector is not None:
+                definite[sector] = True
+            continue
+        if value < range_min or value <= 0.0:
+            # Under the sensor's floor. It cannot tell an obstacle from a fault.
+            continue
+
+        if sector is not None:
+            definite[sector] = True
+        closest = min(closest, value)
+        if sector == "forward":
+            forward = min(forward, value)
+        elif sector == "left":
+            left = min(left, value)
+        elif sector == "right":
+            right = min(right, value)
+        elif sector == "rear":
             rear = min(rear, value)
+
     return RangeField(
         forward=forward,
         left=left,
@@ -243,6 +323,9 @@ def sector_field(
         rear=rear,
         closest=closest,
         directional=True,
+        blind=frozenset(
+            name for name in definite if covered[name] and not definite[name]
+        ),
     )
 
 
@@ -263,6 +346,12 @@ class RangeField:
     closest: float = math.inf
     directional: bool = False
 
+    #: Sectors the sweep covered but could not measure at all — every beam NaN,
+    #: non-positive, or under the sensor's floor. Distinct from infinity, which
+    #: means measured and nothing found. Empty by default so a caller that
+    #: supplies readings by hand keeps its previous behaviour.
+    blind: frozenset[str] = frozenset()
+
     @classmethod
     def omnidirectional(cls, minimum_range: float) -> RangeField:
         """One reading in every direction, the shape callers used to pass."""
@@ -278,6 +367,24 @@ class RangeField:
             # been let down by a guard that only watched where it was going.
             return min(self.forward, self.left, self.right, self.rear), "in the turn"
         return self.forward, "ahead"
+
+    def blind_for(self, intent: str) -> str | None:
+        """A sector this motion depends on that could not be measured.
+
+        Mirrors :meth:`blocking` exactly: whatever ranges that method would
+        consult, this reports the first of them the sensor could not read. A
+        motion guarded by a range that was never measured is not guarded.
+        """
+        if intent == INTENT_REVERSE:
+            consulted = ("rear",)
+        elif intent == INTENT_ROTATE:
+            consulted = ("forward", "left", "right", "rear")
+        else:
+            consulted = ("forward",)
+        for sector in consulted:
+            if sector in self.blind:
+                return sector
+        return None
 
 
 class MissionController:
@@ -508,6 +615,18 @@ class MissionController:
             if isinstance(minimum_range, RangeField)
             else RangeField.omnidirectional(minimum_range)
         )
+
+        # Before any threshold: is there a reading to compare at all? Every
+        # test below is guarded by math.isfinite, so an unmeasurable sector
+        # skips all of them and the motion proceeds — the exact shape of "the
+        # gate cannot evaluate its condition, so it allows the action". A
+        # covered lidar, a stalled rotor and a wall inside the sensor's minimum
+        # range all arrive here as infinity, indistinguishable from clear.
+        unmeasured = field.blind_for(intent)
+        if unmeasured is not None:
+            return self._raise_obstacle(
+                now, f"cannot measure {unmeasured}; refusing to move on an unread sector"
+            )
 
         emergency = limits.emergency_stop_distance
         if math.isfinite(field.closest) and field.closest < emergency:
