@@ -6,6 +6,7 @@ import argparse
 import html
 import json
 from collections.abc import Mapping, Sequence
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -40,15 +41,69 @@ def load_report(path: Path) -> dict[str, Any]:
         raise ValueError("diagnostic report is invalid") from exc
 
 
-def report_view(report: Mapping[str, Any]) -> dict[str, Any]:
+#: The robot-doctor timer runs every 60s (OnUnitActiveSec in
+#: deploy/systemd/flyto-robot-doctor.timer), so a live snapshot is at most a
+#: minute old. Five missed runs is no longer a hiccup; it means the writer
+#: stopped, which is exactly the failure the portal exists to survive.
+STALE_AFTER_SECONDS = 300.0
+
+
+def _snapshot_age(observed_at: Any, now: datetime) -> float | None:
+    """Seconds since the snapshot was written, or None if that is unknowable."""
+    if not isinstance(observed_at, str) or not observed_at:
+        return None
+    try:
+        written = datetime.fromisoformat(observed_at.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if written.tzinfo is None:
+        written = written.replace(tzinfo=timezone.utc)
+    return (now - written).total_seconds()
+
+
+def report_view(
+    report: Mapping[str, Any],
+    *,
+    now: datetime | None = None,
+    stale_after_seconds: float = STALE_AFTER_SECONDS,
+) -> dict[str, Any]:
+    """Render one snapshot, saying plainly whether it is still current.
+
+    The age was previously left for the reader to work out from a timestamp at
+    the foot of the page, while the headline said GOOD / healthy / no action
+    required. A frozen latest.json therefore looked exactly like a live one —
+    and a frozen latest.json is the normal consequence of the diagnostic writer
+    dying, which is precisely when someone opens this page.
+    """
     payload = report.get("payload", {})
     reason = str(payload.get("primary_reason_code", "diagnostic_pending"))
+    summary = _REASONS.get(reason, "Diagnostic snapshot is not ready.")
+    action_codes = list(payload.get("action_codes", []))
+    quality = report.get("quality")
+
+    age = _snapshot_age(report.get("observed_at"), now or datetime.now(timezone.utc))
+    # An unreadable or absent timestamp is not evidence of freshness. Treat not
+    # knowing the age the same as knowing it is too old.
+    stale = age is None or age > stale_after_seconds
+    if stale:
+        quality = "stale"
+        summary = (
+            f"This snapshot is {age / 60:.0f} minutes old and may no longer "
+            "describe the robot. Everything below predates it."
+            if age is not None
+            else "This snapshot carries no readable timestamp, so it cannot be "
+            "shown to be current. Everything below may be out of date."
+        )
+        action_codes = ["inspect_diagnostic_timer", *action_codes]
+
     return {
         "observed_at": report.get("observed_at"),
-        "quality": report.get("quality"),
+        "age_seconds": age,
+        "stale": stale,
+        "quality": quality,
         "reason_code": reason,
-        "summary": _REASONS.get(reason, "Diagnostic snapshot is not ready."),
-        "action_codes": payload.get("action_codes", []),
+        "summary": summary,
+        "action_codes": action_codes,
         "network": payload.get("network", {}),
         "services": payload.get("services", {}),
         "recovery": payload.get("recovery", {}),
@@ -63,6 +118,12 @@ def render_html(view: Mapping[str, Any]) -> str:
     actions = "".join(
         f"<li><code>{html.escape(str(item))}</code></li>" for item in view["action_codes"]
     )
+    # A stale reading must not be able to look like a live one at a glance. The
+    # timestamp at the foot of the page was the only signal, and nobody reads a
+    # timestamp when the headline already says the robot is fine.
+    banner = (
+        '<p class="stale">This reading is not current.</p>' if view.get("stale") else ""
+    )
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width">
 <title>Flyto Robot Recovery</title><style>
@@ -70,8 +131,10 @@ body{{font:16px system-ui;max-width:760px;margin:3rem auto;padding:0 1rem;
 background:#0b1020;color:#edf2ff}}
 main{{background:#151d34;border:1px solid #314166;border-radius:18px;padding:1.5rem}}
 code{{color:#83d6ff}} .quality{{text-transform:uppercase;color:#8ef0b1}}
+.stale{{background:#4a2020;border:1px solid #a24b4b;border-radius:10px;
+padding:.75rem 1rem;color:#ffd9d9;font-weight:600;margin:0 0 1rem}}
 </style></head><body><main><h1>Flyto Robot Recovery</h1>
-<p class="quality">{quality}</p><h2>{reason}</h2><p>{summary}</p>
+{banner}<p class="quality">{quality}</p><h2>{reason}</h2><p>{summary}</p>
 <h3>Recommended actions</h3><ul>{actions or "<li>No action required.</li>"}</ul>
 <p>Observed: {observed}</p><p><a href="/v1/diagnostics">Machine-readable JSON</a></p>
 </main></body></html>"""
@@ -88,6 +151,11 @@ def handler_for(report_path: Path):
             except ValueError as exc:
                 view = {
                     "observed_at": None,
+                    "age_seconds": None,
+                    # No readable report at all is the least current state there
+                    # is; say so with the same field the age check uses, so a
+                    # consumer has one thing to look at rather than two.
+                    "stale": True,
                     "quality": "stale",
                     "reason_code": "diagnostic_pending",
                     "summary": str(exc),
