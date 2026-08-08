@@ -28,6 +28,10 @@ the example JSON as a device job, but neither project imports the other.
 - a differential-drive rover with lidar and odometry;
 - a ROS 2 Jazzy bridge and mission-controller launch file;
 - `flyto.robotics.job.v1`, `plan.v1`, and `result.v1` JSON Schemas;
+- `flyto.resource-manifest.v1` and `flyto.resource-telemetry.v1` contracts plus
+  an outbound installed-resource publisher for Flyto Cloud;
+- a one-time USB recovery installation with stable local networking,
+  key-only SSH, read-only diagnostics, and persistent failure reason codes;
 - the strict `ai-space-resource-plan.v1` boundary that binds an exact
   workflow, resource, endpoint, adapter, capability, Space, and lease before a
   ROS/Gazebo/physical adapter may start;
@@ -62,6 +66,23 @@ and the Harmonic packages listed under “Run the Gazebo demo.” No service
 credentials or environment secrets are required.
 
 ## Usage
+
+### Install card-free recovery once
+
+On an installed Raspberry Pi robot, run the recovery installer once and reboot:
+
+```bash
+sudo ./scripts/install-robot-recovery.sh \
+  --robot-id your-installed-resource-id \
+  --cloud-url https://your-cloud-origin.example
+sudo reboot
+```
+
+After that, a robot that loses Wi-Fi can be reached over a USB data cable at
+`http://10.77.0.1:8770` or `ssh ubuntu@10.77.0.1`; routine diagnosis no longer
+requires removing the SSD/microSD. See
+[`docs/ONE_TIME_RECOVERY.md`](docs/ONE_TIME_RECOVERY.md) for power cautions,
+reason codes, installation behavior, and rollback.
 
 ### Quick verification
 
@@ -102,6 +123,27 @@ python3 -m flyto_robotics.resource_binding \
 `dry-run` executes the same controller against deterministic planar kinematics.
 It proves the mission state transitions and result envelope; it does not claim
 Gazebo physics evidence.
+
+### Publish installed resources to Flyto Cloud
+
+After the installation claims an existing Flyto Cloud pairing code, keep the
+returned device secret in an owner-only file and run:
+
+```bash
+chmod 600 /path/to/device-secret
+flyto-resource-agent \
+  --cloud-url https://your-cloud-origin.example \
+  --device-id paired-device-id \
+  --device-secret-file /path/to/device-secret \
+  --manifest /path/to/resource-manifest.json \
+  --telemetry /path/to/latest-telemetry.json \
+  --interval-seconds 5
+```
+
+The local adapter may rewrite the manifest and telemetry snapshot files. The
+agent validates and republishes them on each bounded interval. Secret settings
+must carry `value: null`; only their configured state may reach Cloud. The
+resource surface is observation-only and does not add a motor command path.
 
 `make ai4all-showcase` first requests and verifies an attested initial plan and
 resource-triggered replan, then executes that exact final plan in the

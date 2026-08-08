@@ -18,7 +18,6 @@ from sensor_msgs.msg import Image, LaserScan
 from std_msgs.msg import String
 
 from .ai_planner import PlanValidationError, compile_workflow, load_plan
-from .ros2_cmd_vel import CMD_VEL_TYPE_AUTO, CmdVelChannel, validated_topic
 from .contracts import JobValidationError, load_job, write_json_atomic
 from .human_approval import (
     HumanDecisionAuthenticator,
@@ -32,6 +31,7 @@ from .mission import (
     evaluate_sensor_gate,
     sector_field,
 )
+from .ros2_cmd_vel import CMD_VEL_TYPE_AUTO, CmdVelChannel, validated_topic
 from .semantic_map import SemanticLocationStore, SemanticMapValidationError
 from .workflow import MissionState, PrimitiveKind
 
@@ -91,20 +91,16 @@ class MissionNode(Node):
                 "navigate_to_location",
                 "save_current_location",
             }
-            if any(
-                step.capability in semantic_capabilities for step in plan.steps
-            ):
+            if any(step.capability in semantic_capabilities for step in plan.steps):
                 parameter_semantic_map_file = str(
                     self.get_parameter("semantic_map_file").value
                 ).strip()
                 semantic_map_file = semantic_map_path or (
-                    Path(parameter_semantic_map_file)
-                    if parameter_semantic_map_file
-                    else None
+                    Path(parameter_semantic_map_file) if parameter_semantic_map_file else None
                 )
-                configured_semantic_map_id = semantic_map_id or str(
-                    self.get_parameter("semantic_map_id").value
-                ).strip()
+                configured_semantic_map_id = (
+                    semantic_map_id or str(self.get_parameter("semantic_map_id").value).strip()
+                )
                 if semantic_map_file is None or not configured_semantic_map_id:
                     raise SemanticMapValidationError(
                         "semantic_map_file and semantic_map_id are required for "
@@ -125,8 +121,7 @@ class MissionNode(Node):
             step.kind == PrimitiveKind.FOLLOW_LINE for step in self.controller.workflow.steps
         )
         self.requires_human_approval = any(
-            step.kind == PrimitiveKind.ASK_HUMAN
-            for step in self.controller.workflow.steps
+            step.kind == PrimitiveKind.ASK_HUMAN for step in self.controller.workflow.steps
         )
         self.human_decision_authenticator: HumanDecisionAuthenticator | None = None
         if self.requires_human_approval:
@@ -138,9 +133,7 @@ class MissionNode(Node):
                 raise HumanDecisionValidationError(
                     "FLYTO_ROBOTICS_APPROVAL_SECRET is required for ask_human"
                 )
-            self.human_decision_authenticator = HumanDecisionAuthenticator(
-                approval_secret
-            )
+            self.human_decision_authenticator = HumanDecisionAuthenticator(approval_secret)
         self.started_at = self._now()
         self.started_at_steady = time.monotonic()
         self.last_pose: Pose2D | None = None
@@ -174,12 +167,8 @@ class MissionNode(Node):
         cmd_vel_topic = validated_topic(
             str(self.get_parameter("cmd_vel_topic").value), "cmd_vel_topic"
         )
-        odom_topic = validated_topic(
-            str(self.get_parameter("odom_topic").value), "odom_topic"
-        )
-        scan_topic = validated_topic(
-            str(self.get_parameter("scan_topic").value), "scan_topic"
-        )
+        odom_topic = validated_topic(str(self.get_parameter("odom_topic").value), "odom_topic")
+        scan_topic = validated_topic(str(self.get_parameter("scan_topic").value), "scan_topic")
         camera_topic = validated_topic(
             str(self.get_parameter("camera_topic").value), "camera_topic"
         )
@@ -231,9 +220,7 @@ class MissionNode(Node):
         position = message.pose.pose.position
         self.last_pose = Pose2D(position.x, position.y, _yaw_from_odometry(message))
         if not self.odometry_diagnostic_logged:
-            self.get_logger().info(
-                f"first odometry pose: x={position.x:.3f}, y={position.y:.3f}"
-            )
+            self.get_logger().info(f"first odometry pose: x={position.x:.3f}, y={position.y:.3f}")
             self.odometry_diagnostic_logged = True
         self.last_odometry_at = time.monotonic()
 
@@ -276,13 +263,10 @@ class MissionNode(Node):
                 "first camera line observations: " + (", ".join(visible) or "none")
             )
             self.camera_diagnostic_logged = True
-        visible_colors = tuple(
-            item.color for item in self.line_scene.detections if item.visible
-        )
+        visible_colors = tuple(item.color for item in self.line_scene.detections if item.visible)
         if visible_colors != self.last_visible_colors:
             self.get_logger().info(
-                "camera visible colors changed: "
-                + (", ".join(visible_colors) or "none")
+                "camera visible colors changed: " + (", ".join(visible_colors) or "none")
             )
             self.last_visible_colors = visible_colors
         self.last_image_at = time.monotonic()
@@ -290,9 +274,7 @@ class MissionNode(Node):
     def _on_human_decision(self, message: String) -> None:
         authenticator = self.human_decision_authenticator
         if authenticator is None:
-            self.get_logger().warning(
-                "human decision ignored because no approval gate is active"
-            )
+            self.get_logger().warning("human decision ignored because no approval gate is active")
             return
         try:
             decision = authenticator.verify(
@@ -316,8 +298,7 @@ class MissionNode(Node):
             return
         self._publish_new_events()
         self.get_logger().info(
-            f"verified human decision {decision.approval_id} "
-            f"from actor {decision.actor_id}"
+            f"verified human decision {decision.approval_id} from actor {decision.actor_id}"
         )
 
     def _publish_new_events(self) -> None:
@@ -350,12 +331,8 @@ class MissionNode(Node):
         result["simulation"] = {
             "mode": "gazebo_ros2" if gazebo_physics else "physical_ros2",
             "gazebo_physics": gazebo_physics,
-            "obstacle_injected": bool(
-                self.get_parameter("obstacle_injected").value
-            ),
-            "human_approval_injected": bool(
-                self.get_parameter("human_approval_injected").value
-            ),
+            "obstacle_injected": bool(self.get_parameter("obstacle_injected").value),
+            "human_approval_injected": bool(self.get_parameter("human_approval_injected").value),
         }
         write_json_atomic(self.result_path, result)
         self._publish_new_events()
@@ -371,9 +348,7 @@ class MissionNode(Node):
         steady_now = time.monotonic()
         grace = float(self.get_parameter("sensor_startup_grace_seconds").value)
         timeout = float(self.get_parameter("odometry_timeout_seconds").value)
-        stabilization = float(
-            self.get_parameter("sensor_stabilization_seconds").value
-        )
+        stabilization = float(self.get_parameter("sensor_stabilization_seconds").value)
         camera_missing = self.requires_camera and self.last_image_at is None
         samples_present = not (
             self.last_pose is None
@@ -385,11 +360,7 @@ class MissionNode(Node):
         if self.requires_camera:
             sample_times.append(self.last_image_at)
         oldest_sample_age = max(
-            (
-                steady_now - sample_time
-                for sample_time in sample_times
-                if sample_time is not None
-            ),
+            (steady_now - sample_time for sample_time in sample_times if sample_time is not None),
             default=math.inf,
         )
         if not samples_present or oldest_sample_age > timeout:
