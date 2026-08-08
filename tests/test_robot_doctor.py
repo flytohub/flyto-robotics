@@ -112,3 +112,61 @@ def test_main_preserves_last_failure_after_recovery(monkeypatch, tmp_path, capsy
     assert json.loads(latest.read_text())["quality"] == "good"
     assert failure.read_text() == failed_snapshot
     assert capsys.readouterr().out
+
+
+class TestAServiceStateThatCouldNotBeRead:
+    """`unknown` is the absence of an answer, not a clean bill of health.
+
+    _service_state returns it when systemctl is missing, hangs past the three
+    second timeout, or replies with anything unrecognised. It used to be
+    filtered out alongside "active", so a robot nobody could inspect reported
+    healthy / good / services.healthy true, with no action codes at all.
+    """
+
+    UNREADABLE = {"flyto-delivery.service": "unknown"}
+
+    def test_an_unreadable_service_is_not_healthy(self):
+        reason, quality = classify_observation(observation(service_states=self.UNREADABLE))
+        assert reason == "service_state_unknown"
+        assert quality == "degraded"
+
+    def test_every_service_unreadable_is_the_worst_case_and_still_not_healthy(self):
+        """systemctl absent: nothing at all could be read."""
+        states = dict.fromkeys(
+            ("flyto-delivery.service", "turtlebot3-bringup.service"), "unknown"
+        )
+        assert classify_observation(observation(service_states=states))[0] != "healthy"
+
+    def test_a_known_failure_outranks_an_unread_one(self):
+        """One names a fix; the other names an absence. Report the fixable one."""
+        states = {
+            "flyto-delivery.service": "failed",
+            "turtlebot3-bringup.service": "unknown",
+        }
+        assert (
+            classify_observation(observation(service_states=states))[0]
+            == "robot_service_unhealthy"
+        )
+
+    def test_the_payload_does_not_claim_the_services_are_healthy(self):
+        payload, _ = diagnostic_payload(observation(service_states=self.UNREADABLE))
+        assert payload["services"]["healthy"] is False
+
+    def test_the_payload_names_the_unread_services_separately(self):
+        """Not merged into unhealthy: they may be fine, and saying they failed
+        would send an operator chasing a fault that was never observed."""
+        payload, _ = diagnostic_payload(observation(service_states=self.UNREADABLE))
+        assert payload["services"]["unknown_service_ids"] == ["flyto-delivery.service"]
+        assert payload["services"]["unhealthy_service_ids"] == []
+
+    def test_the_reason_carries_actions_to_take(self):
+        payload, _ = diagnostic_payload(observation(service_states=self.UNREADABLE))
+        assert payload["action_codes"], "a degraded reason with no action is a dead end"
+        assert "retry_service_query" in payload["action_codes"]
+
+    def test_a_fully_readable_robot_is_still_plainly_healthy(self):
+        """The refusal must not cost a good robot its clean report."""
+        payload, _ = diagnostic_payload(observation())
+        assert payload["primary_reason_code"] == "healthy"
+        assert payload["services"]["healthy"] is True
+        assert payload["services"]["unknown_service_ids"] == []
