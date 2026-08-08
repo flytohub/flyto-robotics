@@ -134,6 +134,19 @@ def _clamp(value: float, minimum: float, maximum: float) -> float:
 # dangerous in the direction of travel: the wall a robot drives alongside is not
 # the wall it drives into, and a robot reversing is not protected at all by
 # whatever is in front of it.
+# How close a relative move must land to count as arrived. Deliberately NOT
+# job.safety.pose_tolerance: that knob is validated at a minimum of 0.05 m
+# (contracts.py) because it governs navigation to a station, where a 5 cm
+# arrival box is right. A bounded 40 cm jog with a 5 cm box would overshoot by
+# an eighth of its own distance.
+#
+# This used to be written as max(0.015, min(0.03, job.safety.pose_tolerance)),
+# which reads as "the operator's knob, clamped" and is not: the validated
+# minimum is above the clamp's maximum, so both arms were unreachable and the
+# value was always 0.03. A constant that pretends to be configurable is worse
+# than one that says what it is.
+RELATIVE_MOVE_TOLERANCE_M = 0.03
+
 INTENT_FORWARD = "forward"
 INTENT_REVERSE = "reverse"
 INTENT_ROTATE = "rotate"
@@ -568,7 +581,7 @@ class MissionController:
         delta_x = pose.x - origin.x
         delta_y = pose.y - origin.y
         progress = delta_x * math.cos(origin.yaw) + delta_y * math.sin(origin.yaw)
-        tolerance = max(0.015, min(0.03, self.job.safety.pose_tolerance))
+        tolerance = RELATIVE_MOVE_TOLERANCE_M
         reached = (
             progress >= target_distance - tolerance
             if target_distance > 0.0

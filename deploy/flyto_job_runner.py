@@ -52,9 +52,16 @@ HEARTBEAT_INTERVAL_SECONDS = 30.0
 IDLE_DELAY_SECONDS = 1.0
 ERROR_BASE_DELAY_SECONDS = 3.0
 ERROR_MAX_DELAY_SECONDS = 60.0
-# A mission is bounded by the gateway's own job timeout; this only decides how
-# long to keep watching one before reporting that the outcome is unknown.
-MISSION_WATCH_SECONDS = 300.0
+# How long to keep watching a mission before reporting the outcome unknown.
+#
+# Derived from the gateway's own bound when it tells us one — the session
+# payload carries mission_timeout_seconds — plus a margin for the final stop
+# and the report. A constant here is a second opinion about a number the
+# gateway already owns: the job deployed on this robot allows 600s, so a
+# fixed 300s would call a legitimately running mission unknown at half time,
+# and the cloud takes that "failed" at face value.
+MISSION_WATCH_MARGIN_SECONDS = 20.0
+DEFAULT_MISSION_WATCH_SECONDS = 300.0
 GATEWAY_POLL_SECONDS = 1.0
 
 # What the gateway actually calls a finished mission. These are
@@ -269,7 +276,8 @@ def _run_plan(plan: dict[str, Any], job_id: str) -> dict[str, Any]:
     if not session_id:
         return {"status": "failed", "detail": "gateway returned no session"}
 
-    deadline = time.monotonic() + MISSION_WATCH_SECONDS
+    watch_seconds = _watch_seconds(session)
+    deadline = time.monotonic() + watch_seconds
     latest = session
     while time.monotonic() < deadline and not _stopping:
         # "status" is what the real session payload carries; "state" is
@@ -296,7 +304,15 @@ def _run_plan(plan: dict[str, Any], job_id: str) -> dict[str, Any]:
 
     # Not knowing an outcome is not the same as the mission having failed, and
     # the gateway still owns the robot. Report it as what it is.
-    return {"status": "failed", "detail": f"outcome unknown after {MISSION_WATCH_SECONDS:.0f}s"}
+    return {"status": "failed", "detail": f"outcome unknown after {watch_seconds:.0f}s"}
+
+
+def _watch_seconds(session: dict[str, Any]) -> float:
+    """How long this mission may run, according to the mission itself."""
+    bound = session.get("mission_timeout_seconds")
+    if isinstance(bound, (int, float)) and bound > 0:
+        return float(bound) + MISSION_WATCH_MARGIN_SECONDS
+    return DEFAULT_MISSION_WATCH_SECONDS
 
 
 def _handle(job: dict[str, Any], credentials: dict[str, str]) -> None:
