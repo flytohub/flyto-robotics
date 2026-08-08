@@ -19,7 +19,7 @@ from rclpy.signals import SignalHandlerOptions
 from sensor_msgs.msg import LaserScan
 
 from .contracts import write_json_atomic
-from .mission import closest_range, sector_field, Pose2D, evaluate_sensor_gate
+from .mission import Pose2D, closest_range, evaluate_sensor_gate, sector_field
 from .ros2_cmd_vel import (
     CMD_VEL_TYPE_AUTO,
     CMD_VEL_TYPES,
@@ -41,6 +41,7 @@ SENSOR_STABILIZATION_SECONDS = 1.0
 DEFAULT_ODOM_TOPIC = "/flyto/odom"
 DEFAULT_SCAN_TOPIC = "/flyto/scan"
 DEFAULT_CMD_VEL_TOPIC = "/flyto/cmd_vel"
+
 
 class Ros2DeliverySessionNode(Node):
     """Fail-safe per-session ROS wrapper mirroring the mission adapter.
@@ -67,9 +68,7 @@ class Ros2DeliverySessionNode(Node):
         if gazebo_physics:
             # Gazebo publishes /clock; mission and step timeouts must follow
             # simulation time or they fire at the wrong physical progress.
-            parameter_overrides.append(
-                Parameter("use_sim_time", Parameter.Type.BOOL, True)
-            )
+            parameter_overrides.append(Parameter("use_sim_time", Parameter.Type.BOOL, True))
         super().__init__(
             f"flyto_robotics_delivery_{session.session_id.replace('-', '_')}",
             parameter_overrides=parameter_overrides,
@@ -97,9 +96,7 @@ class Ros2DeliverySessionNode(Node):
         # subscribers and DDS reports no error, so the robot silently ignores
         # every command. Bind the publisher lazily to whatever the driver
         # actually subscribes with instead of hardcoding either type.
-        self._cmd_vel = CmdVelChannel(
-            self, topic=cmd_vel_topic, cmd_vel_type=cmd_vel_type
-        )
+        self._cmd_vel = CmdVelChannel(self, topic=cmd_vel_topic, cmd_vel_type=cmd_vel_type)
         self.create_subscription(Odometry, odom_topic, self._on_odometry, 10)
         self.create_subscription(
             LaserScan,
@@ -122,9 +119,7 @@ class Ros2DeliverySessionNode(Node):
     def _on_odometry(self, message: Odometry) -> None:
         position = message.pose.pose.position
         orientation = message.pose.pose.orientation
-        sin_yaw = 2.0 * (
-            orientation.w * orientation.z + orientation.x * orientation.y
-        )
+        sin_yaw = 2.0 * (orientation.w * orientation.z + orientation.x * orientation.y)
         cos_yaw = 1.0 - 2.0 * (orientation.y**2 + orientation.z**2)
         self._last_pose = Pose2D(position.x, position.y, math.atan2(sin_yaw, cos_yaw))
         self._last_odometry_at = time.monotonic()
@@ -225,9 +220,7 @@ class Ros2DeliverySessionNode(Node):
         elif self._sensors_ready_since is None:
             self._sensors_ready_since = steady_now
         ready_duration = (
-            steady_now - self._sensors_ready_since
-            if self._sensors_ready_since is not None
-            else 0.0
+            steady_now - self._sensors_ready_since if self._sensors_ready_since is not None else 0.0
         )
         finished_result: dict[str, Any] | None = None
         with self._lock:
@@ -423,4 +416,3 @@ class Ros2DeliveryRunner:
             self._executor = None
         if rclpy.ok():
             rclpy.shutdown()
-

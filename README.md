@@ -28,6 +28,8 @@ the example JSON as a device job, but neither project imports the other.
 - a differential-drive rover with lidar and odometry;
 - a ROS 2 Jazzy bridge and mission-controller launch file;
 - `flyto.robotics.job.v1`, `plan.v1`, and `result.v1` JSON Schemas;
+- `flyto.resource-manifest.v1` and `flyto.resource-telemetry.v1` contracts plus
+  an outbound installed-resource publisher for Flyto Cloud;
 - the strict `ai-space-resource-plan.v1` boundary that binds an exact
   workflow, resource, endpoint, adapter, capability, Space, and lease before a
   ROS/Gazebo/physical adapter may start;
@@ -102,6 +104,27 @@ python3 -m flyto_robotics.resource_binding \
 `dry-run` executes the same controller against deterministic planar kinematics.
 It proves the mission state transitions and result envelope; it does not claim
 Gazebo physics evidence.
+
+### Publish installed resources to Flyto Cloud
+
+After the installation claims an existing Flyto Cloud pairing code, keep the
+returned device secret in an owner-only file and run:
+
+```bash
+chmod 600 /path/to/device-secret
+flyto-resource-agent \
+  --cloud-url https://your-cloud-origin.example \
+  --device-id paired-device-id \
+  --device-secret-file /path/to/device-secret \
+  --manifest /path/to/resource-manifest.json \
+  --telemetry /path/to/latest-telemetry.json \
+  --interval-seconds 5
+```
+
+The local adapter may rewrite the manifest and telemetry snapshot files. The
+agent validates and republishes them on each bounded interval. Secret settings
+must carry `value: null`; only their configured state may reach Cloud. The
+resource surface is observation-only and does not add a motor command path.
 
 `make ai4all-showcase` first requests and verifies an attested initial plan and
 resource-triggered replan, then executes that exact final plan in the

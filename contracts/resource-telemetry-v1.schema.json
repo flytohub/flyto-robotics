@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://flyto2.com/contracts/resource-telemetry-v1.schema.json",
+  "title": "Flyto2 installed resource telemetry v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract",
+    "resource_id",
+    "channel_id",
+    "sequence",
+    "observed_at",
+    "quality",
+    "payload",
+    "payload_hash"
+  ],
+  "properties": {
+    "contract": { "const": "flyto.resource-telemetry.v1" },
+    "resource_id": { "$ref": "#/$defs/identifier" },
+    "channel_id": { "$ref": "#/$defs/identifier" },
+    "sequence": { "type": "integer", "minimum": 0 },
+    "observed_at": { "type": "string", "minLength": 1, "maxLength": 64 },
+    "quality": { "enum": ["good", "degraded", "stale", "error"] },
+    "payload": { "type": "object", "maxProperties": 128 },
+    "payload_hash": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+  },
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,127}$"
+    }
+  }
+}

@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://flyto2.com/contracts/flyto.robotics.mission-action-evidence.v1.schema.json",
+  "title": "Flyto Robotics Mission Action Evidence v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract_version",
+    "task_id",
+    "step_id",
+    "evidence",
+    "contract_hash"
+  ],
+  "properties": {
+    "contract_version": { "const": "flyto.robotics.mission-action-evidence.v1" },
+    "task_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "step_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "evidence_id",
+        "kind",
+        "status",
+        "outcome",
+        "source_resource_id",
+        "value",
+        "observed_at",
+        "digest"
+      ],
+      "properties": {
+        "evidence_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "kind": { "const": "action.execution" },
+        "status": { "enum": ["VALID", "INSUFFICIENT", "INVALID"] },
+        "outcome": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "source_resource_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "value": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "capability_id",
+            "plan_revision",
+            "assignment_revision",
+            "dispatch_hash",
+            "task_completion_eligible"
+          ],
+          "properties": {
+            "capability_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+            "plan_revision": { "type": "integer", "minimum": 1 },
+            "assignment_revision": { "type": "integer", "minimum": 1 },
+            "dispatch_hash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+            "task_completion_eligible": { "const": false }
+          }
+        },
+        "observed_at": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "digest": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+      }
+    },
+    "contract_hash": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+  }
+}
