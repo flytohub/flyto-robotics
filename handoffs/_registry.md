@@ -6,6 +6,7 @@ us, and what the next person should not rediscover.
 
 | Date | Topic | Summary |
 |---|---|---|
+| 2026-08-08 | [One-time recovery and persistent diagnostics](2026-08-08-one-time-recovery-and-diagnostics.md) | Idempotent Pi USB gadget recovery at 10.77.0.1, key-only SSH, read-only reason portal, and generic current/last-failure telemetry remove routine card pulls; physical Pi acceptance remains. |
 | 2026-08-08 | The robot loses the network, and how to get back in | Router swap left the robot with no known SSID and no SSH. Board is a Pi 4B (dual band, so band was never it); the cloud half dials out and is unaffected; card edits need an `instance-id` bump; wlan0 ends up DORMANT with a silent supplicant. |
 | 2026-08-05 | [TurtleBot3 commissioning and the keyboard-shortcut loop](2026-08-05-turtlebot3-bringup.md) | Robot fully provisioned on Jazzy with LDS-03; goal resolution, `turn_relative` and the four arrow cards landed; three non-obvious traps documented |
 | 2026-08-06 | Demo arena, directional safety | `2026-08-06-demo-arena-and-safety-sectors.md` | Active |
