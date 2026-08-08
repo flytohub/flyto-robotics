@@ -81,7 +81,21 @@ if set(data) - {"device_id", "device_secret"}:
     sys.exit(f"unexpected keys ({extra}); ship only what the runner reads")
 ' || die "the credential on stdin was rejected; nothing was written"
 
-install -d -m 0700 "$(dirname "$OUTPUT")"
+OUTPUT_DIR="$(dirname "$OUTPUT")"
+if [ ! -d "$OUTPUT_DIR" ]; then
+  install -d -m 0700 "$OUTPUT_DIR"
+else
+  # Never re-permission a directory this script did not create. An earlier
+  # version ran `install -d -m 0700` unconditionally, so --output under /tmp
+  # turned /tmp itself into 0700 root and locked every other user out of it.
+  # It did that to a live robot. Creating is ours to do; tightening someone
+  # else's directory is not.
+  case "$(stat -c %a "$OUTPUT_DIR")" in
+    700|750|755|500|550|555) : ;;
+    *) echo "provision: warning: $OUTPUT_DIR is mode $(stat -c %a "$OUTPUT_DIR"); " \
+            "the credential file itself will still be 0600" >&2 ;;
+  esac
+fi
 
 TEMP="$(mktemp "${OUTPUT}.XXXXXX")"
 trap 'rm -f "$TEMP"' EXIT

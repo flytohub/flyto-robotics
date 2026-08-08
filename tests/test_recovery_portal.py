@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import socket
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 from flyto_robotics.recovery_portal import (
     STALE_AFTER_SECONDS,
+    FreeBindHTTPServer,
     render_html,
     report_view,
 )
@@ -107,3 +110,88 @@ class TestASnapshotThatIsNoLongerCurrent:
 
     def test_a_live_page_carries_no_such_banner(self):
         assert "not current" not in render_html(self.aged(30))
+
+
+class TestBindingBeforeTheCableIsPluggedIn:
+    """The portal binds the USB gadget address, which exists only with a cable.
+
+    Without one the bind failed with EADDRNOTAVAIL and the service died,
+    systemd restarted it, and the unit reported `activating` — which reads as
+    "coming up", not "has failed 760 times in three hours". The thing an
+    operator reaches for when a robot is unreachable was itself dead, and the
+    health check was not watching it.
+    """
+
+    class FakeSocket:
+        """Records what was asked of it instead of touching the network."""
+
+        def __init__(self):
+            self.options = []
+            self.bound = None
+
+        def setsockopt(self, level, option, value):
+            self.options.append((level, option, value))
+
+        def bind(self, address):
+            self.bound = address
+
+        def getsockname(self):
+            return ("10.77.0.1", 8770)
+
+    def probe(self, sock):
+        server = FreeBindHTTPServer.__new__(FreeBindHTTPServer)
+        server.socket = sock
+        server.server_address = ("10.77.0.1", 8770)
+        FreeBindHTTPServer.server_bind(server)
+        return server
+
+    def test_free_bind_is_requested_before_the_address_exists(self):
+        sock = self.FakeSocket()
+        self.probe(sock)
+        assert (
+            socket.IPPROTO_IP,
+            FreeBindHTTPServer._IP_FREEBIND,
+            1,
+        ) in sock.options, "IP_FREEBIND was never requested"
+
+    def test_the_bind_still_happens(self):
+        sock = self.FakeSocket()
+        self.probe(sock)
+        assert sock.bound == ("10.77.0.1", 8770)
+
+    def test_an_unsupported_platform_does_not_stop_the_bind(self):
+        """macOS has no IP_FREEBIND. It must degrade, not refuse to serve.
+
+        The fake refuses only that option — an earlier version refused every
+        setsockopt, so the parent's SO_REUSEADDR raised and the test could not
+        tell whose failure it had caught.
+        """
+        reached_parent = []
+
+        class SelectivelyRefusing:
+            def setsockopt(self, level, option, value):
+                if option == FreeBindHTTPServer._IP_FREEBIND:
+                    raise OSError("IP_FREEBIND unsupported on this platform")
+                reached_parent.append(option)
+
+            def getsockname(self):
+                return ("127.0.0.1", 0)
+
+            def bind(self, address):
+                reached_parent.append("bind")
+
+        class Probe(FreeBindHTTPServer):
+            def __init__(self):
+                self.socket = SelectivelyRefusing()
+                self.server_address = ("127.0.0.1", 0)
+
+        FreeBindHTTPServer.server_bind(Probe())
+        assert "bind" in reached_parent, "the ordinary bind must still happen"
+
+    def test_it_does_not_fall_back_to_listening_everywhere(self):
+        """Binding 0.0.0.0 would fix the crash by publishing diagnostics on
+        Wi-Fi, which is worse than the failure it replaces."""
+        source = Path(__file__).resolve().parents[1] / "flyto_robotics/recovery_portal.py"
+        body = source.read_text()
+        assert '"0.0.0.0"' not in body
+        assert 'default="127.0.0.1"' in body

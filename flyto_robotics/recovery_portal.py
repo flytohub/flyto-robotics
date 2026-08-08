@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import html
 import json
+import socket
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -193,6 +195,36 @@ def handler_for(report_path: Path):
     return RecoveryHandler
 
 
+class FreeBindHTTPServer(ThreadingHTTPServer):
+    """An HTTP server that can listen on an address that does not exist yet.
+
+    The recovery portal binds the USB gadget address, 10.77.0.1. That address
+    only exists while a cable is plugged in, so with no cable the bind fails
+    with EADDRNOTAVAIL and the service dies. systemd restarts it, it dies
+    again, and the unit sits in auto-restart reporting ``activating`` — which
+    reads as "coming up" rather than "has failed 760 times in three hours".
+
+    That is what happened: the portal an operator reaches for when the robot is
+    unreachable was itself dead, silently, and the health check did not watch
+    it. Binding 0.0.0.0 instead would have fixed the crash by publishing the
+    diagnostics on Wi-Fi, which is worse than the disease.
+
+    ``IP_FREEBIND`` is the option for exactly this: hold the port for an
+    address the host does not have yet, and start answering the moment it
+    appears. Linux only; elsewhere this degrades to an ordinary bind.
+    """
+
+    #: Not exposed by Python's socket module on every platform or version.
+    _IP_FREEBIND = getattr(socket, "IP_FREEBIND", 15)
+
+    def server_bind(self) -> None:
+        # Not Linux, or a kernel without it: bind normally, and let a real
+        # failure surface rather than pretending it was asked for.
+        with contextlib.suppress(OSError):
+            self.socket.setsockopt(socket.IPPROTO_IP, self._IP_FREEBIND, 1)
+        super().server_bind()
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Serve read-only robot diagnostics over USB")
     parser.add_argument("--host", default="127.0.0.1")
@@ -201,7 +233,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if not (1 <= args.port <= 65535):
         parser.error("port must be between 1 and 65535")
-    server = ThreadingHTTPServer((args.host, args.port), handler_for(args.report))
+    server = FreeBindHTTPServer((args.host, args.port), handler_for(args.report))
     try:
         server.serve_forever()
     except KeyboardInterrupt:
