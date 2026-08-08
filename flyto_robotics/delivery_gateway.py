@@ -820,6 +820,12 @@ class DeliveryGateway:
             "elapsed_seconds": round(
                 max(0.0, session.sim_now - controller.started_at), 3
             ),
+            # The bound this mission is actually held to. Exposed because a
+            # client watching the session has to decide how long to wait, and
+            # the only alternative is a constant of its own that drifts from
+            # this one — the robot then finishes at 400s while the watcher
+            # reported "outcome unknown" at 300s.
+            "mission_timeout_seconds": controller.job.safety.mission_timeout_seconds,
             "pose": {
                 "x": round(session.pose.x, 3),
                 "y": round(session.pose.y, 3),

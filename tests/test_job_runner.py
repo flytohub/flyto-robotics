@@ -291,7 +291,10 @@ def test_an_unknown_outcome_is_not_reported_as_success(monkeypatch, tmp_path):
     })
     try:
         runner = load_runner(monkeypatch, tmp_path, cloud=cloud.url, gateway=stuck.url)
-        runner.MISSION_WATCH_SECONDS = 0.2
+        # The gateway in this test never states a bound, so the fallback is
+        # what applies — renaming the constant without renaming this line is
+        # how the suite hung for five minutes instead of failing.
+        runner.DEFAULT_MISSION_WATCH_SECONDS = 0.2
         runner.GATEWAY_POLL_SECONDS = 0.05
         runner._handle({"job_id": "j4", "steps": [{"params": {"plan": PLAN}}]},
                        {"device_id": "dev-1", "device_secret": "s-1"})
@@ -432,3 +435,17 @@ def test_an_unbuildable_motion_step_is_refused_not_approximated(monkeypatch, tmp
     assert runner._plan_from(
         {"job_id": "j", "steps": [{"module": "robotics.move", "params": {"distance_m": 99}}]}
     ) is None
+
+
+def test_the_watch_window_comes_from_the_mission_not_a_constant(monkeypatch, tmp_path):
+    """The gateway owns how long a mission may run; a constant here is a
+    second opinion that drifts from it. The job deployed on the lab robot
+    allows 600s, so a fixed 300s would call a legitimately running mission
+    unknown at half time — and the cloud takes that "failed" at face value.
+    """
+    runner = load_runner(monkeypatch, tmp_path, cloud="http://127.0.0.1:1", gateway="http://127.0.0.1:1")
+
+    assert runner._watch_seconds({"mission_timeout_seconds": 600.0}) == 620.0
+    # A gateway that does not say falls back rather than waiting forever.
+    assert runner._watch_seconds({}) == runner.DEFAULT_MISSION_WATCH_SECONDS
+    assert runner._watch_seconds({"mission_timeout_seconds": 0}) == runner.DEFAULT_MISSION_WATCH_SECONDS
