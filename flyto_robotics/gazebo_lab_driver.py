@@ -28,6 +28,12 @@ from .guarded_handoff import (
     load_script,
 )
 from .human_approval import decision_to_json
+from .lab_safety_observation import (
+    MOTION_RESUMED,
+    STOP_OBSERVED,
+    CommandedVelocity,
+    SafetyObservation,
+)
 from .qr_confirmation import (
     QRConfirmationAuthenticator,
     QRConfirmationValidationError,
@@ -213,9 +219,11 @@ class GazeboLabDriver(Node):
         self.world_path_length = 0.0
         self.minimum_range = math.inf
         self.latest_command_velocity: dict[str, float | bool] | None = None
-        self.motion_before_obstacle_seen = False
-        self.safety_stop_observed = False
-        self.motion_resumed_observed = False
+        # The stop/resume latching lives in a module that imports no ROS, so it
+        # can be exercised rather than pattern-matched in the driver's source.
+        self.safety_observation = SafetyObservation(
+            stop_distance=float(self.job.safety.obstacle_stop_distance)
+        )
         self.captured_labels: set[str] = set()
         self.actions: list[dict[str, object]] = []
         self.pending_captures: list[tuple[str, float]] = [
@@ -417,6 +425,18 @@ class GazeboLabDriver(Node):
         self.minimum_range = min(valid, default=math.inf)
         self._observe_safety_motion()
 
+    @property
+    def motion_before_obstacle_seen(self) -> bool:
+        return self.safety_observation.motion_before_obstacle
+
+    @property
+    def safety_stop_observed(self) -> bool:
+        return self.safety_observation.stop_observed
+
+    @property
+    def motion_resumed_observed(self) -> bool:
+        return self.safety_observation.resume_observed
+
     def _on_command_velocity(self, message: Twist) -> None:
         linear_x = float(message.linear.x)
         angular_z = float(message.angular.z)
@@ -426,44 +446,36 @@ class GazeboLabDriver(Node):
             "angular_z": round(angular_z, 6),
             "is_zero": is_zero,
         }
-        if not self.obstacle_entered and abs(linear_x) > 0.01:
-            self.motion_before_obstacle_seen = True
         self._observe_safety_motion()
 
     def _observe_safety_motion(self) -> None:
         command = self.latest_command_velocity
         if command is None:
             return
-        stop_distance = float(self.job.safety.obstacle_stop_distance)
-        if (
-            self.obstacle_entered
-            and not self.safety_stop_observed
-            and self.motion_before_obstacle_seen
-            and math.isfinite(self.minimum_range)
-            and self.minimum_range < stop_distance
-            and command["is_zero"] is True
-        ):
-            self.safety_stop_observed = True
+        transition = self.safety_observation.observe(
+            obstacle_entered=self.obstacle_entered,
+            obstacle_exited=self.obstacle_exited,
+            minimum_range=self.minimum_range,
+            command=CommandedVelocity(
+                linear_x=float(command["linear_x"]),
+                angular_z=float(command["angular_z"]),
+            ),
+        )
+        if transition is None:
+            return
+        stop_distance = round(self.safety_observation.stop_distance, 4)
+        if transition == STOP_OBSERVED:
             self._record(
-                "safety_stop_observed",
+                STOP_OBSERVED,
                 "LiDAR range crossed the configured threshold and commanded motion reached zero",
-                configured_stop_distance=round(stop_distance, 4),
+                configured_stop_distance=stop_distance,
                 pre_obstacle_motion_observed=True,
             )
-            return
-        if (
-            self.safety_stop_observed
-            and self.obstacle_exited
-            and not self.motion_resumed_observed
-            and math.isfinite(self.minimum_range)
-            and self.minimum_range >= stop_distance
-            and abs(float(command["linear_x"])) > 0.01
-        ):
-            self.motion_resumed_observed = True
+        else:
             self._record(
-                "motion_resumed_observed",
+                MOTION_RESUMED,
                 "LiDAR range recovered and forward commanded motion resumed",
-                configured_stop_distance=round(stop_distance, 4),
+                configured_stop_distance=stop_distance,
             )
 
     def _on_image(self, message: Image) -> None:
