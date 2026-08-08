@@ -1,5 +1,32 @@
 # Decisions
 
+## 2026-08-08 — The device credential is protected by permissions, not encryption
+
+Decision: the robot's device secret is stored as clear text with owner-only
+permissions set at creation, an atomic write, and a refusal to load it if those
+permissions have been widened. It is not encrypted at rest on this hardware.
+Where a host provides systemd credentials, the runner prefers them and writes
+nothing.
+
+Reason: the lab robot is a Raspberry Pi 4 with no TPM or secure element. It
+pairs itself and must read its own secret at boot with no operator present, so
+any key it can use unattended is a key the SD card also holds. Encrypting
+against a key stored beside the ciphertext would satisfy a scanner and protect
+nothing, and a control that only appears to work is worse than a documented
+limit — someone will plan around it.
+
+What is enforced instead is the boundary that can actually hold: no other
+account on the machine, no backup, and no stray chmod yields the secret, and a
+credential whose permissions were widened is treated as already disclosed
+rather than used. Physical possession of the card still yields it, which is
+why SECURITY.md says so outright and why a lost robot should be unpaired from
+Cloud rather than trusted.
+
+CodeQL alert 1 (py/clear-text-storage-sensitive-data) went from open to fixed
+across this change. That is not evidence the secret became encrypted — the
+sink pattern changed. The real gains were the exposure window between create
+and chmod, the non-atomic write, and the missing permission check on read.
+
 ## 2026-08-08 — Installed resources describe themselves to Cloud
 
 Decision: an installation publishes `flyto.resource-manifest.v1` and
