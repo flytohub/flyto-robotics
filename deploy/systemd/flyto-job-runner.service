@@ -10,6 +10,38 @@ Requires=flyto-delivery.service
 Type=simple
 User=ubuntu
 EnvironmentFile=/home/ubuntu/flyto-delivery.env
+
+# -- keeping the device secret to this service ---------------------------
+#
+# The runner holds a device credential it must be able to read unattended at
+# boot. It creates that file at 0600 itself; this is the second line, so a
+# future write that forgets loses nothing. 0077 means nothing this process
+# creates is readable by anyone but its owner, whatever the code asks for.
+UMask=0077
+# Nothing here needs to gain privileges, reach another user's namespace, or
+# write to the system tree. Saying so costs nothing and removes the paths an
+# attacker who reached this process would otherwise have.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+#
+# On a host that can do better than a file — one with a TPM — provision the
+# credential out of band and let systemd hand it over in memory instead:
+#
+#   systemd-creds encrypt --name=flyto-device creds.json /etc/flyto/device.cred
+#   LoadCredentialEncrypted=flyto-device:/etc/flyto/device.cred
+#
+# The runner prefers $CREDENTIALS_DIRECTORY when it is present, so nothing on
+# disk is read and nothing is written. This robot is a Raspberry Pi 4 with no
+# TPM and it pairs itself, so it uses the file: a device that must read its own
+# secret with no operator present cannot hold a key the SD card does not.
+
 Environment=PYTHONUNBUFFERED=1
 Environment=FLYTO_RUNNER_DATA_DIR=/home/ubuntu/.flyto
 Environment=FLYTO_PLAN_ROOT=/home/ubuntu/flyto-robotics/examples/plans

@@ -48,6 +48,19 @@ GATEWAY_URL = os.getenv("FLYTO_ROBOTICS_GATEWAY_URL", "http://127.0.0.1:8766").r
 DATA_DIR = Path(os.getenv("FLYTO_RUNNER_DATA_DIR", "/home/ubuntu/.flyto"))
 CREDENTIAL_FILE = DATA_DIR / "runner-credentials.json"
 
+# Owner only, for both. What this protects against is every other account on
+# the robot, a careless backup, and anything that walks the filesystem. What it
+# cannot protect against is physical possession of the SD card: an unattended
+# device must be able to read its own secret at boot with no operator present,
+# so any key it holds is a key the card holds. Encrypting it against a key
+# stored beside it would look stronger and be worth nothing. Where the hardware
+# can do better — a TPM — see _systemd_credential.
+CREDENTIAL_MODE = 0o600
+DATA_DIR_MODE = 0o700
+
+#: Name the unit passes via LoadCredentialEncrypted=, read from tmpfs.
+SYSTEMD_CREDENTIAL_NAME = "flyto-device"
+
 POLL_WAIT_SECONDS = 25
 HEARTBEAT_INTERVAL_SECONDS = 30.0
 IDLE_DELAY_SECONDS = 1.0
@@ -125,19 +138,98 @@ def _post(
 # -- credentials ---------------------------------------------------------
 
 
-def _read_credentials() -> dict[str, str] | None:
-    if not CREDENTIAL_FILE.exists():
-        return None
-    data = json.loads(CREDENTIAL_FILE.read_text())
-    if not data.get("device_id") or not data.get("device_secret"):
-        raise RunnerError(f"{CREDENTIAL_FILE} is malformed; delete it and pair again")
+def _validated(data: Any, source: Path) -> dict[str, str]:
+    if not isinstance(data, dict) or not data.get("device_id") or not data.get("device_secret"):
+        raise RunnerError(f"{source} is malformed; delete it and pair again")
     return data
 
 
+def _systemd_credential() -> dict[str, str] | None:
+    """A credential systemd placed in memory for us, if the unit supplies one.
+
+    ``LoadCredentialEncrypted=`` decrypts into ``$CREDENTIALS_DIRECTORY``: a
+    private tmpfs, readable only by this service, that never touches persistent
+    storage. On a host with a TPM the ciphertext at rest is sealed to the
+    hardware, so a stolen disk yields nothing.
+
+    Where an operator can provision that, none of the on-disk path below runs
+    and this process never writes a secret to a filesystem at all. The lab
+    TurtleBot3 is a Raspberry Pi 4 with no TPM and self-service pairing, so it
+    still uses the file — see the module notes on what that does and does not
+    protect against.
+    """
+    directory = os.getenv("CREDENTIALS_DIRECTORY")
+    if not directory:
+        return None
+    path = Path(directory) / SYSTEMD_CREDENTIAL_NAME
+    if not path.is_file():
+        return None
+    return _validated(json.loads(path.read_text()), path)
+
+
+def _refuse_loose_permissions(path: Path) -> None:
+    """Stop if anyone but the owner can read the secret.
+
+    A credential restored from a backup, copied with ``cp`` under a permissive
+    umask, or chmod'd by hand comes back readable and nothing would have said
+    so. The exposure is silent by nature: the file keeps working perfectly.
+    """
+    mode = path.stat().st_mode & 0o777
+    if mode & 0o077:
+        raise RunnerError(
+            f"{path} is mode {mode:04o}. A device secret that group or others "
+            "can read is already disclosed, so this will not use it. Either "
+            "chmod 600 it, or — if you cannot account for the permissions — "
+            "delete it and pair again, which revokes what leaked."
+        )
+
+
+def _read_credentials() -> dict[str, str] | None:
+    from_systemd = _systemd_credential()
+    if from_systemd is not None:
+        return from_systemd
+    if not CREDENTIAL_FILE.exists():
+        return None
+    _refuse_loose_permissions(CREDENTIAL_FILE)
+    return _validated(json.loads(CREDENTIAL_FILE.read_text()), CREDENTIAL_FILE)
+
+
 def _write_credentials(data: dict[str, str]) -> None:
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    CREDENTIAL_FILE.write_text(json.dumps(data))
-    CREDENTIAL_FILE.chmod(0o600)
+    """Persist the credential without ever exposing it, even briefly.
+
+    ``Path.write_text`` creates at ``0o666 & ~umask`` — 0644 under the usual
+    umask — and only narrows afterwards, so the secret sat world-readable for
+    the length of a write and a chmod. Opening with the final mode closes that
+    window: the file has never existed at any other permission.
+
+    The write is also atomic. A power cut mid-write used to leave truncated
+    JSON, which the reader rejects as malformed, which costs the pairing — and
+    a robot loses power for reasons that have nothing to do with software.
+    """
+    DATA_DIR.mkdir(parents=True, exist_ok=True, mode=DATA_DIR_MODE)
+    # mkdir's mode applies only when it creates the directory, and umask masks
+    # it even then. Set it outright so an existing loose directory is tightened.
+    os.chmod(DATA_DIR, DATA_DIR_MODE)
+
+    partial = DATA_DIR / f"{CREDENTIAL_FILE.name}.partial"
+    # A leftover partial from an interrupted write holds a secret of its own.
+    partial.unlink(missing_ok=True)
+    descriptor = os.open(partial, os.O_CREAT | os.O_EXCL | os.O_WRONLY, CREDENTIAL_MODE)
+    try:
+        with os.fdopen(descriptor, "w") as handle:
+            json.dump(data, handle)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(partial, CREDENTIAL_FILE)
+        # Durability of the rename itself, for the same power-cut reason.
+        directory = os.open(DATA_DIR, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    except BaseException:
+        partial.unlink(missing_ok=True)
+        raise
 
 
 def _pair() -> dict[str, str]:

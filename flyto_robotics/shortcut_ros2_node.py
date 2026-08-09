@@ -28,7 +28,11 @@ from .input_runtime import (
     ValidatedWorkflowCatalog,
     parse_input_event,
 )
-from .mission import MissionController, Pose2D
+from .mission import (
+    DEFAULT_SENSOR_STARTUP_GRACE_SECONDS,
+    MissionController,
+    Pose2D,
+)
 from .resource_binding import (
     ResourceBinding,
     ResourceBindingError,
@@ -81,7 +85,9 @@ class ShortcutNode(Node):
         self.declare_parameter("input_control_ids", "")
         self.declare_parameter("deadman_timeout_seconds", 0.5)
         self.declare_parameter("sensor_timeout_seconds", 1.0)
-        self.declare_parameter("sensor_startup_grace_seconds", 5.0)
+        self.declare_parameter(
+            "sensor_startup_grace_seconds", DEFAULT_SENSOR_STARTUP_GRACE_SECONDS
+        )
         self.declare_parameter("gateway_enabled", True)
         self.declare_parameter("gateway_host", "127.0.0.1")
         self.declare_parameter("gateway_port", 8765)
