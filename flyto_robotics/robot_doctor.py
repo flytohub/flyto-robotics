@@ -30,6 +30,12 @@ SERVICE_NAMES = (
     "flyto-delivery.service",
     "flyto-job-runner.service",
     "turtlebot3-bringup.service",
+    # The portal is how an operator reaches a robot that has lost the network,
+    # so it is the one service whose failure is hardest to notice from outside.
+    # It was left off this list and spent three hours in a restart loop while
+    # the doctor reported services.healthy true — a health check that does not
+    # watch the recovery path will always look best exactly when it is wrong.
+    "flyto-recovery-portal.service",
 )
 
 
@@ -59,21 +65,48 @@ _ACTION_CODES = {
     "cloud_endpoint_unconfigured": ["configure_cloud_origin"],
     "cloud_unreachable": ["inspect_firewall_or_uplink", "retry_cloud_health"],
     "robot_service_unhealthy": ["inspect_service_journal", "restart_failed_service"],
+    "service_state_unknown": ["retry_service_query", "inspect_service_journal"],
     "healthy": [],
 }
 
+#: What `systemctl is-active` says when a unit is fine.
+SERVICE_STATE_ACTIVE = "active"
+
+#: What :func:`_service_state` returns when it could not find out — systemctl
+#: missing, systemctl hanging past the timeout, or any reply it did not
+#: recognise. It is not a state the service is in; it is the absence of an
+#: answer, and it used to be filtered out alongside "active".
+SERVICE_STATE_UNKNOWN = "unknown"
+
 
 def classify_observation(observation: DiagnosticObservation) -> tuple[str, str]:
-    """Return one stable primary reason and telemetry quality."""
+    """Return one stable primary reason and telemetry quality.
+
+    A service state this tool could not read is reported as unread, never as
+    well. Grouping "unknown" with "active" meant a robot whose systemd could
+    not be queried at all — no systemctl on PATH, or a systemctl that hung past
+    the three second timeout — came back `healthy` / `good` / `services.healthy
+    true`, with no action codes. This is the diagnostic an operator consults to
+    decide whether a robot is fit to run, so a reassuring answer it did not
+    earn is worse here than anywhere else in the tree.
+    """
     network_ready = (
         observation.default_route and observation.dns_ready and observation.cloud_reachable is True
     )
+    states = list(observation.service_states.values())
     failed_services = [
-        state for state in observation.service_states.values() if state not in {"active", "unknown"}
+        state
+        for state in states
+        if state not in {SERVICE_STATE_ACTIVE, SERVICE_STATE_UNKNOWN}
     ]
+    unknown_services = [state for state in states if state == SERVICE_STATE_UNKNOWN]
     if network_ready:
+        # A service known to be down outranks one that could not be read: the
+        # first names a fix, the second only names an absence.
         if failed_services:
             return "robot_service_unhealthy", "degraded"
+        if unknown_services:
+            return "service_state_unknown", "degraded"
         return "healthy", "good"
     if observation.cloud_init_status in {"degraded", "error"}:
         return "provisioning_degraded", "error"
@@ -99,7 +132,12 @@ def diagnostic_payload(observation: DiagnosticObservation) -> tuple[dict[str, An
     unhealthy_services = sorted(
         name
         for name, state in observation.service_states.items()
-        if state not in {"active", "unknown"}
+        if state not in {SERVICE_STATE_ACTIVE, SERVICE_STATE_UNKNOWN}
+    )
+    unknown_services = sorted(
+        name
+        for name, state in observation.service_states.items()
+        if state == SERVICE_STATE_UNKNOWN
     )
     payload = {
         "primary_reason_code": reason,
@@ -115,8 +153,12 @@ def diagnostic_payload(observation: DiagnosticObservation) -> tuple[dict[str, An
         },
         "provisioning": {"cloud_init_status": observation.cloud_init_status},
         "services": {
-            "healthy": not unhealthy_services,
+            # Healthy means every service was read and every one was active.
+            # An unread service leaves this false, because the honest answer to
+            # "are the services healthy" after failing to look is not "yes".
+            "healthy": not unhealthy_services and not unknown_services,
             "unhealthy_service_ids": unhealthy_services,
+            "unknown_service_ids": unknown_services,
         },
         "recovery": {
             "usb_present": observation.usb_recovery_present,

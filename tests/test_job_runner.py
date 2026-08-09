@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -534,3 +535,177 @@ def test_the_watch_window_comes_from_the_mission_not_a_constant(monkeypatch, tmp
         runner._watch_seconds({"mission_timeout_seconds": 0})
         == runner.DEFAULT_MISSION_WATCH_SECONDS
     )
+
+
+# -- how the credential is kept ------------------------------------------
+
+
+class TestTheCredentialOnDisk:
+    """A device secret an unattended robot must read at boot.
+
+    What is achievable here is bounded and worth stating: the robot has no TPM
+    and pairs itself, so any key it can use without an operator is a key the SD
+    card also holds. Encrypting against a key stored beside it would look
+    stronger and be worth nothing. These tests cover what is real — that no
+    other account on the machine can read it, that it is never briefly exposed,
+    and that losing power does not cost the pairing.
+    """
+
+    CREDENTIAL = {"device_id": "dev-1", "device_secret": "s-1"}
+
+    def runner(self, monkeypatch, tmp_path):
+        return load_runner(
+            monkeypatch, tmp_path, cloud="http://127.0.0.1:1", gateway="http://127.0.0.1:1"
+        )
+
+    def test_the_file_is_owner_only(self, monkeypatch, tmp_path):
+        runner = self.runner(monkeypatch, tmp_path)
+        runner._write_credentials(self.CREDENTIAL)
+        assert runner.CREDENTIAL_FILE.stat().st_mode & 0o777 == 0o600
+
+    def test_the_directory_is_owner_only(self, monkeypatch, tmp_path):
+        runner = self.runner(monkeypatch, tmp_path)
+        runner._write_credentials(self.CREDENTIAL)
+        assert runner.DATA_DIR.stat().st_mode & 0o777 == 0o700
+
+    def test_an_existing_loose_directory_is_tightened(self, monkeypatch, tmp_path):
+        """A data dir made by hand, or by an older version, comes back 0755."""
+        runner = self.runner(monkeypatch, tmp_path)
+        runner.DATA_DIR.mkdir(parents=True)
+        runner.DATA_DIR.chmod(0o755)
+        runner._write_credentials(self.CREDENTIAL)
+        assert runner.DATA_DIR.stat().st_mode & 0o777 == 0o700
+
+    def test_it_is_never_readable_even_for_an_instant(self, monkeypatch, tmp_path):
+        """The window the previous code left open.
+
+        write_text() creates at 0666 & ~umask, then narrows. Checking the mode
+        afterwards cannot see that, because afterwards is exactly when it is
+        correct. So look at the file the moment before it is renamed into
+        place, which is the whole of its exposed life.
+        """
+        runner = self.runner(monkeypatch, tmp_path)
+        observed = []
+        real_replace = runner.os.replace
+
+        def watch(source, destination):
+            observed.append(runner.os.stat(source).st_mode & 0o777)
+            return real_replace(source, destination)
+
+        monkeypatch.setattr(runner.os, "replace", watch)
+        # Permissive umask, so any mode the code does not set explicitly shows.
+        previous = runner.os.umask(0o000)
+        try:
+            runner._write_credentials(self.CREDENTIAL)
+        finally:
+            runner.os.umask(previous)
+
+        assert observed == [0o600], "the secret existed at another mode first"
+
+    def test_a_crash_mid_write_keeps_the_previous_credential(self, monkeypatch, tmp_path):
+        """Losing the pairing to a power cut means a trip to the robot."""
+        runner = self.runner(monkeypatch, tmp_path)
+        runner._write_credentials(self.CREDENTIAL)
+
+        def explode(*args, **kwargs):
+            raise OSError("power cut")
+
+        monkeypatch.setattr(runner.os, "replace", explode)
+        with pytest.raises(OSError):
+            runner._write_credentials({"device_id": "dev-2", "device_secret": "s-2"})
+
+        assert runner._read_credentials() == self.CREDENTIAL
+
+    def test_a_crash_leaves_no_secret_behind_in_a_partial_file(self, monkeypatch, tmp_path):
+        runner = self.runner(monkeypatch, tmp_path)
+        monkeypatch.setattr(runner.os, "replace", lambda *a, **k: (_ for _ in ()).throw(OSError()))
+        with pytest.raises(OSError):
+            runner._write_credentials(self.CREDENTIAL)
+        leftovers = [p.name for p in runner.DATA_DIR.iterdir()]
+        assert leftovers == [], f"a secret was left in {leftovers}"
+
+    def test_a_stale_partial_does_not_block_the_next_write(self, monkeypatch, tmp_path):
+        runner = self.runner(monkeypatch, tmp_path)
+        runner.DATA_DIR.mkdir(parents=True)
+        (runner.DATA_DIR / f"{runner.CREDENTIAL_FILE.name}.partial").write_text("{}")
+        runner._write_credentials(self.CREDENTIAL)
+        assert runner._read_credentials() == self.CREDENTIAL
+
+
+class TestRefusingACredentialThatLeaked:
+    CREDENTIAL = {"device_id": "dev-1", "device_secret": "s-1"}
+
+    def stored(self, monkeypatch, tmp_path, mode):
+        runner = load_runner(
+            monkeypatch, tmp_path, cloud="http://127.0.0.1:1", gateway="http://127.0.0.1:1"
+        )
+        runner._write_credentials(self.CREDENTIAL)
+        runner.CREDENTIAL_FILE.chmod(mode)
+        return runner
+
+    @pytest.mark.parametrize("mode", [0o640, 0o604, 0o644, 0o666, 0o660])
+    def test_a_readable_secret_is_treated_as_disclosed(self, monkeypatch, tmp_path, mode):
+        """It would keep working perfectly, which is why nothing said so."""
+        runner = self.stored(monkeypatch, tmp_path, mode)
+        with pytest.raises(runner.RunnerError, match="already disclosed"):
+            runner._read_credentials()
+
+    def test_the_error_says_how_to_recover_and_why_re_pairing_is_safer(
+        self, monkeypatch, tmp_path
+    ):
+        runner = self.stored(monkeypatch, tmp_path, 0o644)
+        with pytest.raises(runner.RunnerError) as caught:
+            runner._read_credentials()
+        message = str(caught.value)
+        assert "chmod 600" in message
+        assert "pair again" in message
+
+    @pytest.mark.parametrize("mode", [0o600, 0o400])
+    def test_an_owner_only_secret_is_used(self, monkeypatch, tmp_path, mode):
+        runner = self.stored(monkeypatch, tmp_path, mode)
+        assert runner._read_credentials() == self.CREDENTIAL
+
+
+class TestACredentialFromSystemd:
+    """Where the host can do better than a file, it is used instead.
+
+    LoadCredentialEncrypted= decrypts into a private tmpfs that never reaches
+    persistent storage, and on a host with a TPM the ciphertext at rest is
+    sealed to the hardware.
+    """
+
+    CREDENTIAL = {"device_id": "dev-tpm", "device_secret": "s-tpm"}
+
+    def provisioned(self, monkeypatch, tmp_path):
+        directory = tmp_path / "creds"
+        directory.mkdir()
+        runner = load_runner(
+            monkeypatch, tmp_path, cloud="http://127.0.0.1:1", gateway="http://127.0.0.1:1"
+        )
+        (directory / runner.SYSTEMD_CREDENTIAL_NAME).write_text(json.dumps(self.CREDENTIAL))
+        monkeypatch.setenv("CREDENTIALS_DIRECTORY", str(directory))
+        return runner
+
+    def test_it_is_preferred_over_the_file(self, monkeypatch, tmp_path):
+        runner = self.provisioned(monkeypatch, tmp_path)
+        runner._write_credentials({"device_id": "old", "device_secret": "old"})
+        assert runner._read_credentials() == self.CREDENTIAL
+
+    def test_nothing_is_written_to_disk_for_it(self, monkeypatch, tmp_path):
+        runner = self.provisioned(monkeypatch, tmp_path)
+        assert runner._read_credentials() == self.CREDENTIAL
+        assert not runner.CREDENTIAL_FILE.exists()
+
+    def test_the_file_is_still_used_when_systemd_supplies_nothing(self, monkeypatch, tmp_path):
+        runner = self.provisioned(monkeypatch, tmp_path)
+        (Path(os.environ["CREDENTIALS_DIRECTORY"]) / runner.SYSTEMD_CREDENTIAL_NAME).unlink()
+        runner._write_credentials({"device_id": "dev-file", "device_secret": "s-file"})
+        assert runner._read_credentials()["device_id"] == "dev-file"
+
+    def test_a_malformed_systemd_credential_is_rejected_not_ignored(self, monkeypatch, tmp_path):
+        """Falling back to the file would hide a broken provisioning."""
+        runner = self.provisioned(monkeypatch, tmp_path)
+        path = Path(os.environ["CREDENTIALS_DIRECTORY"]) / runner.SYSTEMD_CREDENTIAL_NAME
+        path.write_text(json.dumps({"device_id": "only-half"}))
+        with pytest.raises(runner.RunnerError, match="malformed"):
+            runner._read_credentials()

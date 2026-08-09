@@ -1,3 +1,23 @@
+"""Checks on the Gazebo lab driver.
+
+Read this before trusting a green run here. The driver imports rclpy at module
+scope, so most of this file cannot execute it and asserts on its *source*
+instead. Those assertions are structural: they say a line of code exists, never
+that it does the right thing. They pass a broken implementation and fail a
+reformatting.
+
+Genuinely executed:
+
+- point_ahead_from_quaternion, lifted out through the AST
+- the stop/resume latching, extracted to flyto_robotics.lab_safety_observation
+  and covered behaviourally in tests/test_lab_safety_observation.py
+
+Still structural only, and therefore not evidence that the behaviour works:
+world path accumulation, the replay delay, and the delivery-gate ordering. The
+way to fix one of those is to move the logic into a module that imports no ROS
+and test it, not to add another string to search for.
+"""
+
 from __future__ import annotations
 
 import ast
@@ -60,16 +80,45 @@ def test_tick_uses_live_world_yaw_and_records_path_length() -> None:
 
 
 def test_driver_independently_observes_stop_and_resume_commands() -> None:
-    source = DRIVER_FILE.read_text(encoding="utf-8")
+    """The driver must watch /cmd_vel itself, not take the controller's word.
 
-    assert "flyto.robotics.lab-driver-evidence.v2" in source
-    assert 'Twist,\n            "/flyto/cmd_vel"' in source
-    assert "self.motion_before_obstacle_seen" in source
-    assert "self.minimum_range < stop_distance" in source
-    assert 'command["is_zero"] is True' in source
-    assert '"safety_stop_observed"' in source
-    assert '"motion_resumed_observed"' in source
-    assert '"latest_command_velocity": self.latest_command_velocity' in source
+    The behaviour this used to assert — when a stop counts, when a resume
+    counts, that each is recorded once — now lives in
+    flyto_robotics.lab_safety_observation and is exercised in
+    tests/test_lab_safety_observation.py. What remains here is the structural
+    part that cannot move: that the driver subscribes to the command topic
+    itself, and that it delegates the latching rather than growing a second
+    copy of it.
+
+    Asserted through the AST rather than by searching the text. The previous
+    version required a specific line break inside the subscribe call, so
+    reformatting broke it while a genuine behaviour change would not have.
+    """
+    tree = ast.parse(DRIVER_FILE.read_text(encoding="utf-8"))
+
+    subscribed_topics = {
+        argument.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "create_subscription"
+        for argument in node.args
+        if isinstance(argument, ast.Constant) and isinstance(argument.value, str)
+    }
+    assert "/flyto/cmd_vel" in subscribed_topics, (
+        "the driver must observe commanded velocity independently"
+    )
+
+    delegates = {
+        node.func.attr
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+    }
+    assert "observe" in delegates, "the latching belongs to the tested module"
+
+    assert "flyto.robotics.lab-driver-evidence.v2" in DRIVER_FILE.read_text(
+        encoding="utf-8"
+    ), "the evidence contract version is part of the published payload"
 
 
 def test_replay_delay_is_short_but_configurable() -> None:

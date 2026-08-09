@@ -13,7 +13,7 @@ STORY_RENDER_SCRIPT = ROOT / "scripts/render-ai4all-story-video.sh"
 DOCKERFILE = ROOT / "docker/Dockerfile.jazzy"
 WORLD = ROOT / "worlds/ai4all-branching-route.sdf"
 ROVER = ROOT / "models/flyto_rover/model.sdf"
-SHOWCASE_DOC = ROOT / "docs/AI4ALL_SHOWCASE.md"
+SHOWCASE_DOC = ROOT / "docs/SHOWCASE_EVIDENCE.md"
 
 
 def test_video_composes_both_real_gazebo_camera_streams() -> None:
@@ -205,5 +205,8 @@ def test_showcase_documentation_distinguishes_verification_from_promotion() -> N
 
     assert "run-ai4all-gui-evidence.sh" in documentation
     assert "render-ai4all-verification-video.sh" in documentation
-    assert "連續時間線" in documentation
-    assert "不使用生成式影像" in documentation
+    # The two integrity claims, in the words the document actually uses. The
+    # Chinese original said 連續時間線 and 不使用生成式影像; the guarantee is the
+    # same one, and it is still a test rather than a promise.
+    assert "continuous timeline" in documentation.lower()
+    assert "no generative imagery" in documentation.lower()

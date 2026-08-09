@@ -25,11 +25,15 @@ from .human_approval import (
 )
 from .line_perception import LineScene, detect_line_scene
 from .mission import (
+    DEFAULT_SENSOR_FRESHNESS_TIMEOUT_SECONDS,
+    DEFAULT_SENSOR_STABILIZATION_SECONDS,
+    DEFAULT_SENSOR_STARTUP_GRACE_SECONDS,
     MissionController,
     Pose2D,
     RangeField,
     evaluate_sensor_gate,
     sector_field,
+    unready_sensors,
 )
 from .ros2_cmd_vel import CMD_VEL_TYPE_AUTO, CmdVelChannel, validated_topic
 from .semantic_map import SemanticLocationStore, SemanticMapValidationError
@@ -64,9 +68,15 @@ class MissionNode(Node):
         self.declare_parameter("plan_file", "")
         self.declare_parameter("semantic_map_file", "")
         self.declare_parameter("semantic_map_id", "")
-        self.declare_parameter("odometry_timeout_seconds", 1.0)
-        self.declare_parameter("sensor_startup_grace_seconds", 10.0)
-        self.declare_parameter("sensor_stabilization_seconds", 1.0)
+        self.declare_parameter(
+            "odometry_timeout_seconds", DEFAULT_SENSOR_FRESHNESS_TIMEOUT_SECONDS
+        )
+        self.declare_parameter(
+            "sensor_startup_grace_seconds", DEFAULT_SENSOR_STARTUP_GRACE_SECONDS
+        )
+        self.declare_parameter(
+            "sensor_stabilization_seconds", DEFAULT_SENSOR_STABILIZATION_SECONDS
+        )
         self.declare_parameter("gazebo_physics", False)
         self.declare_parameter("obstacle_injected", False)
         self.declare_parameter("human_approval_injected", False)
@@ -390,6 +400,32 @@ class MissionNode(Node):
                 "required_sensor_stale"
                 if sensor_decision == "fail_stale"
                 else "required_sensor_not_ready"
+            )
+            # Say which one. The result contract keeps the same reason code, but
+            # an operator reading only "failed" cannot tell a late lidar from a
+            # late odometry, and the two have nothing to do with each other.
+            last_seen: dict[str, float | None] = {
+                "odometry": self.last_odometry_at,
+                "scan": self.last_scan_at,
+            }
+            if self.requires_camera:
+                last_seen["camera"] = self.last_image_at
+            blocking = unready_sensors(
+                last_seen=last_seen, now=steady_now, freshness_timeout=timeout
+            )
+            # Only worth saying when messages ARE arriving: that is a different
+            # fault (unusable payload) from silence, and needs a different fix.
+            # Reporting both for a topic nobody publishes reads as two problems.
+            if self.last_pose is None and self.last_odometry_at is not None:
+                blocking.append("odometry: messages arriving but no pose parsed")
+            self.get_logger().error(
+                f"{reason} after {steady_now - self.started_at_steady:.1f}s: "
+                + (
+                    "; ".join(blocking)
+                    if blocking
+                    else f"every sensor present, but not continuously fresh for "
+                    f"the {stabilization:.1f}s stabilization window"
+                )
             )
             self.controller.fail(reason, now)
             self._publish_new_events()

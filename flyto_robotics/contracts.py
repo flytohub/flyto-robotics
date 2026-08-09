@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
 import re
@@ -10,6 +11,20 @@ import tempfile
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
+
+from .safety_profile import (
+    DEFAULT_PROFILE_PATH,
+    apply_profile,
+    load_profile,
+)
+
+logger = logging.getLogger("flyto.robotics.contracts")
+
+#: Where the site profile lives. An environment override exists so a test
+#: or a second installation on one host can point elsewhere; there is no
+#: switch to disable enforcement, because a site limit an operator can turn
+#: off from the job side is not a site limit.
+SAFETY_PROFILE_ENV = "FLYTO_SAFETY_PROFILE"
 
 JOB_CONTRACT_VERSION = "flyto.robotics.job.v1"
 RESULT_CONTRACT_VERSION = "flyto.robotics.result.v1"
@@ -154,7 +169,7 @@ def _safety(value: Any) -> SafetyLimits:
     }
     _reject_unknown(data, allowed, "safety")
     defaults = SafetyLimits()
-    return SafetyLimits(
+    requested = SafetyLimits(
         max_linear_speed=_number(
             data.get("max_linear_speed", defaults.max_linear_speed),
             "safety.max_linear_speed",
@@ -214,6 +229,44 @@ def _safety(value: Any) -> SafetyLimits:
             maximum=60.0,
         ),
     )
+    return _constrained_by_site(requested)
+
+
+def _constrained_by_site(requested: SafetyLimits) -> SafetyLimits:
+    """Fold the installation's own limits over the job's.
+
+    Applied here rather than at a call site because this is the single place a
+    SafetyLimits is built. A site limit that a caller could forget to apply
+    would be enforced everywhere except the one path somebody added in a hurry.
+
+    The parse-time clamps above remain the outer bound: a profile narrows what
+    a job may ask for, it cannot widen it past what the contract allows.
+    """
+    profile = load_profile(os.getenv(SAFETY_PROFILE_ENV, DEFAULT_PROFILE_PATH))
+    if not profile:
+        return requested
+
+    outcome = apply_profile(
+        profile,
+        {
+            "max_linear_speed": requested.max_linear_speed,
+            "max_angular_speed": requested.max_angular_speed,
+            "obstacle_stop_distance": requested.obstacle_stop_distance,
+            "lateral_stop_distance": requested.lateral_stop_distance,
+            "emergency_stop_distance": requested.emergency_stop_distance,
+        },
+    )
+    if not outcome.constrained:
+        return requested
+
+    # Loud, not silent. A job quietly running slower than it asked is a day of
+    # debugging for whoever is standing next to a robot wondering why.
+    for adjustment in outcome.adjustments:
+        logger.warning("site safety profile: %s", adjustment.describe())
+
+    from dataclasses import replace as _replace
+
+    return _replace(requested, **dict(outcome.values))
 
 
 def parse_job(value: Any) -> DeliveryJob:
