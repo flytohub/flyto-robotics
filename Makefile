@@ -1,4 +1,12 @@
-PYTHON ?= python3
+# Deterministic, self-contained interpreter resolution.
+# Prefer the repository-local virtualenv when it exists: it is the only
+# interpreter guaranteed to carry the dev tooling (ruff, pytest) regardless of
+# which machine or sanitized worker runs the checks. No personal or
+# machine-specific absolute paths. Otherwise fall back to whatever `python3`
+# resolves to on PATH, so runtime/customer installs keep their existing
+# semantics. `?=` keeps `make PYTHON=... verify` and env overrides working.
+REPO_ROOT := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
+PYTHON ?= $(if $(wildcard $(REPO_ROOT).venv/bin/python),$(REPO_ROOT).venv/bin/python,python3)
 
 .PHONY: ai-dry-run ai4all-medication-showcase ai4all-showcase assets benchmark-robot-mcp careflow-dry-run dry-run facility-contract gazebo-lab gazebo-matrix gazebo-shortcut gazebo-video lab-contract lint nav2-closed-loop nav2-stress ros2-execution-grant ros2-pairing soak test verify
 

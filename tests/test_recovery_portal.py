@@ -52,6 +52,38 @@ def test_portal_view_explains_the_stable_reason_without_raw_evidence():
     assert "payload_hash" not in view
 
 
+def test_portal_summary_retains_bounded_recovery_after_services_are_healthy():
+    value = report()
+    value["payload"]["primary_reason_code"] = "healthy"
+    value["payload"]["action_codes"] = []
+    value["payload"]["recovery"]["service_restarts"] = {
+        "status": "known",
+        "current_boot_total": 1,
+        "current_boot_watchdog_total": 1,
+        "newly_observed": 0,
+        "current_recovery_kind": None,
+        "raw_journal_included": False,
+    }
+    view = report_view(value, now=OBSERVED_AT + timedelta(seconds=1))
+    assert "active now" in view["summary"]
+    assert "history exists earlier" in view["summary"]
+    assert "journal" not in view["summary"]
+
+
+def test_portal_does_not_call_a_non_watchdog_restart_a_watchdog_recovery():
+    value = report()
+    value["payload"]["recovery"]["service_restarts"] = {
+        "status": "known",
+        "current_boot_total": 2,
+        "current_boot_watchdog_total": 0,
+        "newly_observed": 0,
+        "current_recovery_kind": None,
+        "raw_journal_included": False,
+    }
+    view = report_view(value, now=OBSERVED_AT + timedelta(seconds=1))
+    assert "watchdog" not in view["summary"]
+
+
 def test_html_escapes_report_fields_and_links_machine_readable_view():
     view = fresh_view()
     view["reason_code"] = "<script>alert(1)</script>"

@@ -73,7 +73,16 @@ docker run --rm \
     set -e
     if [[ ! -f /workspace/${run_directory}/mission-result.json ]]; then
       echo 'Gazebo did not produce a mission result' >&2
-      exit \${launch_status:-3}
+      # A failing launch keeps its own status, because that is the more precise
+      # account of what went wrong. A launch that exited 0 and still produced no
+      # result is its own failure -- missing evidence -- and \${launch_status:-3}
+      # used to hand back that 0 verbatim, reporting the run as a pass on the
+      # strength of a file that does not exist.
+      evidence_status=\${launch_status:-3}
+      if ((evidence_status == 0)); then
+        evidence_status=3
+      fi
+      exit \${evidence_status}
     fi
     python3 -m flyto_robotics.cli evaluate-lab \
       --scenario /workspace/scenarios/gazebo/careflow-adversarial.json \

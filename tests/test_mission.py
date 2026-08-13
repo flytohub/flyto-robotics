@@ -11,6 +11,8 @@ from flyto_robotics.mission import (
     DEFAULT_SENSOR_STABILIZATION_SECONDS,
     DEFAULT_SENSOR_STARTUP_GRACE_SECONDS,
     evaluate_sensor_gate,
+    relative_move_reached,
+    relative_move_tolerance,
     unready_sensors,
 )
 
@@ -79,6 +81,51 @@ def test_sensor_gate_fails_closed_at_the_correct_lifecycle_phase() -> None:
         )
         == "fail_stale"
     )
+
+
+class TestRelativeMoveArrival:
+    """The arrival box scales with the move, and stays symmetric in sign.
+
+    The box is how far short of the target the move may stop and still be
+    called done. A fixed 0.03 m box is a fair ceiling on a 0.40 m jog, but it
+    is 60% of a 0.05 m move and three times a 0.01 m nudge — completing both
+    before the robot has meaningfully travelled. These are pure policy
+    assertions: no controller, no plan, no odometry.
+    """
+
+    # (commanded distance magnitude, expected tolerance)
+    MAGNITUDES = [(0.01, 0.001), (0.05, 0.005), (0.10, 0.010), (0.40, 0.030)]
+    SIGNED = [
+        pytest.param(sign * distance, tolerance, id=f"{sign * distance:+.2f}m")
+        for distance, tolerance in MAGNITUDES
+        for sign in (1, -1)
+    ]
+
+    @pytest.mark.parametrize(("target", "expected"), SIGNED)
+    def test_tolerance_is_a_tenth_of_the_move_within_bounds(
+        self, target: float, expected: float
+    ) -> None:
+        assert relative_move_tolerance(target) == pytest.approx(expected)
+
+    @pytest.mark.parametrize(("target", "tolerance"), SIGNED)
+    def test_progress_exactly_at_the_boundary_has_arrived(
+        self, target: float, tolerance: float
+    ) -> None:
+        boundary = target - tolerance if target > 0 else target + tolerance
+        assert relative_move_reached(boundary, target)
+
+    @pytest.mark.parametrize(("target", "tolerance"), SIGNED)
+    def test_a_micrometre_short_of_the_boundary_has_not(
+        self, target: float, tolerance: float
+    ) -> None:
+        boundary = target - tolerance if target > 0 else target + tolerance
+        outside = boundary - 0.000001 if target > 0 else boundary + 0.000001
+        assert not relative_move_reached(outside, target)
+
+    @pytest.mark.parametrize("target", [0.01, -0.01])
+    def test_the_origin_is_never_already_arrived(self, target: float) -> None:
+        """The 0.03 m constant completed this step before the wheels turned."""
+        assert not relative_move_reached(0.0, target)
 
 
 class TestUnreadySensors:

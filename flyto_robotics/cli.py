@@ -137,6 +137,7 @@ def validate_assets(root: Path = PROJECT_ROOT) -> list[str]:
         root / "contracts/facility-resource-plan-v1.schema.json",
         root / "contracts/plan-v1.schema.json",
         root / "contracts/input-event-v1.schema.json",
+        root / "contracts/device-event-v1.schema.json",
         root / "contracts/human-decision-v1.schema.json",
         root / "contracts/qr-confirmation-v1.schema.json",
         root / "contracts/guarded-handoff-policy-v1.schema.json",

@@ -6,6 +6,19 @@ Wants=network-online.target
 # accept one only produces a failed job.
 Requires=flyto-delivery.service
 
+# The start rate limit lives here, in [Unit], because that is the only section
+# systemd reads it from; either key in [Service] is parsed, accepted and then
+# silently ignored — which leaves Restart=always below completely unbounded.
+# Both keys were in [Service] until now, so this unit had no limiter at all.
+#
+# 20 starts in five minutes, not turtlebot3-bringup's 3: one cycle here is a
+# process start plus a claim attempt plus RestartSec=10, so a genuinely stuck
+# runner does fit 20 tries inside 300s and parks in `failed` for a human to
+# inspect and `systemctl reset-failed`. The burst stays generous because the
+# common restart is a transient cloud 5xx, not a broken device.
+StartLimitIntervalSec=300
+StartLimitBurst=20
+
 [Service]
 Type=simple
 User=ubuntu
@@ -44,6 +57,28 @@ LockPersonality=yes
 
 Environment=PYTHONUNBUFFERED=1
 Environment=FLYTO_RUNNER_DATA_DIR=/home/ubuntu/.flyto
+# Where this service records what it did: claimed, started, finished, refused.
+#
+# Left to follow FLYTO_RUNNER_DATA_DIR — device-events.jsonl inside it — rather
+# than written out as an absolute path here. The enterprise drop-in moves the
+# data directory to /var/lib/flyto-runner, and a second absolute path in this
+# file would not move with it: an offline site would keep writing its records
+# into a home directory the service may not even have, and those records are how
+# a refused completion stays diagnosable.
+#
+# It is a separate file from the doctor's, always. That one is written by root
+# and this one by ubuntu, so a single shared journal would have to be readable
+# by both accounts — and a device journal that group or others can read is
+# already disclosed. Set FLYTO_DEVICE_EVENT_JOURNAL here only to move it
+# somewhere this user alone can write.
+# Which device the events are about is NOT set here. It defaults to the
+# device_id this robot paired as, which upstream issued and which is already
+# unique per machine. A literal id in this shipped unit would be one lab's
+# TurtleBot name copied onto every robot that installs the file, and a fleet
+# whose records all name the same device is a fleet whose records name none of
+# them. Set FLYTO_ROBOT_RESOURCE_ID in the environment file only where a site
+# has its own naming; there is no placeholder fallback, so an unpaired device
+# with no setting refuses to write events rather than mislabel them.
 Environment=FLYTO_PLAN_ROOT=/home/ubuntu/flyto-robotics/examples/plans
 # Which robot this is. A canvas-authored motion step says how far to go, not
 # who goes; the gateway checks a plan's robot_id against its own job, so this
@@ -62,7 +97,8 @@ Environment=FLYTO_ROBOTICS_ROBOT_ID=flyto-tb3-lab-001
 # decision. Provisioned with:
 #
 #   python3 -m venv /home/ubuntu/.flyto/runner-venv
-#   /home/ubuntu/.flyto/runner-venv/bin/pip install "flyto-modules-robotics==0.1.0"
+# trusted_plan_for_step is the execution API and was introduced in 0.1.1.
+#   /home/ubuntu/.flyto/runner-venv/bin/pip install "flyto-modules-robotics==0.1.1"
 # The runner inside the deployed tree, not a copy beside it. A second copy at
 # /home/ubuntu/flyto_job_runner.py is what the unit used to run, and rsync
 # updates the tree — so the robot kept executing a stale runner after every
@@ -74,8 +110,7 @@ ExecStart=/home/ubuntu/.flyto/runner-venv/bin/python /home/ubuntu/flyto-robotics
 # on SIGTERM, and only the first of those should bring it back.
 Restart=always
 RestartSec=10
-StartLimitIntervalSec=300
-StartLimitBurst=20
+# StartLimitIntervalSec / StartLimitBurst are deliberately NOT here: see [Unit].
 # It finishes the job in hand before stopping, so give it room.
 KillSignal=SIGTERM
 TimeoutStopSec=120

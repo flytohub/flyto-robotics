@@ -30,6 +30,9 @@ _REASONS = {
     "robot_service_unhealthy": (
         "The network is healthy, but a required robot service is not active."
     ),
+    "managed_service_recovered": (
+        "A managed service is active now after a watchdog recovery."
+    ),
 }
 
 
@@ -82,6 +85,11 @@ def report_view(
     summary = _REASONS.get(reason, "Diagnostic snapshot is not ready.")
     action_codes = list(payload.get("action_codes", []))
     quality = report.get("quality")
+    recovery = payload.get("recovery", {})
+    service_restarts = recovery.get("service_restarts", {})
+    watchdog_total = service_restarts.get("current_boot_watchdog_total", 0)
+    if reason == "healthy" and isinstance(watchdog_total, int) and watchdog_total > 0:
+        summary = "Services are active now; watchdog recovery history exists earlier this boot."
 
     age = _snapshot_age(report.get("observed_at"), now or datetime.now(timezone.utc))
     # An unreadable or absent timestamp is not evidence of freshness. Treat not
@@ -108,7 +116,7 @@ def report_view(
         "action_codes": action_codes,
         "network": payload.get("network", {}),
         "services": payload.get("services", {}),
-        "recovery": payload.get("recovery", {}),
+        "recovery": recovery,
     }
 
 

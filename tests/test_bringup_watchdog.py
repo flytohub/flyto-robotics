@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import socket
+from pathlib import Path
 
 import pytest
 
@@ -8,6 +9,13 @@ from flyto_robotics.bringup_watchdog import (
     WatchdogTicker,
     evaluate_bringup_watchdog,
     sd_notify,
+)
+
+UNIT_PATH = (
+    Path(__file__).resolve().parents[1]
+    / "deploy"
+    / "systemd"
+    / "turtlebot3-bringup.service"
 )
 
 
@@ -146,3 +154,143 @@ def test_sd_notify_is_a_no_op_outside_systemd(socket_path) -> None:
 
 def test_sd_notify_reports_failure_for_missing_socket(tmp_path) -> None:
     assert sd_notify("WATCHDOG=1", socket_path=str(tmp_path / "gone.sock")) is False
+
+
+# --------------------------------------------------------------------------
+# turtlebot3-bringup.service unit contract
+#
+# These assert the *parsed* unit, not its text. A directive only takes effect
+# in the section systemd reads it from — StartLimitBurst= in [Service] is
+# silently ignored, WatchdogSec= in [Unit] likewise — so a substring check for
+# "StartLimitBurst=3" would happily pass on a unit that does nothing. Everything
+# below therefore goes through _parse_unit and asserts section + key + value.
+#
+# configparser is deliberately not used: systemd allows a key to repeat within a
+# section with cumulative meaning (two ExecStartPre=, four Environment= here),
+# and configparser collapses repeats to the last one.
+# --------------------------------------------------------------------------
+
+
+def _parse_unit(text: str) -> dict[str, list[tuple[str, str]]]:
+    """Parse systemd unit text into {section: [(key, value), ...]}.
+
+    Repeated keys are preserved in file order. Comments are whole-line only,
+    matching systemd: there is no trailing-comment syntax, and the Exec* lines
+    carry shell that must survive intact. Only the first '=' splits a line, so
+    an Environment=KEY=VALUE pair keeps its own '='. A trailing backslash
+    continues a directive onto the next line.
+    """
+    sections: dict[str, list[tuple[str, str]]] = {}
+    current: str | None = None
+    pending = ""
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not pending and (not line or line.startswith(("#", ";"))):
+            continue
+        if not pending and line.startswith("[") and line.endswith("]"):
+            current = line[1:-1]
+            sections.setdefault(current, [])
+            continue
+        line = pending + line
+        pending = ""
+        if line.endswith("\\"):
+            pending = line[:-1]
+            continue
+        if current is None or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        sections[current].append((key.strip(), value.strip()))
+    return sections
+
+
+@pytest.fixture(scope="module")
+def unit() -> dict[str, list[tuple[str, str]]]:
+    return _parse_unit(UNIT_PATH.read_text())
+
+
+def _values(unit: dict[str, list[tuple[str, str]]], section: str, key: str) -> list[str]:
+    return [value for name, value in unit.get(section, []) if name == key]
+
+
+def _only(unit: dict[str, list[tuple[str, str]]], section: str, key: str) -> str:
+    values = _values(unit, section, key)
+    assert len(values) == 1, f"expected exactly one {section}/{key}, got {values}"
+    return values[0]
+
+
+def test_unit_parser_keeps_sections_repeats_and_values_with_equals_signs() -> None:
+    # Guards the assertions below: if the parser silently dropped repeats or
+    # split on the wrong '=', every contract test would pass vacuously.
+    parsed = _parse_unit(
+        "# comment\n"
+        "[Unit]\n"
+        "StartLimitBurst=3\n"
+        "\n"
+        "[Service]\n"
+        "; also a comment\n"
+        "Environment=A=1\n"
+        "Environment=B=2\n"
+        "ExecStart=/bin/bash -lc 'x \\\n"
+        "y'\n"
+    )
+    assert parsed["Unit"] == [("StartLimitBurst", "3")]
+    assert _values(parsed, "Service", "Environment") == ["A=1", "B=2"]
+    assert _values(parsed, "Service", "ExecStart") == ["/bin/bash -lc 'x y'"]
+    assert "StartLimitBurst" not in dict(parsed["Service"])
+
+
+def test_start_rate_limit_is_in_unit_section_and_parks_after_three_starts(unit) -> None:
+    # The NRestarts=193 finding: turtlebot3_node kept failing the OpenCR /
+    # Dynamixel motor-bus handshake, supervised shutdown took the healthy LDS
+    # lidar down with it (the flapping /scan an operator actually saw), and
+    # Restart=always retried it forever. Burst 20 never tripped because one
+    # failure cycle is far too long for 20 of them to fit in 300s. Burst 3 fits.
+    assert _only(unit, "Unit", "StartLimitIntervalSec") == "300"
+    assert _only(unit, "Unit", "StartLimitBurst") == "3"
+
+
+def test_start_rate_limit_is_not_placed_in_the_service_section(unit) -> None:
+    # systemd reads both keys from [Unit] only; in [Service] they are accepted
+    # and ignored, which would silently restore the unbounded retry loop.
+    service_keys = {key for key, _ in unit["Service"]}
+    assert "StartLimitIntervalSec" not in service_keys
+    assert "StartLimitBurst" not in service_keys
+
+
+def test_notify_watchdog_contract_is_intact_in_the_service_section(unit) -> None:
+    # The silent-hang recovery path, verified on the robot 2026-08-07. Bounding
+    # the restart rate must not weaken it.
+    assert _only(unit, "Service", "Type") == "notify"
+    assert _only(unit, "Service", "NotifyAccess") == "all"
+    assert _only(unit, "Service", "WatchdogSec") == "15"
+
+
+def test_restart_behaviour_is_retained(unit) -> None:
+    assert _only(unit, "Service", "Restart") == "always"
+    assert _only(unit, "Service", "RestartSec") == "5"
+
+
+def test_shutdown_signalling_is_retained(unit) -> None:
+    # SIGINT so rclpy shuts the launch group down cleanly; 20s before systemd
+    # escalates to SIGKILL.
+    assert _only(unit, "Service", "KillSignal") == "SIGINT"
+    assert _only(unit, "Service", "TimeoutStopSec") == "20"
+
+
+def test_serial_device_waits_run_before_launch_in_order(unit) -> None:
+    pre = _values(unit, "Service", "ExecStartPre")
+    assert len(pre) == 2
+    assert "/dev/ttyACM0" in pre[0] and "/dev/tb3_lidar" in pre[0]
+    assert pre[1].endswith("/bin/sleep 2")
+    # The device wait can legitimately burn ~62s, so the start timeout must stay
+    # above the default 90s or a slow cold boot fails before it ever tries.
+    assert int(_only(unit, "Service", "TimeoutStartSec")) >= 120
+
+
+def test_exec_start_uses_the_supervised_whole_group_launch(unit) -> None:
+    # Whole-group supervision is what turns "one node died" into a unit failure
+    # systemd can count. Without it the restart limiter has nothing to count and
+    # the unit sits `active` with a dead turtlebot3_node.
+    exec_start = _only(unit, "Service", "ExecStart")
+    assert "turtlebot3_bringup_supervised.launch.py" in exec_start
+    assert "robot.launch.py" not in exec_start

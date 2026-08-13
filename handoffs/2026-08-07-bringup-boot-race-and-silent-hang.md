@@ -1,7 +1,8 @@
 # Bringup: the boot-time race is fixed; a second, worse failure mode is not
 
-Date: 2026-08-07
-Spans: `flyto-robotics` (merged), live testing on `flyto-robot.local`
+Date: 2026-08-07 (updated 2026-08-10: live start-limiter evidence, then first
+real motion on hardware)
+Spans: `flyto-robotics` (merged), live testing on the lab TurtleBot3 host
 
 ## What this is
 
@@ -173,7 +174,360 @@ systemd unit changes, no tests.
 > reports a healthy topic as "not published yet", the same class of false
 > negative as the short-window mistake warned about below.
 
-## State of the robot right now
+---
+
+## Third failure: recovery that never stops, and the lidar that got blamed
+
+The two fixes above both do the same thing — turn a stuck bringup into a
+restart. Neither of them asks how many times that should be allowed to happen.
+Production answered: the unit was found at
+
+```
+$ systemctl show turtlebot3-bringup.service -p NRestarts
+NRestarts=193
+```
+
+**What it looked like**: the LDS lidar flapping. `/scan` appearing, then gone,
+then back a minute later. Every instinct points at the lidar — a loose USB
+plug, a failing LDS-03, a `/dev/tb3_lidar` udev rule misfiring.
+
+**What it actually was**: the lidar was healthy the entire time and was being
+killed as collateral. `turtlebot3_node` was failing its OpenCR/Dynamixel
+motor-bus handshake — the same class of failure as the boot race at the top of
+this document, except now persistent rather than a cold-boot race. The
+supervised launch group did exactly what it was built to do and brought the
+whole group down for that one dead process, taking the working lidar with it.
+`Restart=always` brought it straight back to fail the same way. 193 times.
+
+That is the lesson worth carrying: **whole-group supervision converts a
+single-device hardware fault into a whole-robot flap, and the flapping device
+you observe is not the device that is broken.** If a sensor looks intermittent
+on this robot, check `NRestarts` on the bringup unit before touching the
+sensor.
+
+### Why the rate limit that was already there did not fire
+
+The unit had carried `StartLimitIntervalSec=300` and `StartLimitBurst=20` since
+it entered version control. Both keys were in `[Unit]`, which is correct.
+Neither did anything, and no larger burst would have either.
+
+The limiter counts starts inside a sliding window. One failure cycle here is
+the `ExecStartPre` device wait, plus `ros2 launch` coming up, plus the OpenCR
+handshake attempt and the group teardown that follows it, plus `RestartSec=5`.
+Twenty of those do not fit inside 300 seconds — so the counter kept aging out
+before it ever reached 20, and `Restart=always` was, in practice, unbounded.
+A burst of 3 does fit inside the same window.
+
+### The change
+
+`[Unit] StartLimitBurst=20` → `3`. `StartLimitIntervalSec` stays at `300`.
+Nothing in `[Service]` changed: `Type=notify`, `NotifyAccess=all`,
+`WatchdogSec=15`, `Restart=always`, `RestartSec=5`, the two `ExecStartPre`
+serial waits, `KillSignal=SIGINT`, `TimeoutStopSec=20`, and the supervised
+whole-group `ExecStart` are all retained exactly as verified above.
+
+Three failed starts within 300 seconds now park the unit in `failed`. It stays
+there until a human inspects the board and clears it deliberately:
+
+```
+$ systemctl status turtlebot3-bringup.service      # expect: failed, start request repeated too quickly
+$ systemctl reset-failed turtlebot3-bringup.service
+$ systemctl start turtlebot3-bringup.service
+```
+
+Note both keys must stay in `[Unit]`. systemd reads `StartLimit*` from `[Unit]`
+only; moved to `[Service]` they are accepted, ignored, and the unbounded retry
+loop comes back silently. The contract tests added to
+`tests/test_bringup_watchdog.py` parse the unit into sections and assert
+section + key + value for exactly that reason — a substring match on
+`StartLimitBurst=3` would pass on a unit where the directive does nothing.
+
+### What this does not do — read this before trusting it
+
+- **It does not fix the hardware.** The OpenCR/motor-bus handshake failure is
+  untouched. This is containment: it stops a hardware fault from being retried
+  forever and presenting as an intermittent sensor. The board still has to be
+  inspected, reseated, or replaced.
+- **It trades availability for legibility, on purpose.** Before, a transient
+  fault self-healed and a permanent one flapped forever. Now a permanent fault
+  stops the robot until someone looks. A robot parked in `failed` is a robot
+  that will not come back on its own after a reboot loop — that is the intent,
+  but it is a real behavioural change for anyone expecting the old unit.
+- ~~**The live limiter behaviour is unverified.**~~ **Superseded 2026-08-10 —
+  now verified live; see the section below.** As written at the time: the
+  placement and values were covered by the parsing tests, but that systemd
+  actually parks *this* unit on the third failed start within 300s had not been
+  observed on the robot, and the unit had not been deployed. Unlike the
+  watchdog above — verified by inducing the real hang with `kill -STOP` — no
+  one had yet induced three consecutive OpenCR handshake failures and watched
+  the unit stop retrying. That observation has since happened, unforced, on a
+  cold boot.
+- **The interaction with the watchdog path is also unverified.** A
+  `Result=watchdog` restart counts against the same start limiter as a
+  handshake failure. In principle three watchdog recoveries inside five minutes
+  will now park a robot that the previous unit would have kept recovering.
+  That is believed to be the right trade — three silent hangs in five minutes
+  is not a healthy robot — but it has not been exercised.
+
+---
+
+## Update 2026-08-10: the limiter is verified live; the OpenCR bus is not fixed
+
+A read-only inspection of the robot over SSH after a cold boot. Nothing was
+deployed, restarted, or commanded during it — no `systemctl start`, no
+`reset-failed`, and **no motion command of any kind**. The robot had reached
+this state on its own.
+
+**What was observed**
+
+```
+$ systemctl show turtlebot3-bringup.service \
+    -p ActiveState,SubState,Result,NRestarts
+ActiveState=failed
+SubState=failed
+Result=protocol
+NRestarts=3
+```
+
+That is the limiter doing exactly what the change above intended: three failed
+starts inside `StartLimitIntervalSec=300` parked the unit in `failed` instead
+of letting `Restart=always` cycle it indefinitely. The caveat struck through
+above — that this had only ever been proven by parsing tests — no longer holds
+for this robot. **The live limiter behaviour is verified.** It was verified by
+the real fault occurring, not by an induced proxy.
+
+**Where the fault actually sits now**
+
+The journal for each of the three attempts shows the serial layer succeeding
+before the failure:
+
+- the port `/dev/ttyACM0` was opened successfully;
+- the baudrate was changed successfully;
+- *then* `turtlebot3_node` logged `Failed connection with Devices`.
+
+So the surviving fault is **below the USB serial layer**: the host can talk to
+the OpenCR's USB CDC endpoint fine, and the failure is on the
+OpenCR/Dynamixel device bus behind it. This is consistent with the earlier
+`dmesg` finding that the OS never lost or reset `ttyACM0` — the OS side has
+been healthy in every one of these incidents, and remains so here.
+
+**The lidar was healthy again, and again looked guilty**
+
+The LDS-03 on `/dev/tb3_lidar` activated successfully on every one of the three
+attempts. It was stopped only as collateral, when whole-group supervision tore
+the group down for the dead `turtlebot3_node`. Same shape as the 193-restart
+incident above, now bounded to three cycles instead of running unattended.
+This is the second independent confirmation of that lesson: **check
+`NRestarts` and the bringup unit before suspecting a flapping sensor.**
+
+**The observation layer reported it correctly**
+
+`flyto-robot-doctor` continued emitting privacy-bounded `system.diagnostics`
+throughout, with `quality=degraded`, `primary_reason_code=
+robot_service_unhealthy`, and `turtlebot3-bringup.service` named as the
+unhealthy unit. A parked robot is still legible from the diagnostic portal
+without exposing anything beyond the doctor's bounded fields.
+
+**What was not available, and what was not claimed**
+
+No `/odom`, no `/scan`, and no working `cmd_vel` path existed during the
+inspection — a unit in `failed` publishes nothing. No physical motion was
+commanded or observed, so this update is **not** evidence of movement on real
+hardware.
+
+### Verified vs. still unresolved — do not blur these
+
+| Verified live 2026-08-10 | Still unresolved |
+| --- | --- |
+| The start limiter parks the unit on the third failed start in 300s (`Result=protocol`, `NRestarts=3`). | The OpenCR/Dynamixel bus failure that causes those starts to fail. |
+| Whole-group supervision stops the lidar as collateral, not as a lidar fault. | Whether the cause is the OpenCR board, its power rail, the Dynamixel cabling, or a servo. |
+| `flyto-robot-doctor` reports the parked unit as `robot_service_unhealthy` at `quality=degraded`. | Any claim of real robot movement — none was attempted. |
+
+Containment works. Repair has not happened.
+
+> **Superseded later the same day.** The paragraph that stood here said the
+> board, its power, and the Dynamixel cabling had to be physically inspected,
+> reseated, or replaced *before this robot could be said to move*. That gate no
+> longer holds: a later cold reboot brought the bus up and the robot moved
+> under a real command. See
+> [Update 2026-08-10 (later): the robot moved](#update-2026-08-10-later-the-robot-moved-cold-start-and-command-timing-did-not-hold-up).
+> The observations above stand exactly as recorded — they are what a parked
+> unit looked like — but the conclusion drawn from them was wrong about what
+> had to happen next.
+
+### Next step from here (as written during the read-only inspection)
+
+1. ~~Physically inspect the OpenCR: power rail and switch, the 12V/battery
+   feed, and every Dynamixel cable and connector on the bus. Reseat them.~~
+   **Overtaken by events** — a cold reboot cleared the handshake failure with
+   no physical intervention performed or recorded. This is still worth doing
+   as preventive maintenance, but it is no longer a blocker, and the fact that
+   it was never done is itself the finding: see the intermittency note below.
+2. Clear the parked unit deliberately (`systemctl reset-failed` then
+   `systemctl start`) and confirm `/odom` at 20 Hz with a generous
+   `ros2 topic hz --window`, remembering to export `ROS_DOMAIN_ID=30` first.
+3. The watchdog/limiter interaction noted above is still unexercised: three
+   `Result=watchdog` recoveries inside 300s would now also park the unit.
+   This incident was `Result=protocol`, so it says nothing about that path.
+
+---
+
+## Update 2026-08-10 (later): the robot moved; cold start and command timing did not hold up
+
+Later the same day, after a cold reboot, the OpenCR/Dynamixel handshake
+succeeded and the robot was driven under a real command. Nothing was repaired
+between the two observations — no inspection, reseat, or replacement was
+performed or recorded. **The bus fault is therefore intermittent, not fixed.**
+
+### Cold start: one launch failed the watchdog before one held
+
+- The **first launch reached `READY`**, then `/odom` went stale **74 s** later.
+  The freshness watchdog did its job and restarted the unit **once**.
+- The **second launch stayed active** and healthy:
+
+```
+/odom            19.95 Hz
+/scan            10.05 Hz
+battery          12.37 V
+throttling       none
+USB disconnect   none
+```
+
+So the recovery path works end to end on real hardware for a second distinct
+`Result` class. But note what this also says: **a cold start is not reliably
+one-shot on this robot.** One of two launches this boot needed the watchdog to
+rescue it. That is not the same as a healthy boot, and it should not be
+reported as one.
+
+### First real motion — but driven by hand, outside the supported path
+
+This first run was **ad hoc**: raw `ros2` CLI publishers, not the product's own
+command path. Read it as a warning about how it was driven, not as a statement
+about the shipped code.
+
+A single safety-gated `TwistStamped` command was issued with the sensor gate
+satisfied:
+
+- front clearance before: **1.328 m**;
+- exactly **one matched subscriber** on the command topic;
+- odometry `x` moved **0.000209 m → 0.171863 m**.
+
+**The robot physically moved under its own power.** This is the first real
+motion evidence on this hardware, and it retires the "no proof of movement on
+the real robot" caveat that has stood in this repo since the simulation work.
+
+After the command:
+
+```
+linear velocity   0.0
+publisher count   0
+front clearance   1.167 m
+service           active
+NRestarts         1
+```
+
+The stop path did end at zero velocity with no publisher left attached, and
+the service survived the whole exercise.
+
+### The distance overshot — a warning about ad-hoc CLI publishers
+
+The move was **intended to be about 4 cm. It travelled 17.2 cm** — more than
+four times the target. This is not a controller or calibration finding,
+because the run did not use the controller's command path at all.
+
+The zero/stop command came from a **second `ros2` CLI publisher**, started
+after the one that issued the motion. The most likely explanation, and one
+**consistent with the observed timing**, is that the new publisher had to
+complete **DDS discovery** before its zero could be delivered, and the robot
+kept moving across that gap.
+
+Stated honestly: **that cause is an inference, not a proven root cause.** No
+discovery-timing trace was captured, and the overshoot was not reproduced or
+bisected. What *is* solid is the operational lesson, and it is worth carrying
+on its own:
+
+> **Do not drive this robot with two separate `ros2` CLI publishers.** A stop
+> that has to discover its subscriber before it can be delivered is not a
+> stop. Whatever the exact mechanism, an unmatched publisher in the stop path
+> has unbounded and unmeasured latency.
+
+**This does not describe a missing feature.** The single-process, already-matched
+command path this run should have used **already exists in this repo**:
+`CmdVelChannel` in `flyto_robotics/ros2_cmd_vel.py` holds one publisher for the
+life of the run, resolves the message type against the live subscriber with its
+own discovery grace deadline, and `scripts/move-robot.sh` drives it through
+`flyto_robotics.ros2_node.run`. An earlier draft of this handoff called for
+building that path before the stop could be trusted; that was wrong, and the
+next section is the run that used it.
+
+---
+
+## Update 2026-08-10 (later still): the supported path, end to end
+
+The same hardware, driven through the product's own path rather than by hand.
+
+**Before moving** — `scripts/move-robot.sh` required a forward clearance and
+refused to proceed without one; it measured **1.17 m** front clearance and
+continued.
+
+**During** — `CmdVelChannel` resolved its binding against the live subscriber,
+moving from a **provisional `Twist`** to a **live `TwistStamped`** publisher.
+That is the mismatch the channel exists to catch, resolving correctly against
+real hardware rather than against the Gazebo bridge's `Twist`.
+
+**Result** — the mission **succeeded**: it moved **0.371 m toward a 0.400 m
+target**, ran `safe_stop`, and recorded **`safety_stops=0`**.
+
+**Post-run check**
+
+```
+linear velocity        0.0
+/cmd_vel publishers    0
+front clearance        0.869 m
+turtlebot3-bringup     active (running)
+NRestarts              1
+```
+
+The publisher count returning to zero is the meaningful part: the channel tore
+itself down cleanly, so nothing was left holding `/cmd_vel` after `safe_stop`.
+
+### What is proven now, and what is explicitly not
+
+**Proven on this hardware, 2026-08-10:** supported **single-process,
+odometry-closed-loop motion and stop**. The robot moves under the shipped
+command path, closes the loop on real odometry, stops on its own `safe_stop`,
+and releases the topic — with the sensor gate enforced before motion and no
+safety stop needed during it. The freshness watchdog also recovered a
+stale-`/odom` launch automatically on the same boot (`NRestarts=1`), and
+sensors and power were healthy while up (`/odom` 19.95 Hz, `/scan` 10.05 Hz,
+12.37 V, no throttling, no USB disconnect).
+
+**These remain separate, unmet gates — none is implied by the run above:**
+
+| Gate | Status |
+| --- | --- |
+| Repeated cold-boot stability | Not established. One of two launches this boot needed a watchdog rescue; one boot is not a rate. |
+| Distance calibration tolerance | Not established. 0.371 m against a 0.400 m target is one sample with no declared tolerance. |
+| Hardware E-stop | Not exercised. |
+| Network-loss and sensor-loss acceptance | Not exercised on hardware. |
+| Whether the OpenCR bus fault is gone | No. Nothing was repaired; it is intermittent and unexplained. |
+
+### Next step from here
+
+1. Declare a distance tolerance and measure against it over repeated runs.
+   One 0.371 m sample against 0.400 m is not a calibration result.
+2. Repeat cold boots and count how many launches reach `/odom` without a
+   watchdog restart. One-in-two is a number worth tracking, not a footnote.
+3. Exercise the hardware E-stop, and network/sensor loss, on the robot.
+   These are listed in `STATE.md` as field-demo gates and remain unmet.
+4. Still unexercised: three `Result=watchdog` recoveries inside 300 s would
+   park the unit under the same limiter. This boot produced one.
+5. Preventive OpenCR/Dynamixel inspection remains worthwhile — the earlier
+   `Result=protocol` failure was never explained, only outlived.
+
+---
+
+## State of the robot as of 2026-08-07 (historical; superseded above)
 
 As of this write-up, `turtlebot3-bringup.service` is still `active` with
 `NRestarts=0` and `/odom` still not publishing — the hang has not cleared on
@@ -183,7 +537,7 @@ yet re-confirmed against *this* one specifically, since the two are
 different failures and the manual restart was only exercised against the
 first).
 
-## Next step, in order
+## Next step, in order (as written 2026-08-07; steps 1–3 completed that day)
 
 1. Manually restart the service to get a working robot back for further
    testing (`sudo systemctl restart turtlebot3-bringup.service`, then confirm

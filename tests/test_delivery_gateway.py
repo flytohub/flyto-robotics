@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from flyto_robotics.capabilities import CapabilityRegistry, default_capability_registry
 from flyto_robotics.contracts import load_job
 from flyto_robotics.delivery_gateway import DeliveryGateway, DeliveryGatewayError
 from flyto_robotics.qr_confirmation import build_signed_qr_confirmation
@@ -134,6 +135,83 @@ def test_health_requires_auth_and_reports_ok() -> None:
         assert status == 200
         assert body["ok"] is True
         assert body["service"] == "flyto-robotics-delivery"
+
+
+def test_capability_catalog_is_authenticated_deterministic_registry_projection() -> None:
+    expected = default_capability_registry().execution_catalog()
+    with gateway_under_test() as gateway:
+        url = f"{base_url(gateway)}/v1/capabilities"
+        assert not gateway._sessions
+
+        status, body = request_json(url, token="wrong-token")
+        assert status == 401
+        assert body == {"error": "unauthorized"}
+
+        responses: list[dict[str, object]] = []
+        for _ in range(2):
+            request = urllib.request.Request(
+                url, headers={"Authorization": f"Bearer {TOKEN}"}
+            )
+            with urllib.request.urlopen(request, timeout=2.0) as response:
+                assert response.status == 200
+                assert response.headers["Cache-Control"] == "no-store"
+                responses.append(json.load(response))
+
+        assert responses == [expected, expected]
+        assert responses[0]["contract_version"] == (
+            "flyto.robotics.capability-catalog.v1"
+        )
+        assert not gateway._sessions
+
+        status, body = request_json(f"{base_url(gateway)}/v1/not-capabilities")
+        assert status == 404
+        assert body == {"error": "not_found"}
+
+
+def test_injected_registry_is_the_single_catalog_and_plan_authority() -> None:
+    restricted_registry = CapabilityRegistry(())
+    expected = restricted_registry.execution_catalog()
+    plan = {
+        "contract_version": "flyto.robotics.plan.v1",
+        "plan_id": "restricted-registry.v1",
+        "robot_id": "flyto-rover-sim-001",
+        "goal": "attempt an omitted capability",
+        "generated_by": {
+            "kind": "human",
+            "provider": "test",
+            "model": "restricted-registry",
+        },
+        "steps": [
+            {
+                "step_id": "stop.finish",
+                "capability": "safe_stop",
+                "arguments": {"seconds": 0.0},
+                "timeout_seconds": 1.0,
+                "on_failure": "abort",
+            }
+        ],
+    }
+
+    with gateway_under_test(capability_registry=restricted_registry) as gateway:
+        url = base_url(gateway)
+        status, catalog = request_json(f"{url}/v1/capabilities")
+        assert status == 200
+        assert catalog == expected
+        assert catalog["capabilities"] == []
+
+        status, body = request_json(
+            f"{url}/v1/plans",
+            payload={
+                "contract_version": "flyto.cloud.plan-run-request.v1",
+                "request_id": "req-restricted-registry",
+                "plan": plan,
+                "requested_at": "2026-08-13T00:00:00Z",
+            },
+        )
+        assert status == 400
+        assert body["error"] == "plan_run_request_invalid"
+        assert body["detail"].startswith("plan_invalid:")
+        assert not gateway._sessions
 
 
 def test_delivery_completes_after_valid_qr_confirmation() -> None:
