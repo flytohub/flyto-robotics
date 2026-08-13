@@ -1,0 +1,15 @@
+# Repository-owned verification contract for the audited Flyto coding route.
+# The host runs this real source-controlled command after every implementation
+# round; model prose is never accepted as verification.
+version: flyto.coding-config.v1
+
+checks:
+  - name: verify
+    # Pin the interpreter to the repository-local virtualenv: the sanitized
+    # worker's bare `python3` is the CommandLineTools build, which has neither
+    # ruff nor pytest, and any user-site interpreter is machine-specific. `.venv`
+    # is self-contained and checked out beside the Makefile, so verify is
+    # reproducible on every worker.
+    argv: ["make", "PYTHON=.venv/bin/python", "verify"]
+    timeout_seconds: 900
+    required: true

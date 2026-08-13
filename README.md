@@ -69,6 +69,13 @@ For contract tests and deterministic development, install Python 3.9 or newer,
 and the Harmonic packages listed under “Run the Gazebo demo.” No service
 credentials or environment secrets are required.
 
+For a device installation from the supplied wheel, including a safe rehearsal,
+profile selection, update, rollback, status, support-bundle, and device-event
+procedures, follow the [installation and operations runbook](docs/INSTALLATION.md).
+The default `generic` profile is middleware- and vendor-neutral; `ros2` extends
+it additively with one ROS 2 adapter service. These are contract, package, and
+simulation instructions—not evidence of deployment or physical site acceptance.
+
 ## Usage
 
 ### Install card-free recovery once
@@ -163,6 +170,7 @@ truth boundary, and evidence layout.
 | | |
 |---|---|
 | [Capabilities](docs/CAPABILITIES.md) | how abilities are registered, matched and composed |
+| [Installation and operations](docs/INSTALLATION.md) | wheel install, profiles, updates, rollback and support |
 | [API and contracts](docs/CONTRACTS.md) | the JSON contracts and the ROS 2 semantic pairing |
 | [Running the demo](docs/DEMO.md) | Gazebo, the container, the adversarial lab |
 | [One-time recovery](docs/ONE_TIME_RECOVERY.md) | diagnosing a disconnected robot without opening it |

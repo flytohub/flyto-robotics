@@ -14,6 +14,21 @@
 
 ## Installed resource registration and telemetry
 
+## Delivery capability discovery
+
+The authenticated loopback delivery gateway serves `GET /v1/capabilities`
+beside `POST /v1/plans`. Its response is exactly the language-neutral
+`flyto.robotics.capability-catalog.v1` projection from the robot's capability
+registry, including the registry-owned schemas, bounds, and content hashes.
+It is read-only discovery with `Cache-Control: no-store`: it carries no host or
+device identity, credentials, ROS details, endpoint paths, or motor authority,
+and it neither creates nor starts a mission. Simulation and physical motion
+remain behind the same separately authenticated, validated execution path.
+
+`flyto-modules-robotics` can consume this endpoint as its single bounds/schema
+authority; migrating that consumer is the next repository layer and is not
+part of this gateway closure.
+
 `flyto-resource-agent` is the outbound-only installation boundary between any
 adapter and Flyto Cloud. It publishes two independent JSON contracts:
 
@@ -434,3 +449,17 @@ pose controller behind the same mission interface.
 C, C++, Python, a ROS action server, or a vendor SDK can implement an atom as
 long as its adapter honors the registered argument and observation contract.
 The planner sees abilities, not implementation languages.
+# Robot-local camera observation producer
+
+The provider-neutral `camera` lifecycle profile extends `generic` and owns the
+local producer for the fixed `GET /api/spaces/zone-camera/observation`
+contract. The `ros2` profile extends `camera` and adds only its ROS service; all
+inherited units remain byte-identical. A
+thin ROS adapter accepts only structurally valid RGB/BGR `sensor_msgs/Image`
+frames; the transport-neutral core retains only the monotonic acceptance time.
+Pixels and ROS/device identifiers never cross the HTTP boundary, which is
+restricted to literal IPv4 loopback. Freshness is explicit through `usable` and
+a fixed detail vocabulary. This closes the producer and installable-unit
+boundary only, not physical camera/identity proof or full Cloud-device
+`vision.observe`. The delivery-only `deploy/flyto_job_runner.py` rejects
+non-robotics work, so a generic installed executor protocol remains required.

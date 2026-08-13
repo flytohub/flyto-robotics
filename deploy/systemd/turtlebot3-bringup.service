@@ -5,8 +5,31 @@ After=network-online.target
 # always enumerated yet, so it used to exit before the devices existed — and
 # because it exited cleanly, Restart=on-failure never fired. The result was a
 # unit systemd reported as active with no processes and no log for that boot.
+#
+# The start rate limit lives here, in [Unit], because that is the only section
+# systemd reads it from; putting either key in [Service] is silently ignored.
+#
+# Production truth, and why the burst is 3 and not 20: this unit was found at
+# NRestarts=193. What an operator saw was the LDS lidar flapping — /scan
+# appearing and vanishing every minute or so — but the lidar was never the
+# fault. turtlebot3_node kept failing its OpenCR/Dynamixel motor-bus handshake;
+# the supervised launch group correctly tore the *whole* group down for that one
+# dead process, taking the perfectly healthy lidar with it; Restart=always
+# brought it straight back to fail the same way. A hardware fault was being
+# retried forever and presented as an intermittent sensor.
+#
+# StartLimitBurst=20 could not stop that, and neither could any large burst: one
+# full failure cycle here is ExecStartPre's device wait, plus the launch, plus
+# the handshake attempt, plus RestartSec=5 — long enough that 20 starts never
+# fit inside StartLimitIntervalSec=300, so the counter kept aging out and the
+# limiter never tripped. The interval stays at 300s; the burst drops to 3, which
+# does fit. Three failed starts within five minutes now park the unit in `failed`
+# so a human inspects the board and clears it with `systemctl reset-failed`.
+#
+# This is a containment policy, not a repair: it does not fix the OpenCR/motor
+# bus, it stops the robot from hiding a hardware fault behind a restart loop.
 StartLimitIntervalSec=300
-StartLimitBurst=20
+StartLimitBurst=3
 
 [Service]
 # notify, not simple: the launch group includes bringup_watchdog (see the
@@ -60,7 +83,10 @@ ExecStartPre=/bin/sleep 2
 ExecStart=/bin/bash -lc 'source /opt/ros/jazzy/setup.bash && exec ros2 launch /home/ubuntu/flyto-robotics/launch/turtlebot3_bringup_supervised.launch.py'
 # always, not on-failure: a clean exit is exactly how this failed silently,
 # and the wrapper above turns "one node died" into the whole group exiting —
-# which must be retried the same way a crash is.
+# which must be retried the same way a crash is. Unchanged by the NRestarts=193
+# finding: retrying is still right for a transient race or a watchdog kill. What
+# changed is that [Unit]'s StartLimitBurst=3 now bounds how long "always" is
+# allowed to keep retrying something that is not transient.
 Restart=always
 RestartSec=5
 KillSignal=SIGINT

@@ -206,11 +206,12 @@ def _clamp(value: float, minimum: float, maximum: float) -> float:
 # dangerous in the direction of travel: the wall a robot drives alongside is not
 # the wall it drives into, and a robot reversing is not protected at all by
 # whatever is in front of it.
-# How close a relative move must land to count as arrived. Deliberately NOT
-# job.safety.pose_tolerance: that knob is validated at a minimum of 0.05 m
-# (contracts.py) because it governs navigation to a station, where a 5 cm
-# arrival box is right. A bounded 40 cm jog with a 5 cm box would overshoot by
-# an eighth of its own distance.
+# The ceiling on how far short of its target a relative move may stop and still
+# count as arrived; see relative_move_tolerance for the distance-scaled value
+# actually applied. Deliberately NOT job.safety.pose_tolerance: that knob is
+# validated at a minimum of 0.05 m (contracts.py) because it governs navigation
+# to a station, where a 5 cm arrival box is right. A bounded 40 cm jog with a
+# 5 cm box would report arrival a full eighth of its commanded distance short.
 #
 # This used to be written as max(0.015, min(0.03, job.safety.pose_tolerance)),
 # which reads as "the operator's knob, clamped" and is not: the validated
@@ -218,6 +219,37 @@ def _clamp(value: float, minimum: float, maximum: float) -> float:
 # value was always 0.03. A constant that pretends to be configurable is worse
 # than one that says what it is.
 RELATIVE_MOVE_TOLERANCE_M = 0.03
+
+
+def relative_move_tolerance(distance_m: float) -> float:
+    """How close a relative move of this length must land to count as arrived.
+
+    A single fixed box cannot serve both ends of the range this primitive is
+    asked to cover, because it is a distance short of the target at which the
+    move is declared done. A fixed 3 cm is a reasonable ceiling on a long move,
+    but it is 60% of a 5 cm move and three times a 1 cm one — at those sizes it
+    completes the step before the robot has meaningfully travelled, which is a
+    false early completion rather than an overshoot. Scaling at a tenth of the
+    commanded distance keeps the box proportional to the move, and the bounds
+    keep it bounded at both extremes: never looser than
+    :data:`RELATIVE_MOVE_TOLERANCE_M`, and never tighter than 1 mm.
+    """
+    return min(RELATIVE_MOVE_TOLERANCE_M, max(0.001, abs(distance_m) / 10.0))
+
+
+def relative_move_reached(progress_m: float, target_distance_m: float) -> bool:
+    """Whether travel along the origin heading has satisfied the commanded move.
+
+    Symmetric in sign: a forward move arrives once it is within tolerance short
+    of its target, a reverse move once it is within tolerance short of its
+    negative target. Pure, so the arrival rule can be asserted without a
+    controller, a plan, or odometry.
+    """
+    tolerance = relative_move_tolerance(target_distance_m)
+    if target_distance_m > 0.0:
+        return progress_m >= target_distance_m - tolerance
+    return progress_m <= target_distance_m + tolerance
+
 
 INTENT_FORWARD = "forward"
 INTENT_REVERSE = "reverse"
@@ -731,13 +763,7 @@ class MissionController:
         delta_x = pose.x - origin.x
         delta_y = pose.y - origin.y
         progress = delta_x * math.cos(origin.yaw) + delta_y * math.sin(origin.yaw)
-        tolerance = RELATIVE_MOVE_TOLERANCE_M
-        reached = (
-            progress >= target_distance - tolerance
-            if target_distance > 0.0
-            else progress <= target_distance + tolerance
-        )
-        if reached:
+        if relative_move_reached(progress, target_distance):
             return self._complete_step(
                 now,
                 f"{step.step_id} moved {progress:.3f}m toward {target_distance:.3f}m",
@@ -892,20 +918,65 @@ class MissionController:
             return self._complete_step(now, f"{step.step_id} reached end of {color}")
         return self._step_failure(f"line_lost:{color}", now)
 
-    def _wait_until_clear(self, minimum_range: float, now: float) -> Command:
+    def _wait_until_clear(
+        self, minimum_range: float | RangeField, now: float
+    ) -> Command:
+        """Hold until the path this gate guards is measured clear.
+
+        Takes the same ``float | RangeField`` :meth:`tick` takes. It used to
+        take only the float and call :func:`math.isfinite` on whatever arrived,
+        so a sectored sweep reached this gate and raised ``TypeError`` — a
+        crash, in the one primitive whose entire job is to stand still and be
+        careful.
+
+        Reading the field is the other half. The gate exists to release forward
+        travel, so it reads what a forward motion reads: the forward sector
+        decides. Collapsing to ``closest`` would hold the gate shut forever on a
+        side wall at an ordinary corridor distance while the path ahead was
+        open, which is the failure the directional obstacle guard was written to
+        end.
+
+        Two rules survive that relaxation, mirroring :meth:`_obstacle_guard`. A
+        forward sector the sweep could not measure fails closed, because a gate
+        that cannot see ahead has observed nothing clear. And the emergency
+        floor still reads ``closest`` in every direction, so relaxing the sides
+        never becomes permission to sit inside a few centimetres of something.
+        """
         step = self._current_step()
-        threshold = self.job.safety.obstacle_stop_distance
-        blocked = math.isfinite(minimum_range) and minimum_range < threshold
+        limits = self.job.safety
+        threshold = limits.obstacle_stop_distance
+        field = (
+            minimum_range
+            if isinstance(minimum_range, RangeField)
+            else RangeField.omnidirectional(minimum_range)
+        )
+
+        unmeasured = field.blind_for(INTENT_FORWARD)
+        if unmeasured is not None:
+            blocked = True
+            blocked_detail = (
+                f"wait gate cannot measure {unmeasured}; "
+                "refusing to call an unread sector clear"
+            )
+        elif math.isfinite(field.closest) and field.closest < limits.emergency_stop_distance:
+            blocked = True
+            blocked_detail = "wait gate observed range below emergency stop distance"
+        elif field.directional:
+            ahead, where = field.blocking(INTENT_FORWARD)
+            blocked = math.isfinite(ahead) and ahead < threshold
+            blocked_detail = (
+                f"wait gate observed obstacle {where} below configured stop distance"
+            )
+        else:
+            blocked = math.isfinite(field.closest) and field.closest < threshold
+            blocked_detail = "wait gate observed range below configured stop distance"
+
         if blocked:
             self.clear_since = None
             if not self.clearance_blocked:
                 self.clearance_blocked = True
                 self.safety_stop_count += 1
-                self._record_event(
-                    now,
-                    "clearance_blocked",
-                    "wait gate observed range below configured stop distance",
-                )
+                self._record_event(now, "clearance_blocked", blocked_detail)
             return Command(0.0, 0.0, self.state, "waiting_for_clearance")
 
         if self.clear_since is None:

@@ -1,0 +1,102 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://flyto2.com/contracts/device-event-v1.schema.json",
+  "title": "Flyto2 generic device event v1",
+  "description": "One bounded, public, structured observation about any installed device or software resource. Deliberately carries no free-form log, no credential and no personal data: there is no field into which one can be placed. correlation_id and run_id may be empty strings, which means the observation belongs to no wider correlation and to no run - never that the sender had one and omitted it.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract",
+    "event_id",
+    "resource_id",
+    "component",
+    "sequence",
+    "observed_at",
+    "severity",
+    "status",
+    "reason_code",
+    "action_codes",
+    "correlation_id",
+    "run_id",
+    "message",
+    "details",
+    "redaction",
+    "event_hash"
+  ],
+  "properties": {
+    "contract": { "const": "flyto.device-event.v1" },
+    "event_id": { "$ref": "#/$defs/identifier" },
+    "resource_id": { "$ref": "#/$defs/identifier" },
+    "component": { "$ref": "#/$defs/code" },
+    "sequence": { "type": "integer", "minimum": 0, "maximum": 9007199254740992 },
+    "observed_at": {
+      "type": "string",
+      "description": "Canonical RFC 3339 UTC only. An offset form or a lowercase z is refused: two devices whose events cannot be ordered without knowing each one's dialect are two devices that cannot be read together.",
+      "minLength": 20,
+      "maxLength": 27,
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{1,6})?Z$"
+    },
+    "severity": { "enum": ["info", "notice", "warning", "error", "critical"] },
+    "status": {
+      "enum": [
+        "started",
+        "running",
+        "succeeded",
+        "failed",
+        "refused",
+        "degraded",
+        "unavailable",
+        "unknown"
+      ]
+    },
+    "reason_code": { "$ref": "#/$defs/code" },
+    "action_codes": {
+      "type": "array",
+      "maxItems": 16,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/code" }
+    },
+    "correlation_id": { "$ref": "#/$defs/optionalIdentifier" },
+    "run_id": { "$ref": "#/$defs/optionalIdentifier" },
+    "message": { "type": "string", "maxLength": 200 },
+    "details": { "type": "object", "maxProperties": 32 },
+    "redaction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "policy",
+        "free_text",
+        "raw_logs_included",
+        "credentials_included",
+        "personal_data_included",
+        "redacted_key_count"
+      ],
+      "properties": {
+        "policy": { "const": "flyto.device-event.redaction.v1" },
+        "free_text": { "type": "boolean" },
+        "raw_logs_included": { "const": false },
+        "credentials_included": { "const": false },
+        "personal_data_included": { "const": false },
+        "redacted_key_count": {
+          "description": "Always 0. This contract refuses an event that carries a secret or personal-data key rather than scrubbing it, so there is never anything redacted to count. A non-zero value would assert a scrubbing step that no implementation performs.",
+          "const": 0
+        }
+      }
+    },
+    "event_hash": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+  },
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,127}$"
+    },
+    "optionalIdentifier": {
+      "type": "string",
+      "pattern": "^$|^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,127}$"
+    },
+    "code": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]{0,63}$"
+    }
+  }
+}

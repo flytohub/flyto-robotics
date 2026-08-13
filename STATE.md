@@ -2,6 +2,37 @@
 
 ## Current
 
+- The delivery gateway now serves authenticated, read-only
+  `GET /v1/capabilities` next to `POST /v1/plans`. It returns the existing
+  deterministic `flyto.robotics.capability-catalog.v1` registry projection
+  unchanged with `Cache-Control: no-store`; it adds no identity, credentials,
+  ROS detail, endpoint path, or motor authority and starts no simulation or
+  physical mission. Moving `flyto-modules-robotics` to this single bounds and
+  schema authority is the next bottom-up layer.
+
+- Customer installation and operations now have one wheel-first runbook linked
+  from the README. It documents rehearsal, install, status, update, rollback,
+  support-bundle, and bounded device-event export without requiring a source
+  checkout. The bundled `generic` lifecycle profile is explicitly middleware-
+  and vendor-neutral; `ros2` extends it additively with one adapter unit. The
+  built-wheel test now parses the shipped profile registry, installs the real
+  wheel offline into an isolated temporary environment, and executes `--help`
+  for both customer console entry points from that installed artifact.
+  For pre-rework revision
+  `e8d3db0b1863382409558cfbe195f09e45c37baec0acc00de8695347974a1b0d`,
+  governed job `job_5c2afa927da54eaa920f0128` passed the route check and a
+  Codex auditor independently ran `make verify`: exit 0, Ruff clean, 1037
+  passed, 4 skipped, with every asset, contract, and dry-run gate completed.
+  The implementation worker's direct run remained sandbox-limited and failed
+  on prohibited loopback/Unix socket creation; both facts are retained in the
+  handoff. This closure adds contract, packaging, and lifecycle-test proof. Its
+  Gazebo references are inherited repository evidence, not simulations rerun
+  for this documentation/packaging change. Physical cold-boot repetition,
+  calibration, E-stop, sensor-loss, camera, deployment, publication, and site
+  acceptance remain unperformed and must not be inferred from this closure.
+  The successful pre-rework verification is evidence, not Codex audit
+  acceptance of this rework revision.
+
 - Card-free recovery is now an installation invariant rather than an ad-hoc
   card-edit procedure. The idempotent installer enables Pi USB gadget Ethernet
   at `10.77.0.1`, stable per-device MAC addresses, local DHCP, existing
@@ -293,6 +324,101 @@
   [handoffs/2026-08-07-bringup-boot-race-and-silent-hang.md](handoffs/2026-08-07-bringup-boot-race-and-silent-hang.md)
   for the evidence and the design.
 
+- A third bringup failure mode is now bounded rather than retried forever. The
+  unit was found in production at `NRestarts=193`. The visible symptom was the
+  LDS lidar flapping — `/scan` appearing and vanishing repeatedly — but the
+  lidar was never at fault: `turtlebot3_node` kept failing its OpenCR/Dynamixel
+  motor-bus handshake, the supervised launch group correctly stopped the whole
+  group for that one dead process (taking the working lidar with it), and
+  `Restart=always` immediately brought it back to fail the same way. The
+  existing rate limit could not stop it: `StartLimitBurst=20` inside
+  `StartLimitIntervalSec=300` never tripped, because one failure cycle
+  (ExecStartPre device wait + launch + handshake attempt + `RestartSec=5`) is
+  far too long for twenty of them to fit in five minutes, so the start counter
+  aged out every time. `[Unit] StartLimitBurst` is now `3` with the interval
+  retained at `300`, so three failed starts within five minutes park the unit
+  in `failed` for inspection and a deliberate `systemctl reset-failed`. All
+  `[Service]` behavior is retained unchanged: `Type=notify`, `NotifyAccess=all`,
+  `WatchdogSec=15`, `Restart=always`, `RestartSec=5`, the serial device waits,
+  `KillSignal=SIGINT`, `TimeoutStopSec=20`, and whole-group supervision.
+  Honest limits: this is containment, not repair — the policy does not fix the
+  OpenCR/motor bus, and a robot parked in `failed` is a robot that needs a
+  human. The new placement and values are covered by semantic INI parsing
+  contract tests in `tests/test_bringup_watchdog.py` (which assert the parsed
+  section/key/value, since a directive in the wrong section is silently
+  ignored by systemd). The live limiter behavior — that the third failed start
+  within 300s actually parks the unit on this robot — was recorded here as
+  unverified until deployment; it is now **verified live**, see the next entry.
+
+- The live start limiter is verified; the underlying hardware fault is not. A
+  read-only inspection of the robot after a cold boot on 2026-08-10 observed
+  `turtlebot3-bringup.service` at `ActiveState=failed`, `SubState=failed`,
+  `Result=protocol`, `NRestarts=3`: systemd did park the unit after the third
+  failed start inside the configured interval, exactly as the
+  `StartLimitBurst=3` / `StartLimitIntervalSec=300` policy intends. This
+  supersedes the earlier caveat that the limiter was covered only by parsing
+  tests. The same journal shows containment is all that was proven: each
+  attempt opened `/dev/ttyACM0` and changed baudrate successfully, and only
+  then did `turtlebot3_node` log `Failed connection with Devices`. That places
+  the remaining fault **below the USB serial layer**, on the OpenCR/Dynamixel
+  device bus rather than in the OS serial path. The LDS-03 lidar on
+  `/dev/tb3_lidar` activated successfully on every attempt and was stopped only
+  as collateral when whole-group supervision shut the group down — the same
+  blame-the-wrong-device shape recorded above, now bounded at 3 restarts
+  instead of 193. Throughout, `flyto-robot-doctor` kept emitting
+  privacy-bounded `system.diagnostics` with `quality=degraded`,
+  `primary_reason_code=robot_service_unhealthy`, and
+  `turtlebot3-bringup.service` named as unhealthy, so the observation layer
+  reported the fault correctly within its bounded fields. No `/odom`, `/scan`,
+  or `cmd_vel` path was available during the inspection, and **no physical
+  motion command was issued**. That inspection is preserved as the record of
+  what a parked unit looked like; the conclusion drawn from it — that the
+  hardware had to be physically inspected, reseated, or repaired before any
+  real-motion claim — was superseded later the same day by the entry below.
+
+- The robot moved under its own power on 2026-08-10, and two boundaries moved
+  with it. After a later cold reboot — with **no repair, reseat, or inspection
+  performed or recorded** between the two observations — the OpenCR/Dynamixel
+  handshake succeeded, so the earlier `Result=protocol` fault is **intermittent
+  and unexplained, not fixed**. The first launch reached `READY` and then let
+  `/odom` go stale after 74 s; the freshness watchdog restarted the unit once,
+  and the second launch stayed active and healthy: `/odom` at 19.95 Hz, `/scan`
+  at 10.05 Hz, battery 12.37 V, no throttling and no USB disconnect. A single
+  safety-gated `TwistStamped` command was then issued with 1.328 m of front
+  clearance and exactly one matched subscriber; odometry `x` moved from
+  0.000209 m to 0.171863 m. Afterward linear velocity was zero, the publisher
+  count was zero, front clearance read 1.167 m, the service was `active`, and
+  `NRestarts=1`. That first run was **ad hoc** — raw `ros2` CLI publishers, not
+  the product's command path — and it travelled 17.2 cm against an intended
+  ~4 cm. The zero/stop came from a **second CLI publisher**; a DDS discovery
+  gap is the explanation **consistent with the observed timing**, but it is an
+  inference, not a proven root cause, since no discovery trace was captured and
+  the overshoot was not reproduced. The durable lesson is operational: **do not
+  drive this robot with two separate `ros2` CLI publishers** — a stop that must
+  discover its subscriber first has unbounded latency. This is not a missing
+  feature; the single-process, already-matched path already exists as
+  `CmdVelChannel` in `flyto_robotics/ros2_cmd_vel.py`, driven by
+  `scripts/move-robot.sh` through `flyto_robotics.ros2_node.run`.
+
+- Supported single-process odometry-closed-loop motion and stop are proven on
+  this hardware, verified 2026-08-10 through the product's own path.
+  `scripts/move-robot.sh` required a forward clearance before moving and
+  measured 1.17 m; `CmdVelChannel` resolved from a provisional `Twist` to a
+  live `TwistStamped` against the real subscriber — the exact mismatch that
+  channel exists to catch, and one the Gazebo bridge's `Twist` cannot exercise.
+  The mission **succeeded**, moved **0.371 m toward a 0.400 m target**, ran
+  `safe_stop`, and recorded `safety_stops=0`. Post-run checks read linear
+  velocity 0, `/cmd_vel` publisher count 0, front clearance 0.869 m, and
+  `turtlebot3-bringup.service` `active (running)` with `NRestarts=1` — the
+  channel released the topic cleanly after `safe_stop`. What this does **not**
+  establish, each a separate gate: repeated cold-boot stability (one of two
+  launches this boot needed a watchdog rescue), distance calibration tolerance
+  (one sample, no declared tolerance), hardware E-stop, and network-loss and
+  sensor-loss acceptance. The intermittent OpenCR/Dynamixel bus fault also
+  remains unexplained rather than repaired. See
+  [handoffs/2026-08-07-bringup-boot-race-and-silent-hang.md](handoffs/2026-08-07-bringup-boot-race-and-silent-hang.md)
+  for the full sequence.
+
 ## Required before a competition field demo
 
 - Obtain written BOM brand/manufacturing evidence for the chosen physical base.
@@ -305,6 +431,25 @@
 
 ## Verification
 
+- Gazebo/controller verification completed on 2026-08-10:
+  - `RangeField` `WAIT_UNTIL_CLEAR` now consumes forward intent for directional
+    fields, so clearance is judged over the sector the robot is actually about
+    to enter, while omnidirectional scalar fields keep their previous behavior;
+  - a directional field with a blind forward sector fails closed rather than
+    reporting clear;
+  - the all-direction emergency floor is preserved, so an obstacle outside the
+    forward sector still stops the robot;
+  - a missing `mission-result.json` can no longer return exit 0 — the absent
+    result is now a failure instead of a silent pass;
+  - official sanitized verification runs against an ignored repository-local
+    `.venv` with Ruff and pytest;
+  - an independent `make verify` reported 843 passed, 4 skipped.
+  - Honest limit, scoped to this Gazebo work: the evidence in this bullet is
+    simulation and controller evidence only, and on its own proves nothing
+    about the real robot. It is no longer the whole picture — a separate live
+    run on the same date proved real motion on the physical TurtleBot3 through
+    `scripts/move-robot.sh` and `CmdVelChannel`; see the "Known development
+    behavior" entries above for that evidence and its own limits.
 - The production Robot MCP campaign completed 101/101 distinct cases on
   2026-08-01: standard 34/34 (depth 2–3), intermediate 34/34 (depth 5), and
   advanced 33/33 (depth 8–12). Every case negotiated the real stdio server and
@@ -339,3 +484,22 @@ make benchmark-robot-mcp
 python3 -m flyto_robotics.cli dry-run \
   examples/jobs/pharmacy-to-ward.json
 ```
+# 2026-08-13 camera observation producer boundary
+
+The provider-neutral `camera` profile now carries an additive, reboot-enabled
+loopback camera observation gateway with offline-tested frame validation and explicit
+fresh/stale usability. Its consumer contract is exactly
+`GET http://127.0.0.1:9000/api/spaces/zone-camera/observation`; responses carry
+only the synthetic zone, kind, fixed detail code, and explicit `usable` state,
+never pixels, ROS/device identifiers, secrets, or content. Missing or malformed
+frames produce no usable observation, and accepted frames become explicitly
+unusable after the bounded freshness window. The generic lifecycle profile is
+unchanged; `ros2` extends `camera` and adds only its ROS service. The lifecycle
+writes, enables, restarts, and checks the DDS-compatible camera systemd unit,
+while installed-wheel `--help` and `--check-settings` remain ROS/ffmpeg-free.
+Host inventory is bounded to XC-TECH vendor `0x5843`, product `0x7884`, and
+`1280x720@10fps` metadata; it proves no camera operation. No Pi camera or ROS
+image topic was observed, and no deployment occurred. The explicit remaining
+blocker is that delivery-only `deploy/flyto_job_runner.py` rejects non-robotics
+work: this producer/lifecycle is not full Cloud-device `vision.observe`, and a
+generic installed executor protocol remains required.

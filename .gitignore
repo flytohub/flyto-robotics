@@ -1,5 +1,7 @@
-.flyto/
+.flyto/*
+!.flyto/coding.yaml
 .flyto-index/
+.venv/
 .pytest_cache/
 .ruff_cache/
 __pycache__/

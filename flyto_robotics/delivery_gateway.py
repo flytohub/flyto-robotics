@@ -15,6 +15,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
 from .ai_planner import PlanValidationError, compile_workflow, parse_plan
+from .capabilities import CapabilityRegistry, default_capability_registry
 from .contracts import DeliveryJob
 from .goal_planner import (
     DeterministicDeliveryGoalPlanner,
@@ -348,6 +349,7 @@ class DeliveryGateway:
         confirmation_timeout_seconds: float = 180.0,
         runner: Any | None = None,
         semantic_map: SemanticLocationMap | SemanticLocationStore | None = None,
+        capability_registry: CapabilityRegistry | None = None,
     ) -> None:
         token_bytes = token.encode("utf-8")
         if len(token_bytes) < 32:
@@ -386,6 +388,8 @@ class DeliveryGateway:
         self._confirmation_timeout_seconds = float(confirmation_timeout_seconds)
         self._runner = runner or SimulatedDeliveryRunner(time_scale=time_scale)
         self._semantic_map = semantic_map
+        self._capability_registry = capability_registry or default_capability_registry()
+        self._capability_catalog = self._capability_registry.execution_catalog()
         self._planner: Any = (
             DeterministicDeliveryGoalPlanner(semantic_map=semantic_map)
             if semantic_map is not None
@@ -492,6 +496,9 @@ class DeliveryGateway:
                             "contract_version": DELIVERY_SESSION_CONTRACT_VERSION,
                         },
                     )
+                    return
+                if self.path == "/v1/capabilities":
+                    self._send_json(200, gateway._capability_catalog)
                     return
                 match = SESSION_PATH.fullmatch(self.path)
                 if match:
@@ -683,7 +690,9 @@ class DeliveryGateway:
                     )
 
             try:
-                plan = parse_plan(request["plan"])
+                plan = parse_plan(
+                    request["plan"], registry=self._capability_registry
+                )
             except PlanValidationError as exc:
                 raise DeliveryGatewayError(f"plan_invalid:{exc}") from exc
             if plan.robot_id != self._job.robot_id:

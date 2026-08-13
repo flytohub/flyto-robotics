@@ -30,15 +30,22 @@ What it deliberately does not do:
 from __future__ import annotations
 
 import contextlib
+import hashlib
+import importlib.util
 import json
 import logging
 import os
+import re
 import signal
+import stat
 import sys
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Mapping, Sequence
+from datetime import datetime, timezone
 from pathlib import Path
+from types import ModuleType
 from typing import Any
 
 logger = logging.getLogger("flyto.job_runner")
@@ -60,6 +67,15 @@ DATA_DIR_MODE = 0o700
 
 #: Name the unit passes via LoadCredentialEncrypted=, read from tmpfs.
 SYSTEMD_CREDENTIAL_NAME = "flyto-device"
+
+# Commissioning is deliberately much smaller than the long-running runner.
+# These bounds apply before any server-controlled value is retained or emitted.
+PAIR_RESPONSE_MAX_BYTES = 4096
+PAIR_STORED_MAX_BYTES = 4096
+PAIR_CREDENTIAL_MAX_CHARS = 512
+PAIR_CODE_MAX_CHARS = 256
+PAIR_NAME_MAX_CHARS = 128
+PAIR_DEVICE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 
 POLL_WAIT_SECONDS = 25
 HEARTBEAT_INTERVAL_SECONDS = 30.0
@@ -100,6 +116,352 @@ _stopping = False
 
 class RunnerError(RuntimeError):
     """The runner cannot continue without an operator."""
+
+
+class AuthoredPlanRefused(RuntimeError):
+    """A recognised Canvas robot step failed closed before execution."""
+
+    def __init__(self, reason_code: str) -> None:
+        super().__init__(reason_code)
+        self.reason_code = reason_code
+
+
+# -- the shared device event contract ------------------------------------
+#
+# The journal, the envelope and the privacy rules live in exactly one place:
+# flyto_robotics/device_events.py, which is standard library only and stays
+# importable on a device with no ROS and no simulator. A second copy here would
+# be free to drift, and a drift in what counts as a credential is the kind that
+# is invisible until something leaves the device.
+#
+# It is loaded by path rather than imported by name for two reasons that both
+# matter on the robot:
+#
+# * This file is executed as an absolute path from a systemd unit whose
+#   WorkingDirectory is the repository root, so sys.path[0] is deploy/ and the
+#   package is its sibling. Nothing may be assumed about PYTHONPATH; the unit
+#   sets none, and a runner that depends on one silently stops recording the
+#   day someone tidies the environment file.
+# * `import flyto_robotics.device_events` would execute the package's
+#   __init__.py, which imports the AI planner, the capability registry and the
+#   ROS adapters. Dragging that onto a Pi is the exact thing this runner exists
+#   to avoid.
+
+DEVICE_EVENTS_PATH = (
+    Path(__file__).resolve().parent.parent / "flyto_robotics" / "device_events.py"
+)
+#: A name of its own, so nothing here can be mistaken for the installed package
+#: and no partially-initialised package is left in sys.modules.
+DEVICE_EVENTS_MODULE = "flyto_runner_device_events"
+
+_device_events: ModuleType | None = None
+
+
+def device_events() -> ModuleType:
+    """The shared event module, loaded once, by path, with no package import."""
+    global _device_events
+    if _device_events is not None:
+        return _device_events
+    cached = sys.modules.get(DEVICE_EVENTS_MODULE)
+    if cached is not None:
+        _device_events = cached
+        return cached
+    if not DEVICE_EVENTS_PATH.is_file():
+        raise RunnerError(
+            f"the shared device event contract is not beside this runner at "
+            f"{DEVICE_EVENTS_PATH}; this deployment cannot record what it does"
+        )
+    spec = importlib.util.spec_from_file_location(DEVICE_EVENTS_MODULE, DEVICE_EVENTS_PATH)
+    if spec is None or spec.loader is None:
+        raise RunnerError(f"{DEVICE_EVENTS_PATH} cannot be loaded as a module")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[DEVICE_EVENTS_MODULE] = module
+    try:
+        spec.loader.exec_module(module)
+    except BaseException:
+        sys.modules.pop(DEVICE_EVENTS_MODULE, None)
+        raise
+    _device_events = module
+    return module
+
+
+#: The file name this service's journal takes inside its own data directory.
+EVENT_JOURNAL_NAME = "device-events.jsonl"
+
+#: This service's own journal, and never the doctor's. That one is written by
+#: root; this one by the service user. A single shared file would have to be
+#: readable by both accounts, and a device journal group or others can read is
+#: already disclosed.
+#
+# An explicit FLYTO_DEVICE_EVENT_JOURNAL wins; otherwise it follows
+# FLYTO_RUNNER_DATA_DIR, which is the one thing the enterprise drop-in moves
+# (to /var/lib/flyto-runner). A hard-coded absolute default here would not move
+# with it, and an offline site would keep writing its records into a home
+# directory the service may not even have.
+EVENT_JOURNAL = Path(os.getenv("FLYTO_DEVICE_EVENT_JOURNAL", "") or DATA_DIR / EVENT_JOURNAL_NAME)
+
+#: Generic on purpose. Nothing upstream should have to know a robot produced it.
+EVENT_COMPONENT = "device_job_runner"
+
+#: The contract's own identifier shape. A job id or a resource id that does not
+#: fit it is linked by a stable digest rather than dropped — losing the linkage
+#: would make an event unattributable, which is worse than an opaque id.
+_EVENT_IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,127}$")
+
+#: One short fixed sentence per reason code. Fixed, not formatted: a message
+#: assembled from an exception, a URL or a gateway reply is how a credential, an
+#: address or a plan payload ends up in a fleet-wide event stream.
+EVENT_MESSAGES = {
+    "job_execution_started": "This device began carrying out an assigned job.",
+    "job_lease_missing": "The job was claimed without a lease, so nothing was started.",
+    "job_plan_unsupported": "The job carries no plan this device can carry out.",
+    "capability_catalog_unavailable": "The trusted robot capability catalog is unavailable.",
+    "capability_catalog_refused": "The trusted robot capability catalog request was refused.",
+    "capability_catalog_invalid": "The robot capability catalog did not pass validation.",
+    "capability_catalog_incompatible": "The authored step is incompatible with this robot.",
+    "trusted_plan_construction_failed": "The trusted robot plan could not be constructed safely.",
+    "job_completed": "The job finished and its outcome was observed.",
+    "mission_failed": "The job did not finish successfully.",
+    "mission_outcome_unknown": "The job's outcome was not observed within its own time bound.",
+    "gateway_unreachable": "The local execution gateway could not be used.",
+    "gateway_returned_no_session": "The local execution gateway accepted nothing to watch.",
+    "completion_report_refused": "The outcome was recorded here but the report was refused.",
+    # A refusal and an unreachable upstream are different faults with different
+    # first moves: one is answered by whoever owns the job upstream, the other by
+    # whoever owns the link. Folding them into one code would leave an offline
+    # operator unable to tell "Cloud said no" from "Cloud was never reached".
+    "completion_report_unreachable": (
+        "The outcome was recorded here but the report could not be delivered."
+    ),
+    "device_executor_refused": "The installed device executor refused this job safely.",
+    "device_executor_failed": "The installed device executor did not complete this job.",
+    "device_executor_registry_error": "The device executor registry could not be used safely.",
+    "device_executor_replay_refused": (
+        "This device cannot prove that an earlier execution did not already occur."
+    ),
+    "device_executor_started": "This device began carrying out a registered device job.",
+    "device_executor_succeeded": "The registered device job completed successfully.",
+}
+
+#: What an operator should try, in order. Codes, never shell commands.
+EVENT_ACTIONS = {
+    "job_execution_started": (),
+    "job_lease_missing": ("retry_job_claim", "inspect_job_lease"),
+    "job_plan_unsupported": ("inspect_job_steps",),
+    "capability_catalog_unavailable": ("inspect_gateway_service", "retry_job"),
+    "capability_catalog_refused": ("inspect_gateway_authorization", "retry_job"),
+    "capability_catalog_invalid": ("inspect_gateway_catalog", "inspect_module_version"),
+    "capability_catalog_incompatible": ("inspect_authored_step", "inspect_gateway_catalog"),
+    "trusted_plan_construction_failed": ("inspect_module_version", "inspect_authored_step"),
+    "job_completed": (),
+    "mission_failed": ("inspect_mission_outcome",),
+    "mission_outcome_unknown": ("inspect_gateway_session", "inspect_mission_outcome"),
+    "gateway_unreachable": ("inspect_gateway_service", "retry_job"),
+    "gateway_returned_no_session": ("inspect_gateway_service",),
+    "completion_report_refused": ("retry_completion_report", "inspect_job_lease"),
+    "completion_report_unreachable": ("retry_completion_report", "inspect_device_uplink"),
+    "device_executor_refused": ("inspect_device_executor",),
+    "device_executor_failed": ("inspect_device_executor",),
+    "device_executor_registry_error": ("inspect_device_executor_registry",),
+    "device_executor_replay_refused": ("inspect_device_event_journal", "reconcile_job"),
+    "device_executor_started": (),
+    "device_executor_succeeded": (),
+}
+
+DEVICE_EXECUTOR_MANIFEST_DIR = Path(
+    os.getenv("FLYTO_DEVICE_EXECUTOR_MANIFEST_DIR", "/etc/flyto/device-executors")
+)
+DEVICE_EXECUTOR_PACKAGE = "flyto_runner_device_executors"
+_device_executor_registry: Any = None
+
+
+def _executor_registry() -> Any:
+    """Load the sibling registry for both package imports and direct launch."""
+    global _device_executor_registry
+    if _device_executor_registry is not None:
+        return _device_executor_registry
+    if (
+        not DEVICE_EXECUTOR_MANIFEST_DIR.is_absolute()
+        or Path(os.path.normpath(str(DEVICE_EXECUTOR_MANIFEST_DIR)))
+        != DEVICE_EXECUTOR_MANIFEST_DIR
+    ):
+        raise RunnerError("device_executor_registry_unavailable")
+    package = sys.modules.get(DEVICE_EXECUTOR_PACKAGE)
+    if package is None:
+        package = ModuleType(DEVICE_EXECUTOR_PACKAGE)
+        package.__path__ = [str(Path(__file__).resolve().parent)]
+        package.__package__ = DEVICE_EXECUTOR_PACKAGE
+        sys.modules[DEVICE_EXECUTOR_PACKAGE] = package
+    try:
+        registry_module = __import__(
+            f"{DEVICE_EXECUTOR_PACKAGE}.device_executor_registry",
+            fromlist=["DeviceExecutorRegistry"],
+        )
+        _device_executor_registry = registry_module.DeviceExecutorRegistry(
+            DEVICE_EXECUTOR_MANIFEST_DIR
+        )
+    except Exception:
+        raise RunnerError("device_executor_registry_unavailable") from None
+    return _device_executor_registry
+
+
+def _generic_step(job: Mapping[str, Any], registry: Any) -> tuple[str, Any] | None:
+    """Return one unambiguous registry-owned step, without domain knowledge."""
+    matches: list[tuple[str, Any]] = []
+    steps = job.get("steps")
+    if not isinstance(steps, Sequence) or isinstance(steps, (str, bytes)):
+        return None
+    metadata = registry.module_metadata
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+        selectors = {
+            value.strip()
+            for key in ("module", "module_id", "action", "type")
+            if isinstance((value := step.get(key)), str) and value.strip()
+        }
+        if len(selectors) > 1:
+            raise RunnerError("device_executor_selector_ambiguous")
+        if not selectors:
+            continue
+        module_id = next(iter(selectors))
+        if module_id in metadata:
+            if module_id.startswith("robotics."):
+                raise RunnerError("device_executor_ownership_collision")
+            has_params = "params" in step
+            has_arguments = "arguments" in step
+            if has_params and has_arguments and step["params"] != step["arguments"]:
+                raise RunnerError("device_executor_arguments_ambiguous")
+            arguments = step.get("params") if has_params else step.get("arguments", {})
+            matches.append((module_id, arguments))
+    if len(matches) > 1:
+        raise RunnerError("device_executor_selector_ambiguous")
+    return matches[0] if matches else None
+
+
+_GENERIC_REPLAY_CODES = frozenset(
+    {
+        "device_executor_started",
+        "device_executor_succeeded",
+        "device_executor_failed",
+        "device_executor_refused",
+        "device_executor_replay_refused",
+    }
+)
+
+
+def _generic_replay_seen(job_id: str) -> bool:
+    """Fail closed if this generic run may already have reached execution."""
+    run_id = _event_identifier(job_id, "job")
+    try:
+        os.lstat(EVENT_JOURNAL)
+    except FileNotFoundError:
+        # A journal that has never been created is the canonical empty history.
+        # Only absence is accepted here: every existing-but-invalid shape is
+        # handed to the journal reader below and therefore fails closed.
+        return False
+    records = device_events().DeviceEventJournal(EVENT_JOURNAL).read_all()
+    return any(
+        record.get("event", {}).get("run_id") == run_id
+        and record.get("event", {}).get("reason_code") in _GENERIC_REPLAY_CODES
+        for record in records
+    )
+
+
+def _generic_failure(
+    credentials: Mapping[str, str],
+    *,
+    job_id: str,
+    headers: dict[str, str],
+    reason_code: str,
+) -> None:
+    """Record and report one fixed generic failure without private content."""
+    _append_event(
+        credentials,
+        status="refused" if reason_code.endswith("refused") else "failed",
+        severity="warning" if reason_code.endswith("refused") else "error",
+        reason_code=reason_code,
+        job_id=job_id,
+    )
+    _report_completion(
+        credentials,
+        job_id=job_id,
+        headers=headers,
+        body=_completion(status="failed", detail=reason_code),
+    )
+
+
+def _event_identifier(value: str, prefix: str) -> str:
+    if _EVENT_IDENTIFIER.fullmatch(value):
+        return value
+    return f"{prefix}-{hashlib.sha256(value.encode('utf-8')).hexdigest()[:32]}"
+
+
+def _resource_id(credentials: Mapping[str, str]) -> str:
+    """Which device these events are about. Configured, or the paired identity.
+
+    There is no fallback and there must not be one. A placeholder such as
+    "unidentified-device" is worse than no event at all: every robot in the
+    fleet emits under the same resource_id, so the records interleave into one
+    stream that names no machine, and the first time an operator needs to know
+    *which* robot refused to start they cannot find out — from records that
+    looked complete the whole time. A hostname is not an alternative either: it
+    names the network the device sits on, which this contract deliberately omits.
+
+    FLYTO_ROBOT_RESOURCE_ID lets a site keep its own naming; absent that, the
+    device_id the pairing returned is already a stable per-device identity that
+    upstream issued, so it needs no second agreement about naming.
+    """
+    configured = os.getenv("FLYTO_ROBOT_RESOURCE_ID", "").strip()
+    if configured:
+        return _event_identifier(configured, "device")
+    paired = str(credentials.get("device_id") or "").strip()
+    if paired:
+        return _event_identifier(paired, "device")
+    raise RunnerError(
+        "no device identity: set FLYTO_ROBOT_RESOURCE_ID or pair this device. "
+        "Events attributed to no machine cannot be acted on, so none are written."
+    )
+
+
+def _append_event(
+    credentials: Mapping[str, str],
+    *,
+    status: str,
+    severity: str,
+    reason_code: str,
+    job_id: str = "",
+    details: dict[str, Any] | None = None,
+    action_codes: Sequence[str] | None = None,
+) -> dict[str, Any]:
+    """Record one bounded, public observation. Raises if it cannot be recorded.
+
+    Raising is the point at the start of a job: an audit record that may or may
+    not have been written is not an audit record, and a robot that moved with no
+    trace of having been told to is the state this exists to prevent.
+    """
+    events = device_events()
+    moment = datetime.now(timezone.utc)
+    event = events.build_device_event(
+        resource_id=_resource_id(credentials),
+        component=EVENT_COMPONENT,
+        sequence=events.event_sequence(moment),
+        observed_at=events.now_observed_at(moment),
+        severity=severity,
+        status=status,
+        reason_code=reason_code,
+        action_codes=list(
+            action_codes if action_codes is not None else EVENT_ACTIONS.get(reason_code, ())
+        ),
+        correlation_id="",
+        # The job this belongs to. Empty would mean "no run at all", which for a
+        # job runner is never true and would break every upstream join.
+        run_id=_event_identifier(job_id, "job") if job_id else "",
+        message=EVENT_MESSAGES[reason_code],
+        details=dict(details or {}),
+    )
+    events.DeviceEventJournal(EVENT_JOURNAL).append(event)
+    return event
 
 
 # -- transport -----------------------------------------------------------
@@ -265,6 +627,213 @@ def _pair() -> dict[str, str]:
     return credentials
 
 
+def _pair_response(data: Any) -> dict[str, str]:
+    """Accept only the two-field credential contract issued by pairing."""
+    if not isinstance(data, dict) or set(data) != {"device_id", "device_secret"}:
+        raise RunnerError("pairing_response_invalid")
+    device_id = data["device_id"]
+    device_secret = data["device_secret"]
+    if (
+        not isinstance(device_id, str)
+        or PAIR_DEVICE_ID.fullmatch(device_id) is None
+        or not isinstance(device_secret, str)
+        or not device_secret
+        or len(device_secret) > PAIR_CREDENTIAL_MAX_CHARS
+        or any(ord(character) < 0x21 or ord(character) > 0x7E for character in device_secret)
+    ):
+        raise RunnerError("pairing_response_invalid")
+    return {"device_id": device_id, "device_secret": device_secret}
+
+
+def _strict_pair_json(body: bytes) -> Any:
+    """Decode bounded UTF-8 JSON without duplicate names or numeric constants."""
+
+    def reject_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("duplicate_json_key")
+            result[key] = value
+        return result
+
+    def reject_constant(_value: str) -> Any:
+        raise ValueError("invalid_json_constant")
+
+    try:
+        text = body.decode("utf-8", errors="strict")
+        return json.loads(
+            text,
+            object_pairs_hook=reject_pairs,
+            parse_constant=reject_constant,
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+        raise RunnerError("pairing_response_invalid") from None
+
+
+def _pair_read_file(path: Path) -> dict[str, str]:
+    """Read one owner-only regular credential file without following links."""
+    if not hasattr(os, "O_NOFOLLOW"):
+        raise RunnerError("stored_credential_invalid")
+    flags = os.O_RDONLY | os.O_NOFOLLOW
+    descriptor = os.open(path, flags)
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_mode & 0o077:
+            raise RunnerError("stored_credential_invalid")
+        with os.fdopen(descriptor, "rb", closefd=False) as handle:
+            body = handle.read(PAIR_STORED_MAX_BYTES + 1)
+        if not body or len(body) > PAIR_STORED_MAX_BYTES:
+            raise RunnerError("stored_credential_invalid")
+    finally:
+        os.close(descriptor)
+    try:
+        return _pair_response(_strict_pair_json(body))
+    except RunnerError:
+        raise RunnerError("stored_credential_invalid") from None
+
+
+def _pair_existing_credentials() -> dict[str, str] | None:
+    """Find an existing pair credential using only the bounded pair reader."""
+    directory = os.getenv("CREDENTIALS_DIRECTORY")
+    if directory:
+        systemd_path = Path(directory) / SYSTEMD_CREDENTIAL_NAME
+        try:
+            return _pair_read_file(systemd_path)
+        except FileNotFoundError:
+            pass
+    try:
+        return _pair_read_file(CREDENTIAL_FILE)
+    except FileNotFoundError:
+        return None
+
+
+def _pair_ascii_input(value: str, maximum: int, reason: str) -> str:
+    """Validate one request input before constructing any network object."""
+    if (
+        not value
+        or len(value) > maximum
+        or any(ord(character) < 0x21 or ord(character) > 0x7E for character in value)
+    ):
+        raise RunnerError(reason)
+    return value
+
+
+def _pair_request(code: str, name: str) -> dict[str, str]:
+    """Make the single commissioning request and bound its response body."""
+    request = urllib.request.Request(
+        f"{CLOUD_URL}/api/devices/pair/claim",
+        data=json.dumps(
+            {
+                "pairing_code": code,
+                "name": name,
+                "platform": "robot",
+            }
+        ).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=35.0) as response:
+        body = response.read(PAIR_RESPONSE_MAX_BYTES + 1)
+    if not body or len(body) > PAIR_RESPONSE_MAX_BYTES:
+        raise RunnerError("pairing_response_invalid")
+    return _pair_response(_strict_pair_json(body))
+
+
+PAIR_RESULTS = {
+    "paired": {"ok": True, "status": "paired"},
+    "already_paired": {"ok": True, "status": "already_paired"},
+}
+PAIR_ERRORS = {
+    "missing_code": {
+        "ok": False,
+        "reason": "pairing_code_missing",
+        "action_code": "set_pairing_code",
+    },
+    "invalid_code": {
+        "ok": False,
+        "reason": "pairing_code_invalid",
+        "action_code": "request_new_pairing_code",
+    },
+    "invalid_name": {
+        "ok": False,
+        "reason": "runner_name_invalid",
+        "action_code": "set_runner_name",
+    },
+    "existing_credential": {
+        "ok": False,
+        "reason": "stored_credential_invalid",
+        "action_code": "repair_stored_credential",
+    },
+    "response": {
+        "ok": False,
+        "reason": "pairing_response_invalid",
+        "action_code": "request_new_pairing_code",
+    },
+    "network": {
+        "ok": False,
+        "reason": "pairing_request_failed",
+        "action_code": "retry_pairing",
+    },
+    "io": {
+        "ok": False,
+        "reason": "credential_storage_failed",
+        "action_code": "inspect_credential_storage",
+    },
+}
+
+
+def _pair_output(value: Mapping[str, Any]) -> None:
+    """Emit one compact, content-free commissioning result."""
+    print(json.dumps(value, sort_keys=True, separators=(",", ":")))
+
+
+def pair_main() -> int:
+    """Commission this installation without entering any job-running path."""
+    code = os.environ.pop("FLYTO_PAIRING_CODE", "")
+    try:
+        existing = _pair_existing_credentials()
+    except (RunnerError, ValueError, TypeError, OSError):
+        _pair_output(PAIR_ERRORS["existing_credential"])
+        return 2
+    if existing is not None:
+        _pair_output(PAIR_RESULTS["already_paired"])
+        return 0
+    if not code.strip():
+        _pair_output(PAIR_ERRORS["missing_code"])
+        return 2
+    try:
+        code = _pair_ascii_input(code, PAIR_CODE_MAX_CHARS, "pairing_code_invalid")
+    except RunnerError:
+        _pair_output(PAIR_ERRORS["invalid_code"])
+        return 2
+    try:
+        name = _pair_ascii_input(
+            os.getenv("FLYTO_RUNNER_NAME", "flyto-device"),
+            PAIR_NAME_MAX_CHARS,
+            "runner_name_invalid",
+        )
+    except RunnerError:
+        _pair_output(PAIR_ERRORS["invalid_name"])
+        return 2
+    try:
+        credentials = _pair_request(code, name)
+    except RunnerError:
+        _pair_output(PAIR_ERRORS["response"])
+        return 3
+    except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, OSError):
+        _pair_output(PAIR_ERRORS["network"])
+        return 3
+    finally:
+        code = ""
+    try:
+        _write_credentials(credentials)
+    except (OSError, ValueError, TypeError):
+        _pair_output(PAIR_ERRORS["io"])
+        return 4
+    _pair_output(PAIR_RESULTS["paired"])
+    return 0
+
+
 def _headers(credentials: dict[str, str]) -> dict[str, str]:
     return {
         "Authorization": (
@@ -322,13 +891,50 @@ def _authored_plan(step: dict[str, Any], params: dict[str, Any]) -> dict[str, An
     job is reported as one this device cannot run — which is true, and better
     than a plan assembled from guesses.
     """
-    try:
-        from flyto_modules_robotics.steps import plan_for_step, step_module_id
-    except ImportError:
+    # Do not import the optional package for an unrelated step. This mirrors
+    # the public step_module_id spellings closely enough to decide only whether
+    # the installed robotics package is relevant; that package remains the
+    # authority for the actual module id below.
+    authored_module = next(
+        (
+            value.strip()
+            for key in ("module", "module_id", "action", "type")
+            if isinstance((value := step.get(key)), str) and value.strip()
+        ),
+        "",
+    )
+    if not authored_module.startswith("robotics."):
         return None
 
+    try:
+        import flyto_modules_robotics  # noqa: F401 - distinguish optional root absence
+    except ModuleNotFoundError as exc:
+        if exc.name == "flyto_modules_robotics":
+            return None
+        raise AuthoredPlanRefused("trusted_plan_construction_failed") from None
+    except ImportError:
+        raise AuthoredPlanRefused("trusted_plan_construction_failed") from None
+
+    try:
+        from flyto_modules_robotics.gateway import (
+            CapabilityCatalogError,
+            GatewayError,
+            GatewayRefused,
+            capability_catalog,
+        )
+        from flyto_modules_robotics.steps import (
+            PlanBuildError,
+            step_module_id,
+            trusted_plan_for_step,
+        )
+    except (ImportError, AttributeError):
+        # The root package exists, so a failed internal import or missing 0.1.1
+        # public symbol is a broken/incompatible installation, not absence of
+        # robotics support. Fail closed under fixed, content-free reporting.
+        raise AuthoredPlanRefused("trusted_plan_construction_failed") from None
+
     module_id = step_module_id(step)
-    if not module_id:
+    if not module_id or not module_id.startswith("robotics."):
         return None
 
     robot_id = os.getenv("FLYTO_ROBOTICS_ROBOT_ID", "").strip()
@@ -344,10 +950,23 @@ def _authored_plan(step: dict[str, Any], params: dict[str, Any]) -> dict[str, An
         return None
 
     try:
-        return plan_for_step(module_id, params, robot_id=robot_id)
-    except Exception:  # noqa: BLE001 - a plan that cannot be built is not run
-        logger.warning("step %s could not be built into a plan", module_id, exc_info=True)
-        return None
+        catalog = capability_catalog()
+    except GatewayRefused:
+        raise AuthoredPlanRefused("capability_catalog_refused") from None
+    except GatewayError:
+        raise AuthoredPlanRefused("capability_catalog_unavailable") from None
+    except CapabilityCatalogError:
+        raise AuthoredPlanRefused("capability_catalog_invalid") from None
+
+    try:
+        plan = trusted_plan_for_step(module_id, params, robot_id=robot_id, catalog=catalog)
+    except (PlanBuildError, CapabilityCatalogError):
+        raise AuthoredPlanRefused("capability_catalog_incompatible") from None
+    except Exception:  # noqa: BLE001 - fail closed without publishing library text
+        raise AuthoredPlanRefused("trusted_plan_construction_failed") from None
+    if plan is None:
+        raise AuthoredPlanRefused("capability_catalog_incompatible")
+    return plan
 
 
 def _run_plan(plan: dict[str, Any], job_id: str) -> dict[str, Any]:
@@ -371,7 +990,11 @@ def _run_plan(plan: dict[str, Any], job_id: str) -> dict[str, Any]:
     )
     session_id = str(session.get("session_id") or "")
     if not session_id:
-        return {"status": "failed", "detail": "gateway returned no session"}
+        return {
+            "status": "failed",
+            "detail": "gateway returned no session",
+            "reason_code": "gateway_returned_no_session",
+        }
 
     watch_seconds = _watch_seconds(session)
     deadline = time.monotonic() + watch_seconds
@@ -381,8 +1004,12 @@ def _run_plan(plan: dict[str, Any], job_id: str) -> dict[str, Any]:
         # accepted because the delivery adapter's fixtures use it.
         state = str(latest.get("status") or latest.get("state") or "").lower()
         if state in TERMINAL_STATES:
+            succeeded = state in SUCCESS_STATES
             return {
-                "status": "succeeded" if state in SUCCESS_STATES else "failed",
+                "status": "succeeded" if succeeded else "failed",
+                # The event carries a fixed reason code; this free text goes
+                # only to the Cloud completion body, which is not the event.
+                "reason_code": "job_completed" if succeeded else "mission_failed",
                 "detail": str(latest.get("failure_reason") or latest.get("reason") or state)[:300],
                 # The session payload spells this "pose"; "final_pose" is the
                 # fixtures' name. Reading only the latter meant a real mission
@@ -401,7 +1028,11 @@ def _run_plan(plan: dict[str, Any], job_id: str) -> dict[str, Any]:
 
     # Not knowing an outcome is not the same as the mission having failed, and
     # the gateway still owns the robot. Report it as what it is.
-    return {"status": "failed", "detail": f"outcome unknown after {watch_seconds:.0f}s"}
+    return {
+        "status": "failed",
+        "detail": f"outcome unknown after {watch_seconds:.0f}s",
+        "reason_code": "mission_outcome_unknown",
+    }
 
 
 def _watch_seconds(session: dict[str, Any]) -> float:
@@ -419,35 +1050,210 @@ def _handle(job: dict[str, Any], credentials: dict[str, str]) -> None:
     headers = _headers(credentials)
 
     claimed = _post(CLOUD_URL, f"/api/devices/jobs/{job_id}/claim", {}, headers)
-    lease = claimed.get("lease_id")
-    if lease:
-        headers = {**headers, LEASE_HEADER: str(lease)}
-    else:
+    lease = str(claimed.get("lease_id") or "").strip()
+    if not lease:
         # The completion endpoint refuses a report with no lease (409), so a
-        # claim that returned none means this mission can never be reported.
-        # Saying so here beats driving the robot and discovering it afterwards.
-        logger.warning(
-            "job %s was claimed without a lease; the report will be refused",
-            job_id,
-        )
-
-    plan = _plan_from(job)
-    if plan is None:
-        logger.warning("job %s carries no robot plan", job_id)
-        _post(
-            CLOUD_URL,
-            f"/api/devices/jobs/{job_id}/complete",
-            _completion(status="failed", detail="this device runs robot plans only"),
-            headers,
+        # claim that returned none means this mission could never be reported.
+        # Running it anyway moves a real robot in a hospital corridor and then
+        # has no way to say that it did: the schedule still shows the step
+        # pending, an operator re-dispatches, and the second run collides with
+        # the consequences of the first. So this stops here, before the gateway
+        # is touched at all — a job that cannot be reported is not started.
+        logger.error("job %s was claimed without a lease; nothing was started", job_id)
+        _append_event(
+            credentials,
+            status="refused",
+            severity="warning",
+            reason_code="job_lease_missing",
+            job_id=job_id,
         )
         return
+    headers = {**headers, LEASE_HEADER: lease}
+
+    try:
+        plan = _plan_from(job)
+    except AuthoredPlanRefused as exc:
+        logger.warning("job %s failed trusted Canvas plan preparation: %s", job_id, exc.reason_code)
+        _append_event(
+            credentials,
+            status="refused",
+            severity="warning",
+            reason_code=exc.reason_code,
+            job_id=job_id,
+        )
+        _report_completion(
+            credentials,
+            job_id=job_id,
+            headers=headers,
+            body=_completion(status="failed", detail="robot capability verification failed"),
+        )
+        return
+    generic: tuple[Any, Any] | None = None
+    registry = None
+    try:
+        registry = _executor_registry()
+    except Exception:
+        if plan is None:
+            _generic_failure(
+                credentials,
+                job_id=job_id,
+                headers=headers,
+                reason_code="device_executor_registry_error",
+            )
+            return
+    if registry is not None:
+        try:
+            selected = _generic_step(job, registry)
+        except Exception:
+            _generic_failure(
+                credentials,
+                job_id=job_id,
+                headers=headers,
+                reason_code="device_executor_registry_error",
+            )
+            return
+        if selected is not None and plan is not None:
+            _generic_failure(
+                credentials,
+                job_id=job_id,
+                headers=headers,
+                reason_code="device_executor_registry_error",
+            )
+            return
+        if selected is not None:
+            try:
+                replay = _generic_replay_seen(job_id)
+            except Exception:
+                _generic_failure(
+                    credentials,
+                    job_id=job_id,
+                    headers=headers,
+                    reason_code="device_executor_replay_refused",
+                )
+                return
+            if replay:
+                _generic_failure(
+                    credentials,
+                    job_id=job_id,
+                    headers=headers,
+                    reason_code="device_executor_replay_refused",
+                )
+                return
+            module_id, params = selected
+            try:
+                generic = (registry, registry.prepare(module_id, params))
+            except Exception:
+                _generic_failure(
+                    credentials,
+                    job_id=job_id,
+                    headers=headers,
+                    reason_code="device_executor_registry_error",
+                )
+                return
+
+    if plan is None and generic is None:
+        logger.warning("job %s carries no robot plan", job_id)
+        # Recorded before the completion is sent, for the same reason the
+        # terminal outcome is: if the report is refused, the refusal must still
+        # be explainable from this device alone.
+        _append_event(
+            credentials,
+            status="refused",
+            severity="notice",
+            reason_code="job_plan_unsupported",
+            job_id=job_id,
+        )
+        _report_completion(
+            credentials,
+            job_id=job_id,
+            headers=headers,
+            body=_completion(status="failed", detail="this device runs robot plans only"),
+        )
+        return
+
+    if generic is not None:
+        registry, handle = generic
+        if _stopping:
+            with contextlib.suppress(Exception):
+                registry.discard(handle)
+            return
+        try:
+            _append_event(
+                credentials,
+                status="started",
+                severity="info",
+                reason_code="device_executor_started",
+                job_id=job_id,
+            )
+        except BaseException:
+            with contextlib.suppress(Exception):
+                registry.discard(handle)
+            raise
+        if _stopping:
+            with contextlib.suppress(Exception):
+                registry.discard(handle)
+            return
+        try:
+            result = registry.execute(handle)
+        except Exception:
+            result = {"status": "failed", "reason_code": "device_executor_execute_failed"}
+        status = result.get("status")
+        succeeded = status == "succeeded"
+        reason = (
+            "device_executor_succeeded"
+            if succeeded
+            else "device_executor_refused" if status == "refused" else "device_executor_failed"
+        )
+        evidence = result.get("evidence", []) if succeeded else []
+        body: dict[str, Any] = {
+            "status": "success" if succeeded else "failed",
+            "variables": {"detail": reason},
+        }
+        if succeeded:
+            body["variables"]["evidence"] = evidence
+        else:
+            body["error_message"] = reason
+        _append_event(
+            credentials,
+            status="succeeded" if succeeded else "failed",
+            severity="info" if succeeded else "error",
+            reason_code=(
+                "device_executor_succeeded"
+                if succeeded
+                else "device_executor_refused" if status == "refused" else "device_executor_failed"
+            ),
+            job_id=job_id,
+            details={"job": {"reported_status": body["status"], "evidence_count": len(evidence)}},
+        )
+        _report_completion(credentials, job_id=job_id, headers=headers, body=body)
+        return
+
+    # The audit record that a robot was told to move, written before it is told.
+    # If this raises, nothing below runs and the gateway is never called: an
+    # unrecordable start is a refusal, not a warning. The poll loop treats the
+    # exception as a failure and backs off, so the job stays claimable.
+    _append_event(
+        credentials,
+        status="started",
+        severity="info",
+        reason_code="job_execution_started",
+        job_id=job_id,
+    )
 
     logger.info("job %s -> plan %s", job_id, plan.get("plan_id"))
     try:
         outcome = _run_plan(plan, job_id)
     except Exception as exc:  # noqa: BLE001 - any failure is a failed job, reported
         logger.exception("job %s failed", job_id)
-        outcome = {"status": "failed", "detail": str(exc)[:300]}
+        # str(exc) reaches the Cloud completion body, which is a different
+        # channel with a different contract. It must not reach the event: an
+        # exception's text is whatever the failing library chose to put in it,
+        # which has included URLs, tokens and file contents.
+        outcome = {
+            "status": "failed",
+            "detail": str(exc)[:300],
+            "reason_code": "gateway_unreachable",
+        }
 
     body = _completion(
         status=outcome["status"],
@@ -455,27 +1261,141 @@ def _handle(job: dict[str, Any], credentials: dict[str, str]) -> None:
         pose=outcome.get("pose"),
         minimum_range=outcome.get("minimum_range"),
     )
+    succeeded = outcome["status"] == "succeeded"
+    _append_event(
+        credentials,
+        status="succeeded" if succeeded else "failed",
+        severity="info" if succeeded else "error",
+        reason_code=str(
+            outcome.get("reason_code") or ("job_completed" if succeeded else "mission_failed")
+        ),
+        job_id=job_id,
+        # Counts and a closed-vocabulary status. Never the pose, the plan, the
+        # gateway's own text or the address it lives at.
+        details={
+            "job": {
+                "reported_status": body["status"],
+                "evidence_count": len(body.get("variables", {}).get("evidence", [])),
+            }
+        },
+    )
+    _report_completion(credentials, job_id=job_id, headers=headers, body=body)
+
+
+def _report_completion(
+    credentials: Mapping[str, str],
+    *,
+    job_id: str,
+    headers: dict[str, str],
+    body: dict[str, Any],
+) -> None:
+    """Send one completion, and record its failure to land. The only way out.
+
+    Two different things can stop a completion, and they are recorded as two
+    different reason codes because they have two different first moves:
+
+    * **Refused** — the request reached Cloud and Cloud would not take it
+      (``HTTPError``). Whoever owns the job upstream answers that.
+    * **Unreachable** — the request never got an answer at all: DNS did not
+      resolve, the connection was refused, the peer disconnected, or it timed
+      out (``URLError``). Whoever owns the link answers that.
+
+    An offline operator holding only this device's journal has to be able to
+    tell those apart, so neither is allowed to surface as the other, and neither
+    is allowed to surface as nothing.
+
+    Every completion this runner sends goes through here — the unsupported-plan
+    report as much as the one that follows a mission. A second call site that
+    posted directly would be a path on which a 409, or a severed uplink,
+    produced no event, and the whole point of the terminal record is that a
+    report upstream did not take is still explainable from the device
+    afterwards.
+    """
     try:
         _post(CLOUD_URL, f"/api/devices/jobs/{job_id}/complete", body, headers)
     except urllib.error.HTTPError as exc:
-        # A mission that ran and could not be reported is the worst state to
-        # be silent about: the robot moved, the schedule still thinks the step
-        # is running, and nothing in the log says why. Name it here rather
-        # than letting the poll loop swallow it as one more backoff.
+        # A job that ran and could not be reported is the worst state to be
+        # silent about: the robot moved, the schedule still thinks the step is
+        # running, and nothing says why. Name it here rather than letting the
+        # poll loop swallow it as one more backoff.
+        #
+        # The status line and nothing else. An error body is server text, and
+        # server text has echoed back authorization headers and query strings
+        # before now — into a log an operator then pastes into a ticket.
         logger.error(
-            "job %s ran (%s) but the report was refused: %s %s",
+            "job %s reported %s but the report was refused with HTTP %s",
             job_id,
-            outcome["status"],
+            body.get("status"),
             exc.code,
-            _read_error_body(exc),
         )
+        try:
+            _append_event(
+                credentials,
+                status="failed",
+                severity="error",
+                reason_code="completion_report_refused",
+                job_id=job_id,
+                details={"upstream": {"http_status": int(exc.code)}},
+            )
+        except Exception:  # noqa: BLE001 - the refusal itself must still surface
+            logger.exception("job %s: the refusal could not be recorded either", job_id)
         raise
+    except urllib.error.URLError:
+        # Not a refusal: nothing upstream ever answered. HTTPError is a subclass
+        # of URLError, so this must stay second — reordered, every 409 would be
+        # recorded as an unreachable Cloud and the lease problem would never be
+        # named.
+        #
+        # Unbound on purpose. There is nothing here this may read: URLError.reason
+        # is an OS error or a TLS message carrying the host, the port and
+        # sometimes the URL, which is the site's own Cloud address and network
+        # identity — not something to write into a journal that leaves the robot,
+        # or into a log an operator pastes into a ticket. The job id and the
+        # status this device tried to report are the whole of what is said.
+        logger.error(
+            "job %s reported %s but the report could not be delivered",
+            job_id,
+            body.get("status"),
+        )
+        try:
+            _append_event(
+                credentials,
+                status="failed",
+                severity="error",
+                reason_code="completion_report_unreachable",
+                job_id=job_id,
+                # No details at all. A refusal has a status code worth carrying;
+                # an unreachable peer has only the exception's own text, and
+                # there is no bounded, content-free field to distil it into.
+            )
+        except Exception as unrecordable:  # noqa: BLE001 - it must still surface
+            # Surfaced the same way the refusal above is — named, bounded, and
+            # not allowed to mask the raise below — but without a traceback. A
+            # traceback prints the chained __context__, and here that context is
+            # the URLError this branch deliberately never reads: its text would
+            # arrive in the log by the back door. The class of what stopped the
+            # write is a bounded name; its message is not, so only the name is
+            # said.
+            logger.error(
+                "job %s: the undelivered report could not be recorded either (%s)",
+                job_id,
+                type(unrecordable).__name__,
+            )
+        # Re-raised unchanged. The poll loop treats it as a failure and backs
+        # off; nothing re-runs the mission, which already moved a real robot.
+        raise
+    # Everything here comes from the body that was actually accepted. This line
+    # used to read from the caller's `outcome`, which does not exist in this
+    # function: every successfully reported job raised NameError *after* the
+    # report had gone through, so the poll loop backed off and re-claimed a job
+    # the cloud already considered done.
+    variables = body.get("variables", {})
     logger.info(
         "job %s reported %s: %s | evidence: %s",
         job_id,
-        outcome["status"],
-        outcome.get("detail"),
-        [item["kind"] for item in body.get("variables", {}).get("evidence", [])],
+        body.get("status"),
+        variables.get("detail"),
+        [item["kind"] for item in variables.get("evidence", [])],
     )
 
 
@@ -600,16 +1520,16 @@ def main() -> int:
                     "credential rejected (%s); delete %s and pair again", exc.code, CREDENTIAL_FILE
                 )
                 return 3
-            # Say what the server said. Backing off with only "retrying in 6s"
-            # is how a job that finished on the robot but could not be reported
-            # became an unreadable silence — the robot had moved, the mission
-            # was complete, and the log showed nothing but a retry.
-            logger.warning(
-                "%s %s: %s",
-                exc.code,
-                getattr(exc, "url", ""),
-                _read_error_body(exc),
-            )
+            # Say which request failed and how. Backing off with only "retrying
+            # in 6s" is how a job that finished on the robot but could not be
+            # reported became an unreadable silence.
+            #
+            # The status line and the path, never the response body. A body is
+            # server text: it has echoed back authorization headers, query
+            # strings and stack traces, and this log is read by an operator who
+            # will paste it into a ticket. The status code plus the path is what
+            # actually identifies the failure.
+            logger.warning("%s from %s", exc.code, _request_path(exc))
             failures += 1
             _back_off(failures)
         except Exception:  # noqa: BLE001 - the loop must survive a bad poll
@@ -625,11 +1545,18 @@ def main() -> int:
     return 0
 
 
-def _read_error_body(exc: urllib.error.HTTPError) -> str:
-    try:
-        return exc.read().decode("utf-8", "replace")[:300]
-    except Exception:  # noqa: BLE001 - a body that cannot be read is not fatal
-        return "<no body>"
+def _request_path(exc: urllib.error.HTTPError) -> str:
+    """Which endpoint refused, with no host, no query string and no body.
+
+    The path alone says what was being attempted. The host names the site's
+    Cloud endpoint and a query string can carry a token, so neither is logged,
+    and the body is never read at all — a body that is never read is a body that
+    cannot be forwarded into a ticket by mistake.
+    """
+    url = str(getattr(exc, "url", "") or "")
+    without_scheme = url.split("://", 1)[-1]
+    path = without_scheme[without_scheme.find("/") :] if "/" in without_scheme else ""
+    return path.split("?", 1)[0] or "an unnamed endpoint"
 
 
 def _back_off(failures: int) -> None:

@@ -1,5 +1,20 @@
 # Decisions
 
+## 2026-08-13 — Plan delivery and capability discovery share one authority
+
+Decision: the authenticated loopback delivery gateway that accepts
+`POST /v1/plans` also exposes read-only `GET /v1/capabilities`. The body is the
+existing `flyto.robotics.capability-catalog.v1` execution projection generated
+by the default capability registry; the gateway owns no duplicate definitions,
+schemas, bounds, or hashes. Discovery is uncached and cannot start or mutate a
+mission.
+
+Reason: a plan producer must validate against the same language-neutral
+authority the robot enforces. Keeping this surface discovery-only prevents
+catalog access from becoming motor authority and keeps simulation and physical
+execution behind the existing guarded plan route. Consumer migration in
+`flyto-modules-robotics` remains the next layer.
+
 ## 2026-08-08 — The device credential is protected by permissions, not encryption
 
 Decision: the robot's device secret is stored as clear text with owner-only
