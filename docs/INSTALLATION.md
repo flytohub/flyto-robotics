@@ -59,6 +59,41 @@ sudo /opt/flyto-robot/venv/bin/flyto-robot install \
   --python /opt/flyto-robot/venv/bin/python
 ```
 
+If and only if this is the first Flyto activation and the selected profile's
+unit names already belong to a reviewed legacy installation, create a bounded
+takeover receipt without changing the machine:
+
+```bash
+sudo /opt/flyto-robot/venv/bin/flyto-robot plan-takeover \
+  --profile generic --acknowledge-legacy-takeover \
+  > /tmp/flyto-takeover-receipt.json
+sudo /opt/flyto-robot/venv/bin/flyto-robot revalidate-takeover \
+  --profile generic --receipt /tmp/flyto-takeover-receipt.json
+```
+
+After reviewing the receipt and the unchanged machine, attach that exact file
+to the first landing install:
+
+```bash
+sudo /opt/flyto-robot/venv/bin/flyto-robot install \
+  --from-package --version 1.4.0 --profile generic \
+  --python /opt/flyto-robot/venv/bin/python \
+  --takeover-receipt /tmp/flyto-takeover-receipt.json
+```
+
+The receipt contains only digests and generations, not unit bytes, credentials,
+or endpoints. It is rejected if the host, commissioning prerequisites,
+lifecycle state, unit bytes, or systemd state changed after planning. The
+option is intentionally absent from `update`, and is refused with `--dry-run`
+or after any activation has committed. A normal first install without a receipt
+continues to refuse colliding unit names. Once sealed, any pre-commit failure
+restores the captured legacy unit bytes and active/enabled state. Immediately
+before the lifecycle state commit, a private durable intent binds the exact
+incoming activation; after a response loss, recovery finalizes only that exact
+committed activation and never restores legacy units beneath it. If either
+outcome cannot be proved, the durable marker remains and later lifecycle
+mutations fail closed.
+
 Use `--profile camera` for the robot-local camera observation gateway without
 the ROS bringup unit, or `--profile ros2` when both are intended. Configure the
 gateway in `/etc/flyto-robot/camera.env`. `FLYTO_CAMERA_PROVIDER` is either

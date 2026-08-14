@@ -91,6 +91,7 @@ from collections.abc import Callable, Iterable, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from .activation_snapshot import Snapshot, SnapshotError
 from .activation_snapshot import build as build_activation_snapshot
@@ -2267,6 +2268,7 @@ def _activate_unit_set(
     inactive = _inactive_conditional_units(spec, conditions)
     if inactive:
         controller.stop(inactive)
+    controller.disable([unit.name for unit in spec.units if not unit.enable])
     controller.enable([unit.name for unit in spec.units if unit.enable])
     controller.restart(_selected_unit_names(spec, conditions, "restart"))
     controller.verify_active(_selected_unit_names(spec, conditions, "verify"))
@@ -2397,6 +2399,7 @@ def install(
     profiles: Path | str | None = None,
     manifest: Path | str | None = None,
     wheel_dir: Path | None = None,
+    takeover_receipt: dict[str, Any] | None = None,
     _action: str = "install",
 ) -> dict:
     """Stage ``payload`` as ``version``, activate it, and prove it came up.
@@ -2423,6 +2426,8 @@ def install(
             binary=controller.binary,
             mode=controller.mode,
         )
+    if takeover_receipt is not None and (dry_run or _action != "install"):
+        raise LifecycleError("takeover_not_permitted")
     _recover_takeover_before_collision(layout, controller, dry_run=dry_run)
 
     manifest_source = manifest is not None or wheel_dir is not None
@@ -2444,7 +2449,7 @@ def install(
         previous_snapshot = current_activation_snapshot(layout, state)
         incoming_spec = profile_for(lifecycle_profile[bootstrap_profile], profiles=profiles)
         collisions = _unit_authority_collisions(layout, incoming_spec, previous_snapshot)
-        if collisions:
+        if collisions and takeover_receipt is None:
             raise LifecycleError("unit_name_collision", ", ".join(collisions))
 
         def activate(releases: Path) -> dict:
@@ -2467,6 +2472,7 @@ def install(
                 health_check=health_check,
                 systemd=systemd,
                 profiles=profiles,
+                takeover_receipt=takeover_receipt,
                 _action=_action,
             )
 
@@ -2492,7 +2498,7 @@ def install(
     state_before_lock = _read_state(layout)
     snapshot_before_lock = current_activation_snapshot(layout, state_before_lock)
     collisions = _unit_authority_collisions(layout, spec, snapshot_before_lock)
-    if collisions:
+    if collisions and takeover_receipt is None:
         raise LifecycleError("unit_name_collision", ", ".join(collisions))
 
     with _advisory_lock(layout, enabled=not dry_run):
@@ -2504,8 +2510,26 @@ def install(
 
         snapshot_under_lock = current_activation_snapshot(layout, state)
         collisions = _unit_authority_collisions(layout, spec, snapshot_under_lock)
-        if collisions:
+        if collisions and takeover_receipt is None:
             raise LifecycleError("unit_name_collision", ", ".join(collisions))
+
+        if takeover_receipt is not None and state != _empty_state():
+            raise LifecycleError("takeover_not_first_install")
+        if takeover_receipt is not None:
+            from .legacy_takeover import TakeoverError, revalidate_takeover_receipt
+
+            try:
+                takeover_check = revalidate_takeover_receipt(
+                    receipt=takeover_receipt,
+                    layout=layout,
+                    profile=profile,
+                    profiles=Path(profiles) if profiles is not None else None,
+                    systemd=controller,
+                )
+            except TakeoverError as error:
+                raise LifecycleError(error.reason) from error
+            if not takeover_check["ok"]:
+                raise LifecycleError(takeover_check["reason"])
 
         _ensure_persistent(fs, layout)
         _materialise_activation_records(fs, layout, state)
@@ -2587,6 +2611,21 @@ def install(
             view_version=version,
             systemd=controller,
         )
+        takeover_digest = None
+        if takeover_receipt is not None:
+            from .legacy_takeover import TakeoverError, seal_takeover_window
+
+            try:
+                takeover_digest = seal_takeover_window(
+                    receipt=takeover_receipt,
+                    layout=layout,
+                    profile=profile,
+                    version=version,
+                    profiles=Path(profiles) if profiles is not None else None,
+                    systemd=controller,
+                )
+            except TakeoverError as error:
+                raise LifecycleError(error.reason) from error
 
         # From here until the state write commits -- or the undo finishes -- this
         # device legitimately has no committed state to show the services this
@@ -2594,11 +2633,10 @@ def install(
         # than left to be guessed at from an absent file, and it is removed in the
         # `finally` below on every exit from the transaction, including the
         # failure that returns a report.
-        if not dry_run:
-            open_activation_window(layout, action=_action, version=version)
-
         verdict = Readiness(state=READY, checks=())
         try:
+            if not dry_run:
+                open_activation_window(layout, action=_action, version=version)
             _seed_site_files(fs, layout, profiles=profiles)
             verdict = _activate_unit_set(
                 fs,
@@ -2637,13 +2675,41 @@ def install(
                 _record_activation(
                     state, version, incoming_digest, profile, python, units, activation_id
                 )
+                if takeover_digest is not None:
+                    from .legacy_takeover import (
+                        TakeoverError,
+                        publish_takeover_commit_intent,
+                    )
+
+                    try:
+                        publish_takeover_commit_intent(
+                            layout, takeover_digest, activation_id, state
+                        )
+                    except TakeoverError as error:
+                        raise LifecycleError(error.reason) from error
                 _write_state(fs, layout, state)
+                if takeover_digest is not None:
+                    from .legacy_takeover import TakeoverError, clear_takeover_window
+
+                    try:
+                        clear_takeover_window(layout, takeover_digest)
+                    except TakeoverError as error:
+                        raise LifecycleError(error.reason) from error
         except (LifecycleError, SystemdError, OSError) as error:
             reason = getattr(error, "reason", "install_failed")
             detail = getattr(error, "detail", "") or str(error)
             if dry_run:
                 raise
             recovery = activation.restore(fs, controller)
+            if takeover_digest is not None:
+                from .legacy_takeover import recover_takeover
+
+                takeover_recovery = recover_takeover(layout, controller)
+                recovery = {
+                    **recovery,
+                    "ok": recovery["ok"] and takeover_recovery["ok"],
+                    "takeover": takeover_recovery,
+                }
             return _report(
                 _action,
                 layout,
