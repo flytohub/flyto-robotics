@@ -767,6 +767,70 @@ def _remove_private_exact(
             os.close(descriptor)
 
 
+def _replace_private_exact(
+    layout: Layout,
+    parts: tuple[str, ...],
+    name: str,
+    expected: dict[str, Any],
+    replacement: dict[str, Any],
+) -> bool:
+    """Atomically replace one exact private document, never a substitute."""
+
+    wanted = _json_bytes(expected) + b"\n"
+    data = _json_bytes(replacement) + b"\n"
+    temporary = f".{name}.{secrets.token_hex(16)}.tmp"
+    read_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    write_flags = (
+        os.O_WRONLY
+        | os.O_CREAT
+        | os.O_EXCL
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    with _private_dirfd(layout, parts, create=False) as directory_fd:
+        try:
+            authority = os.fstat(directory_fd).st_uid
+            descriptor = os.open(name, read_flags, dir_fd=directory_fd)
+            try:
+                metadata = os.fstat(descriptor)
+                raw = bytearray()
+                while len(raw) < len(wanted):
+                    chunk = os.read(descriptor, len(wanted) - len(raw))
+                    if not chunk:
+                        break
+                    raw.extend(chunk)
+                if (
+                    not stat.S_ISREG(metadata.st_mode)
+                    or metadata.st_uid != authority
+                    or stat.S_IMODE(metadata.st_mode) != 0o600
+                    or metadata.st_size != len(wanted)
+                    or bytes(raw) != wanted
+                ):
+                    return False
+            finally:
+                os.close(descriptor)
+            temporary_fd = os.open(temporary, write_flags, 0o600, dir_fd=directory_fd)
+            try:
+                os.fchmod(temporary_fd, 0o600)
+                offset = 0
+                while offset < len(data):
+                    offset += os.write(temporary_fd, data[offset:])
+                os.fsync(temporary_fd)
+            finally:
+                os.close(temporary_fd)
+            current = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+            if (current.st_dev, current.st_ino) != (metadata.st_dev, metadata.st_ino):
+                return False
+            os.replace(temporary, name, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
+            os.fsync(directory_fd)
+            return True
+        except OSError:
+            return False
+        finally:
+            with contextlib.suppress(OSError):
+                os.unlink(temporary, dir_fd=directory_fd)
+
+
 def seal_takeover_window(
     *,
     receipt: Any,
@@ -774,6 +838,7 @@ def seal_takeover_window(
     profile: str,
     profiles: Path | None,
     systemd: Any,
+    version: str = "1.0.0",
 ) -> str:
     """Seal one exact B1 observation before any foreign unit is touched.
 
@@ -787,6 +852,8 @@ def seal_takeover_window(
     )
     if not checked["ok"]:
         _fail(checked["reason"])
+    if layout.current.exists() or layout.current.is_symlink() or layout.state_file.exists():
+        _fail("takeover_not_first_install")
     registry = load_profiles(profiles)
     names = sorted(registry[profile].unit_names())
     observation = _observe(layout, profile, names, systemd)
@@ -833,6 +900,9 @@ def seal_takeover_window(
     body = {
         "schema": CAPSULE_SCHEMA,
         "profile": profile,
+        "version": version,
+        "pre_current": "absent",
+        "pre_state": "absent",
         "receipt_digest": receipt["receipt_digest"],
         "authority_digest": observation["authority_digest"],
         "commissioning_digest": observation["commissioning_digest"],
@@ -956,15 +1026,24 @@ def load_takeover_capsule(layout: Layout, digest: str) -> dict[str, Any]:
         "capsule_invalid",
     )
     required = {
-        "schema", "profile", "receipt_digest", "authority_digest", "commissioning_digest",
-        "lifecycle_generation", "systemd_generation", "units", "capsule_digest",
+        "schema", "profile", "version", "pre_current", "pre_state", "receipt_digest",
+        "authority_digest", "commissioning_digest", "lifecycle_generation",
+        "systemd_generation", "units", "capsule_digest",
     }
     if set(value) != required or value.get("schema") != CAPSULE_SCHEMA:
         _fail("capsule_invalid")
     if not isinstance(value.get("profile"), str) or not _PROFILE.fullmatch(value["profile"]):
         _fail("capsule_invalid")
+    if (
+        not isinstance(value.get("version"), str)
+        or not value["version"]
+        or value.get("pre_current") != "absent"
+        or value.get("pre_state") != "absent"
+    ):
+        _fail("capsule_invalid")
     if any(not isinstance(value.get(key), str) or not _DIGEST.fullmatch(value[key])
-           for key in required - {"schema", "profile", "units"}):
+           for key in required
+           - {"schema", "profile", "version", "pre_current", "pre_state", "units"}):
         _fail("capsule_invalid")
     units = value.get("units")
     if not isinstance(units, list) or not units or len(units) > MAX_UNITS:
@@ -1017,36 +1096,223 @@ def load_takeover_capsule(layout: Layout, digest: str) -> dict[str, Any]:
     return value
 
 
-def incomplete_takeover(layout: Layout) -> tuple[str, dict[str, Any]] | None:
+def _takeover_window(layout: Layout) -> tuple[dict[str, Any], dict[str, Any]] | None:
     try:
         value = _load_private(
             layout, ("legacy-takeover",), "window.json", 4096, "takeover_recovery_required"
         )
     except _PrivateMissing:
         return None
-    if set(value) != {"schema", "capsule_digest", "phase"} or value.get("schema") != WINDOW_SCHEMA:
+    if value.get("schema") != WINDOW_SCHEMA:
         _fail("takeover_recovery_required")
     digest = value.get("capsule_digest")
-    if (
-        value.get("phase") != "sealed"
-        or not isinstance(digest, str)
-        or not _DIGEST.fullmatch(digest)
+    phase = value.get("phase")
+    sealed = {"schema", "capsule_digest", "phase"}
+    intent = {*sealed, "activation_id", "state_digest", "intent_digest"}
+    if not isinstance(digest, str) or not _DIGEST.fullmatch(digest):
+        _fail("takeover_recovery_required")
+    if phase == "sealed" and set(value) != sealed:
+        _fail("takeover_recovery_required")
+    if phase == "commit_intent" and (
+        set(value) != intent
+        or not isinstance(value.get("activation_id"), str)
+        or not _DIGEST.fullmatch(value["activation_id"])
+        or not isinstance(value.get("state_digest"), str)
+        or not _DIGEST.fullmatch(value["state_digest"])
+        or not isinstance(value.get("intent_digest"), str)
+        or not _DIGEST.fullmatch(value["intent_digest"])
+        or not hmac.compare_digest(
+            hashlib.sha256(
+                _json_bytes({key: value[key] for key in value if key != "intent_digest"})
+            ).hexdigest(),
+            value["intent_digest"],
+        )
     ):
         _fail("takeover_recovery_required")
-    return digest, load_takeover_capsule(layout, digest)
+    if phase not in {"sealed", "commit_intent"}:
+        _fail("takeover_recovery_required")
+    return value, load_takeover_capsule(layout, digest)
+
+
+def incomplete_takeover(layout: Layout) -> tuple[str, dict[str, Any]] | None:
+    pending = _takeover_window(layout)
+    if pending is None:
+        return None
+    window, capsule = pending
+    return window["capsule_digest"], capsule
+
+
+def publish_takeover_commit_intent(
+    layout: Layout, digest: str, activation_id: str, state: dict[str, Any]
+) -> None:
+    """Durably bind the one lifecycle commit that may consume a capsule."""
+
+    if not _DIGEST.fullmatch(activation_id):
+        _fail("takeover_recovery_required")
+    sealed = {"schema": WINDOW_SCHEMA, "capsule_digest": digest, "phase": "sealed"}
+    intent_body = {
+        "schema": WINDOW_SCHEMA,
+        "capsule_digest": digest,
+        "phase": "commit_intent",
+        "activation_id": activation_id,
+        "state_digest": hashlib.sha256(_json_bytes(state)).hexdigest(),
+    }
+    intent = {
+        **intent_body,
+        "intent_digest": hashlib.sha256(_json_bytes(intent_body)).hexdigest(),
+    }
+    pending = _takeover_window(layout)
+    if pending is None or pending[0] != sealed:
+        _fail("takeover_recovery_required")
+    if not _replace_private_exact(layout, ("legacy-takeover",), "window.json", sealed, intent):
+        _fail("takeover_recovery_required")
+
+
+def clear_takeover_window(layout: Layout, digest: str) -> None:
+    """Commit one sealed takeover without exposing or deleting its capsule."""
+
+    pending = _takeover_window(layout)
+    if pending is None or pending[0].get("capsule_digest") != digest:
+        _fail("takeover_recovery_required")
+    window = pending[0]
+    if window.get("phase") != "commit_intent":
+        _fail("takeover_recovery_required")
+    if not _remove_private_exact(layout, ("legacy-takeover",), "window.json", window):
+        _fail("takeover_recovery_required")
+
+
+def _verify_committed_takeover(
+    layout: Layout, systemd: Any, window: dict[str, Any], capsule: dict[str, Any]
+) -> None:
+    """Prove every authority surface before consuming a commit intent."""
+
+    state = lifecycle._read_state(layout)
+    snapshot = lifecycle.current_activation_snapshot(layout, state)
+    if (
+        snapshot is None
+        or snapshot.activation_id != window["activation_id"]
+        or state.get("current_activation") != window["activation_id"]
+        or snapshot.profile != capsule["profile"]
+        or snapshot.version != capsule["version"]
+        or sorted(snapshot.units) != sorted(unit["name"] for unit in capsule["units"])
+        or not hmac.compare_digest(
+            hashlib.sha256(_json_bytes(state)).hexdigest(), window["state_digest"]
+        )
+    ):
+        _fail("takeover_recovery_failed")
+    target = layout.release(snapshot.version)
+    if (
+        not layout.current.is_symlink()
+        or Path(os.readlink(layout.current)) != target
+        or not target.is_dir()
+        or not hmac.compare_digest(lifecycle.release_digest(target), snapshot.release_digest)
+    ):
+        _fail("takeover_recovery_failed")
+    for name, rendered in snapshot.units.items():
+        raw, _metadata = _read_regular(
+            layout.unit_dir / name, MAX_UNIT_BYTES, "takeover_recovery_failed"
+        )
+        if raw != rendered.encode("utf-8"):
+            _fail("takeover_recovery_failed")
+    spec = snapshot.spec()
+    fields = lifecycle.render_fields(layout, snapshot.python)
+    conditions = lifecycle._activation_conditions(spec, fields)
+    selected_restart = set(lifecycle._selected_unit_names(spec, conditions, "restart"))
+    selected_verify = set(lifecycle._selected_unit_names(spec, conditions, "verify"))
+    inactive = set(lifecycle._inactive_conditional_units(spec, conditions))
+    observed = {entry["unit"]: entry for entry in systemd.health(sorted(snapshot.units))}
+    for unit in spec.units:
+        actual = observed.get(unit.name, {})
+        if (actual.get("enabled") == "enabled") != unit.enable:
+            _fail("takeover_recovery_failed")
+        if unit.name in selected_verify and actual.get("active") != "active":
+            _fail("takeover_recovery_failed")
+        if unit.name in inactive and actual.get("active") not in lifecycle._INERT_ACTIVE_STATES:
+            _fail("takeover_recovery_failed")
+        if unit.name in selected_restart and actual.get("active") != "active":
+            _fail("takeover_recovery_failed")
+    if not lifecycle.evaluate(spec, fields, config_file=layout.config_file).ok:
+        _fail("takeover_recovery_failed")
+
+
+def _restore_absent_first_install_authority(layout: Layout, capsule: dict[str, Any]) -> None:
+    """Restore the durable first-install authority facts captured by the capsule."""
+
+    if capsule["pre_current"] != "absent" or capsule["pre_state"] != "absent":
+        _fail("takeover_recovery_failed")
+    if layout.state_file.exists() or layout.state_file.is_symlink():
+        _fail("takeover_recovery_failed")
+    target = layout.release(capsule["version"])
+    if layout.current.is_symlink():
+        if Path(os.readlink(layout.current)) != target:
+            _fail("takeover_recovery_failed")
+    elif layout.current.exists():
+        _fail("takeover_recovery_failed")
+    view = layout.activation_file(capsule["version"])
+    if view.exists() or view.is_symlink():
+        if view.is_symlink():
+            _fail("takeover_recovery_failed")
+        snapshot = lifecycle._load_snapshot_file(view, version=capsule["version"])
+        if snapshot.profile != capsule["profile"]:
+            _fail("takeover_recovery_failed")
+    if layout.current.is_symlink():
+        layout.current.unlink()
+        lifecycle._fsync_path(layout.current.parent, directory=True)
+    if view.is_file():
+        view.unlink()
+        lifecycle._fsync_path(view.parent, directory=True)
+
+
+def _verify_uncommitted_intent(
+    layout: Layout, window: dict[str, Any], capsule: dict[str, Any]
+) -> None:
+    """Reject a substituted intent before performing its authorized rollback."""
+
+    view = layout.activation_file(capsule["version"])
+    snapshot = lifecycle._load_snapshot_file(
+        view, version=capsule["version"], activation_id=window["activation_id"]
+    )
+    if snapshot.profile != capsule["profile"]:
+        _fail("takeover_recovery_failed")
+    state = lifecycle._empty_state()
+    lifecycle._record_activation(
+        state,
+        snapshot.version,
+        snapshot.release_digest,
+        snapshot.profile,
+        snapshot.python,
+        snapshot.units,
+        snapshot.activation_id,
+    )
+    if not hmac.compare_digest(
+        hashlib.sha256(_json_bytes(state)).hexdigest(), window["state_digest"]
+    ):
+        _fail("takeover_recovery_failed")
 
 
 def recover_takeover(layout: Layout, systemd: Any) -> dict[str, Any]:
     """Restore exact foreign bytes and four-state systemd state, fail closed."""
 
     try:
-        pending = incomplete_takeover(layout)
+        pending = _takeover_window(layout)
     except (TakeoverError, _PrivateMissing, OSError):
         return {"ok": False, "reason": "takeover_rollback_failed"}
     if pending is None:
         return {"ok": True, "reason": "no_recovery_required"}
-    _digest, capsule = pending
+    window, capsule = pending
     try:
+        if window["phase"] == "commit_intent" and (
+            layout.state_file.exists() or layout.state_file.is_symlink()
+        ):
+            _verify_committed_takeover(layout, systemd, window, capsule)
+            if not _remove_private_exact(
+                layout, ("legacy-takeover",), "window.json", window
+            ):
+                _fail("takeover_recovery_failed")
+            return {"ok": True, "reason": "takeover_finalized"}
+        if window["phase"] == "commit_intent":
+            _verify_uncommitted_intent(layout, window, capsule)
+        _restore_absent_first_install_authority(layout, capsule)
         names = [unit["name"] for unit in capsule["units"]]
         if (
             _authority(layout, capsule["profile"]) != capsule["authority_digest"]
@@ -1120,9 +1386,8 @@ def recover_takeover(layout: Layout, systemd: Any) -> dict[str, Any]:
         ):
             if final[key] != capsule[key]:
                 _fail("takeover_recovery_failed")
-        with _private_dirfd(layout, ("legacy-takeover",), create=False) as directory_fd:
-            os.unlink("window.json", dir_fd=directory_fd)
-            os.fsync(directory_fd)
+        if not _remove_private_exact(layout, ("legacy-takeover",), "window.json", window):
+            _fail("takeover_recovery_failed")
         return {"ok": True, "reason": "takeover_recovered"}
     except Exception:
         return {"ok": False, "reason": "takeover_rollback_failed"}

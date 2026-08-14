@@ -383,6 +383,12 @@ def _build_parser() -> argparse.ArgumentParser:
         )
         action.add_argument("--python", default="/usr/bin/python3")
         action.add_argument("--dry-run", action="store_true")
+        if name == "install":
+            action.add_argument(
+                "--takeover-receipt",
+                type=Path,
+                help="B1 receipt authorizing a first-install legacy unit takeover",
+            )
 
     back = sub.add_parser("rollback", help="return to the previous activated release")
     back.add_argument("--to-version", default=None)
@@ -476,6 +482,11 @@ def main(argv: Sequence[str] | None = None, *, stream=None, systemd=None) -> int
             )
         elif args.command in {"install", "update"}:
             operation = lifecycle.install if args.command == "install" else lifecycle.update
+            takeover_receipt = (
+                read_takeover_receipt(args.takeover_receipt)
+                if getattr(args, "takeover_receipt", None) is not None
+                else None
+            )
             if bool(args.manifest) != bool(args.wheel_dir):
                 raise LifecycleError(
                     "release_payload_invalid",
@@ -491,6 +502,7 @@ def main(argv: Sequence[str] | None = None, *, stream=None, systemd=None) -> int
                     profiles=args.profiles,
                     manifest=args.manifest,
                     wheel_dir=args.wheel_dir,
+                    takeover_receipt=takeover_receipt,
                 )
             else:
                 if args.version is None:
@@ -508,6 +520,7 @@ def main(argv: Sequence[str] | None = None, *, stream=None, systemd=None) -> int
                         dry_run=dry_run,
                         systemd=controller,
                         profiles=args.profiles,
+                        takeover_receipt=takeover_receipt,
                     )
         elif args.command == "rollback":
             report = lifecycle.rollback(

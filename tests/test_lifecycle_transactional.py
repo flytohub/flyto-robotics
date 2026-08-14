@@ -334,6 +334,342 @@ class TestLegacyTakeoverCapsuleRecovery:
         assert result == {"ok": False, "reason": "takeover_rollback_failed"}
         assert legacy_takeover.takeover_window_path(layout).is_file()
 
+    @pytest.mark.parametrize("active", [False, True])
+    @pytest.mark.parametrize("enabled", [False, True])
+    def test_first_install_commits_the_sealed_takeover_after_readiness_and_state(
+        self, layout: Layout, tmp_path: Path, active: bool, enabled: bool
+    ) -> None:
+        controller, originals, receipt, _digest = _takeover_fixture(
+            layout, active=active, enabled=enabled
+        )
+        legacy_takeover.takeover_window_path(layout).unlink()
+
+        report = install(
+            payload=_payload(tmp_path, "takeover", "v1"),
+            version="1.0.0",
+            layout=layout,
+            systemd=controller,
+            takeover_receipt=receipt,
+        )
+
+        assert report["ok"] is True
+        assert not legacy_takeover.takeover_window_path(layout).exists()
+        assert json.loads(layout.state_file.read_text())["current"] == "1.0.0"
+        assert all(
+            (layout.unit_dir / name).read_bytes() != body
+            for name, body in originals.items()
+        )
+        encoded = json.dumps(report)
+        assert receipt["receipt_digest"] not in encoded
+        assert all(base64.b64encode(body).decode() not in encoded for body in originals.values())
+
+    @pytest.mark.parametrize(
+        ("crash_point", "finalized"),
+        [
+            ("before_intent", False),
+            ("after_intent", False),
+            ("after_state", True),
+        ],
+    )
+    def test_next_lifecycle_operation_resolves_each_commit_crash_window(
+        self,
+        layout: Layout,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        crash_point: str,
+        finalized: bool,
+    ) -> None:
+        controller, originals, receipt, _digest = _takeover_fixture(
+            layout, active=True, enabled=True
+        )
+        legacy_takeover.takeover_window_path(layout).unlink()
+        target = {
+            "before_intent": "publish_takeover_commit_intent",
+            "after_intent": "_write_state",
+            "after_state": "clear_takeover_window",
+        }[crash_point]
+        owner = legacy_takeover if crash_point != "after_intent" else lifecycle
+        original = getattr(owner, target)
+
+        def crash(*args, **kwargs):
+            if crash_point == "after_intent":
+                raise KeyboardInterrupt
+            if crash_point == "after_state":
+                raise KeyboardInterrupt
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr(owner, target, crash)
+        with pytest.raises(KeyboardInterrupt):
+            install(
+                payload=_payload(tmp_path, f"crash-{crash_point}", "v1"),
+                version="1.0.0",
+                layout=layout,
+                systemd=controller,
+                takeover_receipt=receipt,
+            )
+        monkeypatch.setattr(owner, target, original)
+
+        with pytest.raises(LifecycleError):
+            install(
+                payload=tmp_path / "missing-payload",
+                version="2.0.0",
+                layout=layout,
+                systemd=controller,
+            )
+
+        assert not legacy_takeover.takeover_window_path(layout).exists()
+        if finalized:
+            assert json.loads(layout.state_file.read_text())["current_activation"]
+            assert all(
+                (layout.unit_dir / name).read_bytes() != body
+                for name, body in originals.items()
+            )
+        else:
+            assert not layout.state_file.exists()
+            assert {name: (layout.unit_dir / name).read_bytes() for name in originals} == originals
+
+    @pytest.mark.parametrize("tamper", ["malformed", "activation_substitution"])
+    def test_bad_commit_intent_retains_evidence_without_mutation(
+        self, layout: Layout, tamper: str
+    ) -> None:
+        controller, originals, _receipt, digest = _takeover_fixture(
+            layout, active=False, enabled=False
+        )
+        window = legacy_takeover.takeover_window_path(layout)
+        document = json.loads(window.read_text())
+        document["phase"] = "commit_intent"
+        document["activation_id"] = "b" * 64
+        if tamper == "malformed":
+            document["state_digest"] = "not-a-digest"
+        else:
+            document["state_digest"] = "c" * 64
+            body = {key: value for key, value in document.items() if key != "intent_digest"}
+            document["intent_digest"] = hashlib.sha256(
+                json.dumps(body, sort_keys=True, separators=(",", ":")).encode()
+            ).hexdigest()
+        window.write_text(json.dumps(document, sort_keys=True, separators=(",", ":")) + "\n")
+        window.chmod(0o600)
+        mutation_verbs = {"stop", "disable", "enable", "restart", "daemon-reload"}
+        commands = [
+            command for command in controller.runner.commands if command[1] in mutation_verbs
+        ]
+
+        result = legacy_takeover.recover_takeover(layout, controller)
+
+        assert result == {"ok": False, "reason": "takeover_rollback_failed"}
+        assert window.is_file()
+        assert [
+            command for command in controller.runner.commands if command[1] in mutation_verbs
+        ] == commands
+        assert {name: (layout.unit_dir / name).read_bytes() for name in originals} == originals
+
+    @pytest.mark.parametrize("contradiction", ["current", "release", "enabled", "active"])
+    def test_committed_finalization_retains_marker_on_any_authority_contradiction(
+        self,
+        layout: Layout,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        contradiction: str,
+    ) -> None:
+        controller, _originals, receipt, _digest = _takeover_fixture(
+            layout, active=False, enabled=False
+        )
+        legacy_takeover.takeover_window_path(layout).unlink()
+        original_clear = legacy_takeover.clear_takeover_window
+        monkeypatch.setattr(
+            legacy_takeover,
+            "clear_takeover_window",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(KeyboardInterrupt()),
+        )
+        with pytest.raises(KeyboardInterrupt):
+            install(
+                payload=_payload(tmp_path, f"contradiction-{contradiction}", "v1"),
+                version="1.0.0",
+                layout=layout,
+                systemd=controller,
+                takeover_receipt=receipt,
+            )
+        monkeypatch.setattr(legacy_takeover, "clear_takeover_window", original_clear)
+        if contradiction == "current":
+            layout.current.unlink()
+        elif contradiction == "release":
+            release_file = layout.release("1.0.0") / "flyto_robotics/__init__.py"
+            release_file.chmod(0o644)
+            release_file.write_text("changed")
+        elif contradiction == "enabled":
+            controller.runner.enabled.discard(AGENT)
+        else:
+            controller.runner.active.discard(AGENT)
+        state = layout.state_file.read_bytes()
+        units = {
+            path.name: path.read_bytes() for path in layout.unit_dir.iterdir() if path.is_file()
+        }
+
+        result = legacy_takeover.recover_takeover(layout, controller)
+
+        assert result == {"ok": False, "reason": "takeover_rollback_failed"}
+        assert legacy_takeover.takeover_window_path(layout).is_file()
+        assert layout.state_file.read_bytes() == state
+        assert {
+            path.name: path.read_bytes() for path in layout.unit_dir.iterdir() if path.is_file()
+        } == units
+
+    def test_post_seal_failure_restores_the_exact_capsule(
+        self, layout: Layout, tmp_path: Path
+    ) -> None:
+        controller, originals, receipt, _digest = _takeover_fixture(
+            layout, active=True, enabled=True
+        )
+        legacy_takeover.takeover_window_path(layout).unlink()
+
+        report = install(
+            payload=_payload(tmp_path, "takeover-failure", "v1"),
+            version="1.0.0",
+            layout=layout,
+            systemd=controller,
+            health_check=lambda _current: False,
+            takeover_receipt=receipt,
+        )
+
+        assert report["ok"] is False
+        assert report["reason"] == "post_switch_health_failed"
+        assert report["recovery"]["takeover"] == {
+            "ok": True,
+            "reason": "takeover_recovered",
+        }
+        assert {name: (layout.unit_dir / name).read_bytes() for name in originals} == originals
+        assert not legacy_takeover.takeover_window_path(layout).exists()
+
+    def test_failed_capsule_recovery_preserves_the_marker_and_reports_no_capsule(
+        self, layout: Layout, tmp_path: Path, monkeypatch
+    ) -> None:
+        controller, originals, receipt, _digest = _takeover_fixture(
+            layout, active=True, enabled=True
+        )
+        legacy_takeover.takeover_window_path(layout).unlink()
+        monkeypatch.setattr(
+            legacy_takeover,
+            "recover_takeover",
+            lambda *_args, **_kwargs: {"ok": False, "reason": "takeover_rollback_failed"},
+        )
+
+        report = install(
+            payload=_payload(tmp_path, "takeover-recovery-failure", "v1"),
+            version="1.0.0",
+            layout=layout,
+            systemd=controller,
+            health_check=lambda _current: False,
+            takeover_receipt=receipt,
+        )
+
+        assert report["ok"] is False and report["reason"] == "rollback_failed"
+        assert legacy_takeover.takeover_window_path(layout).is_file()
+        encoded = json.dumps(report)
+        assert receipt["receipt_digest"] not in encoded
+        assert all(base64.b64encode(body).decode() not in encoded for body in originals.values())
+
+    @pytest.mark.parametrize("action", ["update", "dry_run"])
+    def test_takeover_receipt_is_refused_outside_a_landing_first_install(
+        self, layout: Layout, tmp_path: Path, action: str
+    ) -> None:
+        controller, originals, receipt, _digest = _takeover_fixture(
+            layout, active=False, enabled=False
+        )
+        legacy_takeover.takeover_window_path(layout).unlink()
+        operation = update if action == "update" else install
+        kwargs = {"dry_run": True} if action == "dry_run" else {}
+
+        with pytest.raises(LifecycleError) as raised:
+            operation(
+                payload=_payload(tmp_path, action, "v1"),
+                version="1.0.0",
+                layout=layout,
+                systemd=controller,
+                takeover_receipt=receipt,
+                **kwargs,
+            )
+
+        assert raised.value.reason == "takeover_not_permitted"
+        assert {name: (layout.unit_dir / name).read_bytes() for name in originals} == originals
+        assert not layout.release("1.0.0").exists()
+
+    @pytest.mark.parametrize("case", ["stale", "tampered", "no_collision"])
+    def test_invalid_public_receipt_has_zero_install_mutation(
+        self, layout: Layout, tmp_path: Path, case: str
+    ) -> None:
+        controller, originals, receipt, _digest = _takeover_fixture(
+            layout, active=False, enabled=False
+        )
+        legacy_takeover.takeover_window_path(layout).unlink()
+        if case == "stale":
+            first = next(iter(originals))
+            (layout.unit_dir / first).write_bytes(originals[first] + b"\n# stale\n")
+            baseline_units = {
+                name: (layout.unit_dir / name).read_bytes() for name in originals
+            }
+        elif case == "tampered":
+            receipt = {**receipt, "authority_digest": "f" * 64}
+            baseline_units = originals
+        else:
+            for name in originals:
+                (layout.unit_dir / name).unlink()
+            baseline_units = {}
+        mutation_verbs = {"stop", "disable", "enable", "restart", "daemon-reload"}
+        commands = [
+            command for command in controller.runner.commands if command[1] in mutation_verbs
+        ]
+
+        with pytest.raises(LifecycleError):
+            install(
+                payload=_payload(tmp_path, f"invalid-{case}", "v1"),
+                version="1.0.0",
+                layout=layout,
+                systemd=controller,
+                takeover_receipt=receipt,
+            )
+
+        assert not layout.release("1.0.0").exists()
+        assert not layout.current.exists() and not layout.state_file.exists()
+        assert [
+            command for command in controller.runner.commands if command[1] in mutation_verbs
+        ] == commands
+        assert {
+            name: (layout.unit_dir / name).read_bytes() for name in baseline_units
+        } == baseline_units
+
+    def test_committed_receipt_cannot_be_replayed_or_double_used(
+        self, layout: Layout, tmp_path: Path
+    ) -> None:
+        controller, _originals, receipt, _digest = _takeover_fixture(
+            layout, active=False, enabled=False
+        )
+        legacy_takeover.takeover_window_path(layout).unlink()
+        install(
+            payload=_payload(tmp_path, "once", "v1"),
+            version="1.0.0",
+            layout=layout,
+            systemd=controller,
+            takeover_receipt=receipt,
+        )
+        state = layout.state_file.read_bytes()
+        current = os.readlink(layout.current)
+        commands = list(controller.runner.commands)
+
+        with pytest.raises(LifecycleError) as raised:
+            install(
+                payload=_payload(tmp_path, "twice", "v2"),
+                version="2.0.0",
+                layout=layout,
+                systemd=controller,
+                takeover_receipt=receipt,
+            )
+
+        assert raised.value.reason == "takeover_not_first_install"
+        assert not layout.release("2.0.0").exists()
+        assert layout.state_file.read_bytes() == state
+        assert os.readlink(layout.current) == current
+        assert controller.runner.commands == commands
+
     def test_takeover_recovery_is_idempotent_after_response_loss(self, layout: Layout) -> None:
         controller, originals, _receipt, _digest = _takeover_fixture(
             layout, active=False, enabled=False
@@ -1587,6 +1923,41 @@ def _run(argv, capsys) -> tuple[int, dict]:
 
 
 class TestCli:
+    def test_takeover_cli_emits_one_bounded_secret_free_object_for_success_and_refusal(
+        self, tmp_path: Path, capsys
+    ) -> None:
+        layout = Layout(root=(tmp_path / "root").resolve())
+        controller, originals, receipt, _digest = _takeover_fixture(
+            layout, active=False, enabled=False
+        )
+        legacy_takeover.takeover_window_path(layout).unlink()
+        receipt_path = tmp_path / "receipt.json"
+        receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+        argv = [
+            "--root", str(layout.root), "install", "--payload",
+            str(_payload(tmp_path, "cli-takeover", "v1")), "--version", "1.0.0",
+            "--takeover-receipt", str(receipt_path),
+        ]
+
+        assert robot_cli.main(argv, systemd=controller) == 0
+        success_raw = capsys.readouterr().out
+        success, success_end = json.JSONDecoder().raw_decode(success_raw)
+        assert success["ok"] is True
+        assert not success_raw[success_end:].strip() and len(success_raw) < 65_536
+        assert "synthetic-secret" not in success_raw
+        assert receipt["receipt_digest"] not in success_raw
+        assert all(
+            base64.b64encode(body).decode() not in success_raw for body in originals.values()
+        )
+
+        assert robot_cli.main(argv, systemd=controller) == 1
+        refusal_raw = capsys.readouterr().out
+        refusal, refusal_end = json.JSONDecoder().raw_decode(refusal_raw)
+        assert refusal["reason"] == "takeover_not_first_install"
+        assert not refusal_raw[refusal_end:].strip() and len(refusal_raw) < 65_536
+        assert "synthetic-secret" not in refusal_raw
+        assert receipt["receipt_digest"] not in refusal_raw
+
     def test_install_status_and_rollback_round_trip_as_json_with_exit_codes(
         self, tmp_path: Path, capsys
     ) -> None:
