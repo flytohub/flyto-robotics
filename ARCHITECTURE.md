@@ -127,6 +127,35 @@ envelope; it is explicitly marked `task_completion_eligible=false`. Only the
 control plane can decide whether independent judge-card evidence completes the
 Task.
 
+## Cloud job handoff and execution receipt boundary
+
+```text
+Cloud Task scheduler
+  -> flyto.cloud.device-job-handoff.v1
+       exact device + trace + workflow hash + Cloud completion authority
+  -> paired-device job queue and lease
+  -> robot runner validates handoff before local gateway use
+  -> deterministic controller / ROS adapter
+  -> flyto.robotics.execution-receipt.v1
+       plan/result/event hashes + bounded terminal facts
+       task_completion_eligible=false
+  -> Cloud stores the receipt apart from mission evidence
+```
+
+A trace-bearing Space job has one formal dispatch handoff. The runner refuses a
+missing, malformed, retargeted, workflow-mismatched, or digest-mismatched
+handoff before opening the local execution gateway. Jobs outside the Space
+task route remain compatible when they carry no Space trace; adding a trace
+opts into the strict handoff contract.
+
+The delivery gateway emits one cached terminal receipt for a session. Its
+canonical digest covers the receipt, and separate hashes bind the exact plan,
+full mission result, and event list. The paired-device transport attributes the
+report; the hashes are integrity and reconciliation evidence, not a hardware
+root-of-trust signature. The runner independently recomputes the receipt and
+plan digests before returning it to Cloud. Pose and clearance observations stay
+in the existing evidence path; the receipt itself is never goal evidence.
+
 ## AI-native atomic composition
 
 The dependency direction is one-way:

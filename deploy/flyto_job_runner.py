@@ -31,9 +31,11 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import hmac
 import importlib.util
 import json
 import logging
+import math
 import os
 import re
 import signal
@@ -103,6 +105,34 @@ GATEWAY_POLL_SECONDS = 1.0
 # adapter's own tests speak it.
 TERMINAL_STATES = frozenset({"completed", "succeeded", "failed", "cancelled", "aborted"})
 SUCCESS_STATES = frozenset({"completed", "succeeded"})
+DELIVERY_SESSION_RECEIPT_CONTRACT = "flyto.robotics.delivery-session.v2"
+EXECUTION_RECEIPT_CONTRACT = "flyto.robotics.execution-receipt.v1"
+MAX_EXECUTION_RECEIPT_BYTES = 16384
+DEVICE_JOB_HANDOFF_CONTRACT = "flyto.cloud.device-job-handoff.v1"
+TASK_COMPLETION_AUTHORITY = "flyto.space.evidence.v1"
+MAX_DEVICE_JOB_HANDOFF_BYTES = 4096
+_SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_EXECUTION_RECEIPT_FIELDS = frozenset(
+    {
+        "contract_version",
+        "request_id",
+        "session_id",
+        "job_id",
+        "robot_id",
+        "workflow_id",
+        "status",
+        "plan_sha256",
+        "mission_result_sha256",
+        "events_sha256",
+        "event_count",
+        "safety_stop_count",
+        "final_pose",
+        "minimum_range",
+        "elapsed_seconds",
+        "task_completion_eligible",
+        "receipt_sha256",
+    }
+)
 
 # The header the device API reads a claim's lease from — api/devices/
 # routes_jobs.py's LEASE_HEADER. This runner sent "X-Flyto-Lease", which that
@@ -120,6 +150,14 @@ class RunnerError(RuntimeError):
 
 class AuthoredPlanRefused(RuntimeError):
     """A recognised Canvas robot step failed closed before execution."""
+
+    def __init__(self, reason_code: str) -> None:
+        super().__init__(reason_code)
+        self.reason_code = reason_code
+
+
+class DeviceHandoffRefused(RuntimeError):
+    """Cloud's versioned ownership transfer did not bind this exact job."""
 
     def __init__(self, reason_code: str) -> None:
         super().__init__(reason_code)
@@ -215,6 +253,8 @@ EVENT_MESSAGES = {
     "job_execution_started": "This device began carrying out an assigned job.",
     "job_lease_missing": "The job was claimed without a lease, so nothing was started.",
     "job_plan_unsupported": "The job carries no plan this device can carry out.",
+    "device_handoff_invalid": "The Cloud-to-device job handoff did not pass validation.",
+    "device_handoff_target_mismatch": "The Cloud-to-device job handoff names another device.",
     "capability_catalog_unavailable": "The trusted robot capability catalog is unavailable.",
     "capability_catalog_refused": "The trusted robot capability catalog request was refused.",
     "capability_catalog_invalid": "The robot capability catalog did not pass validation.",
@@ -223,6 +263,8 @@ EVENT_MESSAGES = {
     "job_completed": "The job finished and its outcome was observed.",
     "mission_failed": "The job did not finish successfully.",
     "mission_outcome_unknown": "The job's outcome was not observed within its own time bound.",
+    "execution_receipt_missing": "The execution gateway returned no required terminal receipt.",
+    "execution_receipt_invalid": "The execution gateway returned an invalid terminal receipt.",
     "gateway_unreachable": "The local execution gateway could not be used.",
     "gateway_returned_no_session": "The local execution gateway accepted nothing to watch.",
     "completion_report_refused": "The outcome was recorded here but the report was refused.",
@@ -248,6 +290,8 @@ EVENT_ACTIONS = {
     "job_execution_started": (),
     "job_lease_missing": ("retry_job_claim", "inspect_job_lease"),
     "job_plan_unsupported": ("inspect_job_steps",),
+    "device_handoff_invalid": ("inspect_job_handoff", "inspect_cloud_dispatch"),
+    "device_handoff_target_mismatch": ("inspect_job_assignment", "inspect_device_identity"),
     "capability_catalog_unavailable": ("inspect_gateway_service", "retry_job"),
     "capability_catalog_refused": ("inspect_gateway_authorization", "retry_job"),
     "capability_catalog_invalid": ("inspect_gateway_catalog", "inspect_module_version"),
@@ -256,6 +300,8 @@ EVENT_ACTIONS = {
     "job_completed": (),
     "mission_failed": ("inspect_mission_outcome",),
     "mission_outcome_unknown": ("inspect_gateway_session", "inspect_mission_outcome"),
+    "execution_receipt_missing": ("inspect_gateway_session", "inspect_gateway_version"),
+    "execution_receipt_invalid": ("inspect_gateway_session", "inspect_gateway_version"),
     "gateway_unreachable": ("inspect_gateway_service", "retry_job"),
     "gateway_returned_no_session": ("inspect_gateway_service",),
     "completion_report_refused": ("retry_completion_report", "inspect_job_lease"),
@@ -433,6 +479,7 @@ def _append_event(
     job_id: str = "",
     details: dict[str, Any] | None = None,
     action_codes: Sequence[str] | None = None,
+    correlation_id: str = "",
 ) -> dict[str, Any]:
     """Record one bounded, public observation. Raises if it cannot be recorded.
 
@@ -453,7 +500,9 @@ def _append_event(
         action_codes=list(
             action_codes if action_codes is not None else EVENT_ACTIONS.get(reason_code, ())
         ),
-        correlation_id="",
+        correlation_id=(
+            _event_identifier(correlation_id, "trace") if correlation_id else ""
+        ),
         # The job this belongs to. Empty would mean "no run at all", which for a
         # job runner is never true and would break every upstream join.
         run_id=_event_identifier(job_id, "job") if job_id else "",
@@ -976,12 +1025,13 @@ def _run_plan(plan: dict[str, Any], job_id: str) -> dict[str, Any]:
         raise RunnerError("FLYTO_ROBOTICS_DELIVERY_TOKEN is not set")
     gateway_headers = {"Authorization": f"Bearer {token}"}
 
+    request_id = f"job-{job_id}"[:128]
     session = _post(
         GATEWAY_URL,
         "/v1/plans",
         {
             "contract_version": "flyto.cloud.plan-run-request.v1",
-            "request_id": f"job-{job_id}"[:128],
+            "request_id": request_id,
             "plan": plan,
             "requested_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         },
@@ -1005,6 +1055,18 @@ def _run_plan(plan: dict[str, Any], job_id: str) -> dict[str, Any]:
         state = str(latest.get("status") or latest.get("state") or "").lower()
         if state in TERMINAL_STATES:
             succeeded = state in SUCCESS_STATES
+            receipt, receipt_error = _execution_receipt(
+                latest,
+                request_id=request_id,
+                plan=plan,
+                succeeded=succeeded,
+            )
+            if receipt_error:
+                return {
+                    "status": "failed",
+                    "detail": receipt_error,
+                    "reason_code": receipt_error,
+                }
             return {
                 "status": "succeeded" if succeeded else "failed",
                 # The event carries a fixed reason code; this free text goes
@@ -1020,6 +1082,7 @@ def _run_plan(plan: dict[str, Any], job_id: str) -> dict[str, Any]:
                 # answers "is that passage actually walkable", which a camera
                 # frame cannot.
                 "minimum_range": latest.get("minimum_range"),
+                "execution_receipt": receipt,
             }
         time.sleep(GATEWAY_POLL_SECONDS)
         latest = _call(
@@ -1035,12 +1098,180 @@ def _run_plan(plan: dict[str, Any], job_id: str) -> dict[str, Any]:
     }
 
 
+def _execution_receipt(
+    session: Mapping[str, Any],
+    *,
+    request_id: str,
+    plan: Mapping[str, Any],
+    succeeded: bool,
+) -> tuple[dict[str, Any] | None, str]:
+    """Validate and detach a terminal gateway receipt before it reaches Cloud."""
+    raw = session.get("execution_receipt")
+    receipt_required = session.get("contract_version") == (
+        DELIVERY_SESSION_RECEIPT_CONTRACT
+    )
+    if raw is None:
+        return (None, "execution_receipt_missing") if receipt_required else (None, "")
+    if not isinstance(raw, Mapping) or set(raw) != _EXECUTION_RECEIPT_FIELDS:
+        return None, "execution_receipt_invalid"
+    receipt = dict(raw)
+    try:
+        encoded = json.dumps(
+            receipt,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    except (TypeError, ValueError):
+        return None, "execution_receipt_invalid"
+    if len(encoded) > MAX_EXECUTION_RECEIPT_BYTES:
+        return None, "execution_receipt_invalid"
+    receipt = json.loads(encoded)
+    if receipt.get("contract_version") != EXECUTION_RECEIPT_CONTRACT:
+        return None, "execution_receipt_invalid"
+    for field in ("request_id", "session_id", "job_id", "robot_id", "workflow_id"):
+        value = receipt.get(field)
+        if not isinstance(value, str) or not _EVENT_IDENTIFIER.fullmatch(value):
+            return None, "execution_receipt_invalid"
+    if receipt["request_id"] != request_id:
+        return None, "execution_receipt_invalid"
+    if receipt.get("status") not in {"succeeded", "failed", "cancelled", "aborted"}:
+        return None, "execution_receipt_invalid"
+    if (receipt["status"] == "succeeded") is not succeeded:
+        return None, "execution_receipt_invalid"
+    expected_plan = _canonical_sha256(plan)
+    if receipt.get("plan_sha256") != expected_plan:
+        return None, "execution_receipt_invalid"
+    for field in (
+        "mission_result_sha256",
+        "events_sha256",
+        "receipt_sha256",
+    ):
+        if not isinstance(receipt.get(field), str) or not _SHA256.fullmatch(receipt[field]):
+            return None, "execution_receipt_invalid"
+    for field in ("event_count", "safety_stop_count"):
+        value = receipt.get(field)
+        if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 100000:
+            return None, "execution_receipt_invalid"
+    if not _bounded_number(receipt.get("elapsed_seconds"), minimum=0.0, maximum=86400.0):
+        return None, "execution_receipt_invalid"
+    minimum_range = receipt.get("minimum_range")
+    if minimum_range is not None and not _bounded_number(
+        minimum_range, minimum=0.0, maximum=1000000.0
+    ):
+        return None, "execution_receipt_invalid"
+    pose = receipt.get("final_pose")
+    if pose is not None:
+        if not isinstance(pose, Mapping) or set(pose) != {"x", "y", "yaw"}:
+            return None, "execution_receipt_invalid"
+        if not all(
+            _bounded_number(pose.get(axis), minimum=-1000000.0, maximum=1000000.0)
+            for axis in ("x", "y", "yaw")
+        ):
+            return None, "execution_receipt_invalid"
+    if receipt.get("task_completion_eligible") is not False:
+        return None, "execution_receipt_invalid"
+    asserted_digest = receipt.pop("receipt_sha256")
+    if not hmac.compare_digest(asserted_digest, _canonical_sha256(receipt)):
+        return None, "execution_receipt_invalid"
+    receipt["receipt_sha256"] = asserted_digest
+    return receipt, ""
+
+
+def _bounded_number(value: Any, *, minimum: float, maximum: float) -> bool:
+    return (
+        not isinstance(value, bool)
+        and isinstance(value, (int, float))
+        and math.isfinite(float(value))
+        and minimum <= float(value) <= maximum
+    )
+
+
+def _canonical_sha256(value: object) -> str:
+    raw = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
+
+
 def _watch_seconds(session: dict[str, Any]) -> float:
     """How long this mission may run, according to the mission itself."""
     bound = session.get("mission_timeout_seconds")
     if isinstance(bound, (int, float)) and bound > 0:
         return float(bound) + MISSION_WATCH_MARGIN_SECONDS
     return DEFAULT_MISSION_WATCH_SECONDS
+
+
+def _device_job_handoff(
+    job: Mapping[str, Any],
+    credentials: Mapping[str, str],
+) -> str:
+    """Validate the v1 handoff required by every trace-bearing Space job."""
+    params = job.get("input_params")
+    if not isinstance(params, Mapping):
+        return ""
+    if "_flyto_device_handoff" not in params:
+        if "_flyto_trace_id" in params:
+            raise DeviceHandoffRefused("device_handoff_invalid")
+        return ""
+    raw = params.get("_flyto_device_handoff")
+    fields = {
+        "contract_version",
+        "device_id",
+        "trace_id",
+        "workflow_sha256",
+        "task_completion_authority",
+        "handoff_sha256",
+    }
+    if not isinstance(raw, Mapping) or set(raw) != fields:
+        raise DeviceHandoffRefused("device_handoff_invalid")
+    handoff = dict(raw)
+    try:
+        encoded = json.dumps(
+            handoff,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    except (TypeError, ValueError):
+        raise DeviceHandoffRefused("device_handoff_invalid") from None
+    if len(encoded) > MAX_DEVICE_JOB_HANDOFF_BYTES:
+        raise DeviceHandoffRefused("device_handoff_invalid")
+    if handoff.get("contract_version") != DEVICE_JOB_HANDOFF_CONTRACT:
+        raise DeviceHandoffRefused("device_handoff_invalid")
+    device_id = handoff.get("device_id")
+    trace_id = handoff.get("trace_id")
+    if (
+        not isinstance(device_id, str)
+        or not _EVENT_IDENTIFIER.fullmatch(device_id)
+        or not isinstance(trace_id, str)
+        or not _EVENT_IDENTIFIER.fullmatch(trace_id)
+    ):
+        raise DeviceHandoffRefused("device_handoff_invalid")
+    if params.get("_flyto_trace_id") != trace_id:
+        raise DeviceHandoffRefused("device_handoff_invalid")
+    assigned = str(job.get("device_id") or "")
+    paired = str(credentials.get("device_id") or "")
+    if device_id != assigned or device_id != paired:
+        raise DeviceHandoffRefused("device_handoff_target_mismatch")
+    if handoff.get("workflow_sha256") != _canonical_sha256(job.get("steps")):
+        raise DeviceHandoffRefused("device_handoff_invalid")
+    if handoff.get("task_completion_authority") != TASK_COMPLETION_AUTHORITY:
+        raise DeviceHandoffRefused("device_handoff_invalid")
+    asserted = handoff.pop("handoff_sha256", None)
+    if (
+        not isinstance(asserted, str)
+        or not _SHA256.fullmatch(asserted)
+        or not hmac.compare_digest(asserted, _canonical_sha256(handoff))
+    ):
+        raise DeviceHandoffRefused("device_handoff_invalid")
+    return trace_id
 
 
 def _handle(job: dict[str, Any], credentials: dict[str, str]) -> None:
@@ -1069,6 +1300,24 @@ def _handle(job: dict[str, Any], credentials: dict[str, str]) -> None:
         )
         return
     headers = {**headers, LEASE_HEADER: lease}
+
+    try:
+        trace_id = _device_job_handoff(job, credentials)
+    except DeviceHandoffRefused as exc:
+        _append_event(
+            credentials,
+            status="refused",
+            severity="warning",
+            reason_code=exc.reason_code,
+            job_id=job_id,
+        )
+        _report_completion(
+            credentials,
+            job_id=job_id,
+            headers=headers,
+            body=_completion(status="failed", detail=exc.reason_code),
+        )
+        return
 
     try:
         plan = _plan_from(job)
@@ -1238,6 +1487,7 @@ def _handle(job: dict[str, Any], credentials: dict[str, str]) -> None:
         severity="info",
         reason_code="job_execution_started",
         job_id=job_id,
+        correlation_id=trace_id,
     )
 
     logger.info("job %s -> plan %s", job_id, plan.get("plan_id"))
@@ -1260,6 +1510,7 @@ def _handle(job: dict[str, Any], credentials: dict[str, str]) -> None:
         detail=outcome.get("detail"),
         pose=outcome.get("pose"),
         minimum_range=outcome.get("minimum_range"),
+        execution_receipt=outcome.get("execution_receipt"),
     )
     succeeded = outcome["status"] == "succeeded"
     _append_event(
@@ -1270,6 +1521,7 @@ def _handle(job: dict[str, Any], credentials: dict[str, str]) -> None:
             outcome.get("reason_code") or ("job_completed" if succeeded else "mission_failed")
         ),
         job_id=job_id,
+        correlation_id=trace_id,
         # Counts and a closed-vocabulary status. Never the pose, the plan, the
         # gateway's own text or the address it lives at.
         details={
@@ -1405,6 +1657,7 @@ def _completion(
     detail: Any = None,
     pose: Any = None,
     minimum_range: Any = None,
+    execution_receipt: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """The body /api/devices/jobs/{id}/complete actually accepts.
 
@@ -1451,6 +1704,10 @@ def _completion(
         )
     if evidence:
         variables["evidence"] = evidence
+    if execution_receipt is not None:
+        # Separate from goal evidence by design. This receipt proves what the
+        # actuator runtime observed; it may never make a Space task complete.
+        variables["execution_receipt"] = dict(execution_receipt)
     if variables:
         body["variables"] = variables
     return body

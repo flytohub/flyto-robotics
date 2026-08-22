@@ -1,5 +1,27 @@
 # Decisions
 
+## 2026-08-22 — Cloud dispatch and robot execution use two separate proofs
+
+Decision: every trace-bearing Space job must carry
+`flyto.cloud.device-job-handoff.v1`, binding the exact paired device, trace,
+workflow digest, and Cloud-owned completion authority before the runner reaches
+the local gateway. A terminal delivery session emits one cached
+`flyto.robotics.execution-receipt.v1`; the runner validates its closed shape,
+plan binding, bounded terminal facts, and canonical digest before returning it.
+
+Reason: a queue lease says who may claim a job, but it did not prove that the
+workflow and device seen at the edge were the assignment Cloud scheduled. In
+the other direction, pose and clearance were useful evidence but there was no
+single content-addressed record of which plan and terminal controller result
+produced them. Separate handoff and receipt contracts close those two joins
+without importing Cloud source or moving mission authority onto the robot.
+
+Boundary: SHA-256 detects content drift and the paired-device channel
+attributes transport; it is not a TPM-backed hardware attestation. The receipt
+is always `task_completion_eligible=false`. Only Cloud's independent evidence
+rules may complete a Task, and the deterministic controller and safe-stop
+policy remain the only motion authority.
+
 ## 2026-08-13 — Plan delivery and capability discovery share one authority
 
 Decision: the authenticated loopback delivery gateway that accepts

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import time
 import urllib.error
@@ -19,6 +20,17 @@ from flyto_robotics.semantic_map import SemanticLocationStore
 TOKEN = "test-only-delivery-gateway-token-with-32-bytes"
 QR_SECRET = "test-only-delivery-qr-secret-with-32-bytes"
 JOB_PATH = Path(__file__).resolve().parents[1] / "examples" / "jobs" / "pharmacy-to-ward.json"
+
+
+def digest(value: object) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
 
 
 def request_json(
@@ -245,6 +257,20 @@ def test_delivery_completes_after_valid_qr_confirmation() -> None:
         body = wait_for_status(url, session_id, {"completed"})
         kinds = {event["kind"] for event in body["events"]}
         assert "human_approved" in kinds
+        receipt = body["execution_receipt"]
+        assert receipt["contract_version"] == "flyto.robotics.execution-receipt.v1"
+        assert receipt["task_completion_eligible"] is False
+        assert receipt["status"] == "succeeded"
+        assert len(receipt["plan_sha256"]) == 64
+        assert receipt["event_count"] >= len(body["events"])
+        assert receipt["safety_stop_count"] >= 0
+        asserted_digest = receipt.pop("receipt_sha256")
+        assert asserted_digest == digest(receipt)
+
+        # A receipt is minted once at terminal state. Re-reading the session
+        # must not manufacture a second completion identity.
+        _, reread = request_json(f"{url}/v1/deliveries/{session_id}")
+        assert reread["execution_receipt"]["receipt_sha256"] == asserted_digest
 
 
 def test_early_scan_does_not_burn_the_nonce() -> None:
