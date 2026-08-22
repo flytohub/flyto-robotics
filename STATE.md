@@ -2,6 +2,19 @@
 
 ## Current
 
+- The physical Cloud-to-robot loop now has one versioned, fail-closed contract
+  in each direction. A trace-bearing Space job must carry
+  `flyto.cloud.device-job-handoff.v1`, bound to the paired device, exact trace,
+  exact workflow SHA-256, and Cloud's `flyto.space.evidence.v1` completion
+  authority. The runner validates it before local gateway use. Terminal
+  delivery sessions emit a cached `flyto.robotics.execution-receipt.v1` with
+  plan/result/event hashes and `task_completion_eligible=false`; the runner
+  recomputes those bounds and digests before forwarding it. This is contract
+  and simulated-runtime evidence only in this change; no physical robot moved.
+  Final `make verify` is green: Ruff passed, 1467 tests passed with 1 skipped,
+  and every asset, dry-run, lab, facility, pairing, and execution-grant gate
+  completed. Strict Indexer verification passes 18/18.
+
 - The delivery gateway now serves authenticated, read-only
   `GET /v1/capabilities` next to `POST /v1/plans`. It returns the existing
   deterministic `flyto.robotics.capability-catalog.v1` registry projection

@@ -4,6 +4,14 @@ All notable project changes are recorded here.
 
 ## Unreleased
 
+- Added the versioned Cloud job / robot receipt join. Trace-bearing Space jobs
+  now fail before gateway use unless `flyto.cloud.device-job-handoff.v1` binds
+  the paired device, trace, exact workflow digest, and Cloud completion
+  authority. Terminal delivery sessions return one cached,
+  content-addressed `flyto.robotics.execution-receipt.v1`; the edge runner
+  independently verifies its plan and receipt digests and forwards it apart
+  from pose/clearance evidence. The receipt explicitly cannot complete a Task.
+
 - Added `flyto_robotics/bringup_watchdog.py`: an `/odom`-freshness watchdog
   bundled into `turtlebot3_bringup_supervised.launch.py` and wired to
   systemd's own watchdog protocol (`Type=notify`, `NotifyAccess=all`,

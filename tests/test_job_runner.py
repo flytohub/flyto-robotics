@@ -9,6 +9,7 @@ bodies — instead of a description of them.
 from __future__ import annotations
 
 import builtins
+import hashlib
 import importlib.util
 import json
 import os
@@ -118,11 +119,33 @@ def gateway():
     def session(path, body):
         # Exactly what DeliveryGateway._session_payload emits: "status" (a
         # MissionState value), "pose", and the lidar's own "minimum_range".
+        dispatched = state["plans"][-1]
+        receipt = {
+            "contract_version": "flyto.robotics.execution-receipt.v1",
+            "request_id": dispatched["request_id"],
+            "session_id": "pln-test",
+            "job_id": "robot-job-test",
+            "robot_id": dispatched["plan"]["robot_id"],
+            "workflow_id": "robot-workflow-test",
+            "status": "succeeded",
+            "plan_sha256": _digest(dispatched["plan"]),
+            "mission_result_sha256": "a" * 64,
+            "events_sha256": "b" * 64,
+            "event_count": 4,
+            "safety_stop_count": 1,
+            "final_pose": {"x": 0.37, "y": 0.0, "yaw": 1.55},
+            "minimum_range": 1.42,
+            "elapsed_seconds": 3.5,
+            "task_completion_eligible": False,
+        }
+        receipt["receipt_sha256"] = _digest(receipt)
         return 200, {
+            "contract_version": "flyto.robotics.delivery-session.v2",
             "session_id": "pln-test",
             "status": "completed",
             "pose": {"x": 0.37, "y": 0.0, "yaw": 1.55},
             "minimum_range": 1.42,
+            "execution_receipt": receipt,
         }
 
     fake = Fake({"/v1/plans": start, "/v1/deliveries/": session})
@@ -138,6 +161,39 @@ PLAN = {
     "goal": "move forward",
     "steps": [{"step_id": "s", "capability": "move_relative", "arguments": {"distance_m": 0.4}}],
 }
+
+
+def _digest(value: object) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _cloud_job(job_id: str, steps: list[dict], *, device_id: str = "dev-1") -> dict:
+    steps = json.loads(json.dumps(steps))
+    trace_id = f"trace-{job_id}"
+    handoff = {
+        "contract_version": "flyto.cloud.device-job-handoff.v1",
+        "device_id": device_id,
+        "trace_id": trace_id,
+        "workflow_sha256": _digest(steps),
+        "task_completion_authority": "flyto.space.evidence.v1",
+    }
+    handoff["handoff_sha256"] = _digest(handoff)
+    return {
+        "job_id": job_id,
+        "device_id": device_id,
+        "steps": steps,
+        "input_params": {
+            "_flyto_trace_id": trace_id,
+            "_flyto_device_handoff": handoff,
+        },
+    }
 
 
 # -- pairing -------------------------------------------------------------
@@ -835,7 +891,7 @@ def test_a_robot_job_is_claimed_run_and_reported_succeeded(monkeypatch, tmp_path
     try:
         runner = load_runner(monkeypatch, tmp_path, cloud=cloud.url, gateway=gateway.url)
         runner._handle(
-            {"job_id": "j1", "steps": [{"params": {"plan": PLAN}}]},
+            _cloud_job("j1", [{"params": {"plan": PLAN}}]),
             {"device_id": "dev-1", "device_secret": "s-1"},
         )
 
@@ -856,6 +912,112 @@ def test_a_robot_job_is_claimed_run_and_reported_succeeded(monkeypatch, tmp_path
         assert "0.37" in kinds["arrival.pose"]["detail"]
         # The passage-inspection half: a measurement, not a picture.
         assert "1.42" in kinds["clearance.measurement"]["detail"]
+        receipt = done["variables"]["execution_receipt"]
+        assert receipt["contract_version"] == "flyto.robotics.execution-receipt.v1"
+        assert receipt["task_completion_eligible"] is False
+        assert receipt["plan_sha256"] == _digest(PLAN)
+    finally:
+        cloud.close()
+
+
+def test_tampered_cloud_device_handoff_is_refused_before_gateway(
+    monkeypatch, tmp_path, gateway
+):
+    completions: list[dict] = []
+    cloud = make_cloud(completions)
+    try:
+        runner = load_runner(monkeypatch, tmp_path, cloud=cloud.url, gateway=gateway.url)
+        dispatched = _cloud_job("j-handoff", [{"params": {"plan": PLAN}}])
+        dispatched["steps"][0]["params"]["plan"]["goal"] = "tampered after dispatch"
+        runner._handle(
+            dispatched,
+            {"device_id": "dev-1", "device_secret": "s-1"},
+        )
+
+        assert gateway.state["plans"] == []
+        assert completions[-1]["status"] == "failed"
+        assert completions[-1]["error_message"] == "device_handoff_invalid"
+        assert "evidence" not in completions[-1].get("variables", {})
+    finally:
+        cloud.close()
+
+
+def test_trace_bearing_cloud_job_without_handoff_is_refused_before_gateway(
+    monkeypatch, tmp_path, gateway
+):
+    completions: list[dict] = []
+    cloud = make_cloud(completions)
+    try:
+        runner = load_runner(monkeypatch, tmp_path, cloud=cloud.url, gateway=gateway.url)
+        runner._handle(
+            {
+                "job_id": "j-no-handoff",
+                "device_id": "dev-1",
+                "steps": [{"params": {"plan": PLAN}}],
+                "input_params": {"_flyto_trace_id": "trace-j-no-handoff"},
+            },
+            {"device_id": "dev-1", "device_secret": "s-1"},
+        )
+
+        assert gateway.state["plans"] == []
+        assert completions[-1]["status"] == "failed"
+        assert completions[-1]["error_message"] == "device_handoff_invalid"
+        assert "evidence" not in completions[-1].get("variables", {})
+    finally:
+        cloud.close()
+
+
+def test_a_v2_gateway_without_a_terminal_receipt_fails_closed(monkeypatch, tmp_path):
+    completions: list[dict] = []
+    cloud = make_cloud(completions)
+    missing = Fake(
+        {
+            "/v1/plans": lambda _p, _b: (
+                200,
+                {
+                    "contract_version": "flyto.robotics.delivery-session.v2",
+                    "session_id": "pln-no-receipt",
+                    "status": "completed",
+                },
+            )
+        }
+    )
+    try:
+        runner = load_runner(monkeypatch, tmp_path, cloud=cloud.url, gateway=missing.url)
+        runner._handle(
+            {"job_id": "j-no-receipt", "steps": [{"params": {"plan": PLAN}}]},
+            {"device_id": "dev-1", "device_secret": "s-1"},
+        )
+        done = completions[-1]
+        assert done["status"] == "failed"
+        assert done["error_message"] == "execution_receipt_missing"
+        assert "evidence" not in done.get("variables", {})
+    finally:
+        cloud.close()
+        missing.close()
+
+
+def test_a_tampered_terminal_receipt_fails_closed(monkeypatch, tmp_path, gateway):
+    completions: list[dict] = []
+    cloud = make_cloud(completions)
+    original = gateway.routes["/v1/deliveries/"]
+
+    def tampered(path, body):
+        status, payload = original(path, body)
+        payload["execution_receipt"]["event_count"] += 1
+        return status, payload
+
+    gateway.routes["/v1/deliveries/"] = tampered
+    try:
+        runner = load_runner(monkeypatch, tmp_path, cloud=cloud.url, gateway=gateway.url)
+        runner._handle(
+            {"job_id": "j-tampered", "steps": [{"params": {"plan": PLAN}}]},
+            {"device_id": "dev-1", "device_secret": "s-1"},
+        )
+        done = completions[-1]
+        assert done["status"] == "failed"
+        assert done["error_message"] == "execution_receipt_invalid"
+        assert "evidence" not in done.get("variables", {})
     finally:
         cloud.close()
 

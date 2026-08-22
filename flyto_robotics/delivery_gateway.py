@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import hmac
 import ipaddress
 import json
@@ -39,7 +40,8 @@ from .workflow import (
 
 DELIVERY_REQUEST_CONTRACT_VERSION = "flyto.cloud.delivery-request.v1"
 QR_SCAN_CONTRACT_VERSION = "flyto.cloud.delivery-qr-scan.v1"
-DELIVERY_SESSION_CONTRACT_VERSION = "flyto.robotics.delivery-session.v1"
+DELIVERY_SESSION_CONTRACT_VERSION = "flyto.robotics.delivery-session.v2"
+EXECUTION_RECEIPT_CONTRACT_VERSION = "flyto.robotics.execution-receipt.v1"
 DELIVERY_SERVICE_NAME = "flyto-robotics-delivery"
 
 SAFE_IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
@@ -243,6 +245,7 @@ class DeliverySession:
         controller: MissionController,
         approval_id: str,
         decision: GoalDecision | None = None,
+        plan_sha256: str = "",
     ) -> None:
         self.session_id = session_id
         self.request_id = request["request_id"]
@@ -252,6 +255,8 @@ class DeliverySession:
         self.controller = controller
         self.approval_id = approval_id
         self.decision = decision
+        self.plan_sha256 = plan_sha256
+        self.execution_receipt: dict[str, Any] | None = None
         self.pose = Pose2D(0.0, 0.0, 0.0)
         self.sim_now = 0.0
         self.confirmation: dict[str, Any] | None = None
@@ -649,6 +654,7 @@ class DeliveryGateway:
                 controller=controller,
                 approval_id=self._approval_id,
                 decision=goal_decision,
+                plan_sha256=_content_sha256(_workflow_receipt_plan(workflow)),
             )
             self._sessions[session_id] = session
             while len(self._sessions) > MAX_RETAINED_SESSIONS:
@@ -723,6 +729,7 @@ class DeliveryGateway:
                 },
                 controller=controller,
                 approval_id=self._approval_id,
+                plan_sha256=_content_sha256(request["plan"]),
             )
             self._sessions[session_id] = session
             while len(self._sessions) > MAX_RETAINED_SESSIONS:
@@ -857,4 +864,79 @@ class DeliveryGateway:
                 payload["rejection"] = decision.rejection
             if decision.route_graph is not None:
                 payload["route_graph"] = decision.route_graph
+        if controller.terminal:
+            if session.execution_receipt is None:
+                mission_result = controller.result(
+                    generated_at=time.strftime(
+                        "%Y-%m-%dT%H:%M:%SZ", time.gmtime()
+                    ),
+                    now=session.sim_now,
+                    pose=session.pose,
+                )
+                receipt: dict[str, Any] = {
+                    "contract_version": EXECUTION_RECEIPT_CONTRACT_VERSION,
+                    "request_id": session.request_id,
+                    "session_id": session.session_id,
+                    "job_id": controller.job.job_id,
+                    "robot_id": controller.job.robot_id,
+                    "workflow_id": controller.workflow.workflow_id,
+                    "status": str(mission_result["status"]),
+                    "plan_sha256": session.plan_sha256,
+                    "mission_result_sha256": _content_sha256(mission_result),
+                    "events_sha256": _content_sha256(mission_result["events"]),
+                    "event_count": len(mission_result["events"]),
+                    "safety_stop_count": int(mission_result["safety_stop_count"]),
+                    "final_pose": mission_result["final_pose"],
+                    "minimum_range": payload["minimum_range"],
+                    "elapsed_seconds": mission_result["elapsed_seconds"],
+                    # This proves what the actuator runtime observed. Cloud's
+                    # mission evidence rules remain the only completion judge.
+                    "task_completion_eligible": False,
+                }
+                receipt["receipt_sha256"] = _content_sha256(receipt)
+                session.execution_receipt = receipt
+            payload["execution_receipt"] = dict(session.execution_receipt)
         return payload
+
+
+def _content_sha256(value: object) -> str:
+    """Hash one detached canonical JSON value for cross-process receipts."""
+    raw = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
+
+
+def _workflow_receipt_plan(workflow: WorkflowPlan) -> dict[str, Any]:
+    """Project a generated workflow into stable JSON for receipt binding."""
+    return {
+        "workflow_id": workflow.workflow_id,
+        "goal": workflow.goal,
+        "source_kind": workflow.source_kind,
+        "steps": [
+            {
+                "step_id": step.step_id,
+                "kind": step.kind.value,
+                "active_state": step.active_state.value,
+                "station": (
+                    {
+                        "station_id": step.station.station_id,
+                        "x": step.station.x,
+                        "y": step.station.y,
+                        "yaw": step.station.yaw,
+                    }
+                    if step.station is not None
+                    else None
+                ),
+                "dwell_seconds": step.dwell_seconds,
+                "arguments": [list(argument) for argument in step.arguments],
+                "timeout_seconds": step.timeout_seconds,
+                "on_failure": step.on_failure,
+            }
+            for step in workflow.steps
+        ],
+    }
