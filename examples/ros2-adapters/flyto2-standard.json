@@ -20,9 +20,14 @@
         "type": "nav2_msgs/action/NavigateToPose"
       },
       "managed_nodes": [
+        "/behavior_server",
         "/bt_navigator",
         "/controller_server",
-        "/planner_server"
+        "/map_server",
+        "/planner_server",
+        "/smoother_server",
+        "/velocity_smoother",
+        "/waypoint_follower"
       ],
       "required_observations": ["minimum_range", "odometry"],
       "timeout_seconds": 300.0,
@@ -33,5 +38,5 @@
       "goal_policy": "semantic_only"
     }
   ],
-  "snapshot": "517dd9426508784c53d07d51dbb6b5e79f7c11578aa49b499a14a60e8a8184b0"
+  "snapshot": "9da500f099541b4129fa089b5e83b5c643023aafaa04c6f164f4251902575630"
 }
