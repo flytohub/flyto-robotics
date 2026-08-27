@@ -2,7 +2,9 @@
 <sdf version="1.9">
   <world name="flyto_nav2_closed_loop">
     <physics name="default_physics" type="dart">
-      <max_step_size>0.002</max_step_size>
+      <!-- 100 Hz remains above the 20 Hz controller and 10 Hz LiDAR while
+           reducing scheduler starvation in the bounded simulation. -->
+      <max_step_size>0.01</max_step_size>
       <real_time_factor>1.0</real_time_factor>
     </physics>
     <gravity>0 0 -9.80665</gravity>

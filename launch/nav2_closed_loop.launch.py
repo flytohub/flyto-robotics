@@ -3,19 +3,24 @@
 from __future__ import annotations
 
 import os
+import signal
 from pathlib import Path
 
 from ament_index_python.packages import get_package_share_directory
 from launch.actions import (
     DeclareLaunchArgument,
+    EmitEvent,
     IncludeLaunchDescription,
     OpaqueFunction,
     RegisterEventHandler,
     SetEnvironmentVariable,
+    SetLaunchConfiguration,
     Shutdown,
     TimerAction,
 )
 from launch.event_handlers import OnProcessExit
+from launch.events import matches_action
+from launch.events.process import SignalProcess
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
@@ -176,26 +181,27 @@ def _launch_runtime(context: object) -> list[object]:
             remappings=tf_remappings,
             output="screen",
         ),
-        Node(
-            package="nav2_lifecycle_manager",
-            executable="lifecycle_manager",
-            name="lifecycle_manager_navigation",
-            parameters=[
-                {
-                    "use_sim_time": True,
-                    "autostart": True,
-                    "node_names": [
-                        "controller_server",
-                        "smoother_server",
-                        "planner_server",
-                        "behavior_server",
-                        "bt_navigator",
-                    ],
-                }
-            ],
-            output="screen",
-        ),
     ]
+    navigation_manager = Node(
+        package="nav2_lifecycle_manager",
+        executable="lifecycle_manager",
+        name="lifecycle_manager_navigation",
+        parameters=[
+            {
+                "use_sim_time": True,
+                "autostart": True,
+                "attempt_respawn_reconnection": False,
+                "node_names": [
+                    "controller_server",
+                    "smoother_server",
+                    "planner_server",
+                    "behavior_server",
+                    "bt_navigator",
+                ],
+            }
+        ],
+        output="screen",
+    )
     safety = Node(
         package="flyto_robotics",
         executable="ros2_safety_supervisor",
@@ -238,10 +244,61 @@ def _launch_runtime(context: object) -> list[object]:
         ],
         output="screen",
     )
-    shutdown = RegisterEventHandler(
-        OnProcessExit(target_action=lab, on_exit=[Shutdown(reason="closed-loop finished")])
+    stop_managers_after_lab = RegisterEventHandler(
+        OnProcessExit(
+            target_action=lab,
+            on_exit=[
+                EmitEvent(
+                    event=SignalProcess(
+                        signal_number=signal.SIGINT,
+                        process_matcher=matches_action(navigation_manager),
+                    )
+                ),
+                EmitEvent(
+                    event=SignalProcess(
+                        signal_number=signal.SIGINT,
+                        process_matcher=matches_action(map_manager),
+                    )
+                ),
+                TimerAction(
+                    period=30.0,
+                    actions=[Shutdown(reason="closed-loop finished")],
+                ),
+            ],
+        )
     )
-    delayed_lab = TimerAction(period=6.0, actions=[lab])
+    stop_navigation_after_manager = RegisterEventHandler(
+        OnProcessExit(
+            target_action=navigation_manager,
+            on_exit=[
+                EmitEvent(
+                    event=SignalProcess(
+                        signal_number=signal.SIGINT,
+                        process_matcher=matches_action(node),
+                    )
+                )
+                for node in navigation_nodes
+            ],
+        )
+    )
+    stop_map_after_manager = RegisterEventHandler(
+        OnProcessExit(
+            target_action=map_manager,
+            on_exit=[
+                EmitEvent(
+                    event=SignalProcess(
+                        signal_number=signal.SIGINT,
+                        process_matcher=matches_action(map_server),
+                    )
+                )
+            ],
+        )
+    )
+    delayed_map_manager = TimerAction(period=2.0, actions=[map_manager])
+    delayed_navigation_manager = TimerAction(
+        period=10.0, actions=[navigation_manager]
+    )
+    delayed_lab = TimerAction(period=15.0, actions=[lab])
     return [
         gazebo,
         bridge,
@@ -249,23 +306,36 @@ def _launch_runtime(context: object) -> list[object]:
         map_to_odom,
         base_to_lidar,
         map_server,
-        map_manager,
+        delayed_map_manager,
         *navigation_nodes,
+        delayed_navigation_manager,
         safety,
         delayed_lab,
-        shutdown,
+        stop_managers_after_lab,
+        stop_navigation_after_manager,
+        stop_map_after_manager,
     ]
 
 
 def generate_launch_description() -> LaunchDescription:
     share = Path(get_package_share_directory("flyto_robotics"))
     existing_resources = os.environ.get("GZ_SIM_RESOURCE_PATH", "")
+    existing_sdf_paths = os.environ.get("SDF_PATH", "")
+    existing_common_paths = os.environ.get("GZ_FILE_PATH", "")
     resource_path = os.pathsep.join(
         value for value in (str(share / "models"), existing_resources) if value
     )
     return LaunchDescription(
         [
+            # This simulation launch owns a sealed local ROS graph. Hardware
+            # launches must opt into their deployment-specific discovery.
+            SetEnvironmentVariable("ROS_AUTOMATIC_DISCOVERY_RANGE", "LOCALHOST"),
+            SetEnvironmentVariable("FASTDDS_BUILTIN_TRANSPORTS", "UDPv4"),
+            SetEnvironmentVariable("SDF_PATH", existing_sdf_paths),
+            SetEnvironmentVariable("GZ_FILE_PATH", existing_common_paths),
             SetEnvironmentVariable("GZ_SIM_RESOURCE_PATH", resource_path),
+            SetLaunchConfiguration("sigterm_timeout", "10"),
+            SetLaunchConfiguration("sigkill_timeout", "5"),
             DeclareLaunchArgument(
                 "world_file",
                 default_value=str(share / "worlds/nav2-closed-loop.sdf"),
