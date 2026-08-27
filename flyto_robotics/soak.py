@@ -10,6 +10,12 @@ from collections.abc import Callable
 from datetime import datetime, timezone
 
 SOAK_REPORT_CONTRACT_VERSION = "flyto.robotics.soak-report.v1"
+DETERMINISTIC_SOAK_PROFILES = {
+    "smoke-l1": 5,
+    "load-l2": 50,
+    "endurance-l3": 250,
+    "ceiling-l4": 500,
+}
 
 
 def _timestamp() -> str:
@@ -74,6 +80,13 @@ def _run_checks(result: dict[str, object]) -> tuple[bool, list[str]]:
         or float(elapsed) <= 0
     ):
         failures.append("elapsed_seconds")
+    safety_stop_count = result.get("safety_stop_count")
+    if (
+        isinstance(safety_stop_count, bool)
+        or not isinstance(safety_stop_count, int)
+        or safety_stop_count < 0
+    ):
+        failures.append("safety_stop_count")
     return not failures, failures
 
 
@@ -118,6 +131,19 @@ def run_deterministic_soak(
         "unique_fingerprints": len(fingerprints),
         "runs": entries,
     }
+
+
+def run_deterministic_soak_profile(
+    *,
+    profile_id: str,
+    run_once: Callable[[], dict[str, object]],
+) -> dict[str, object]:
+    """Run a named, reviewable load level instead of a self-declared run count."""
+
+    runs = DETERMINISTIC_SOAK_PROFILES.get(profile_id)
+    if runs is None:
+        raise ValueError("deterministic soak profile is unsupported")
+    return run_deterministic_soak(runs=runs, run_once=run_once)
 
 
 def render_soak_markdown(report: dict[str, object]) -> str:
