@@ -1,0 +1,32 @@
+# The watch half of the camera: MJPEG over HTTP, loopback only.
+#
+# flyto-cloud never carries a frame. services/space_tasks/streams.py mints an
+# address and the browser opens it directly, and it refuses any plaintext
+# address whose host is not in {127.0.0.1, ::1, localhost}. So this binds to
+# loopback and reaches the Mac through the same SSH tunnel the delivery
+# gateway already uses — which keeps http:// legal without standing up TLS,
+# and keeps the camera off the venue wi-fi where anyone could watch it.
+#
+# web_video_server rather than a media server: it subscribes to the ROS topic
+# the driver already publishes, so the camera keeps exactly one opener. A
+# separate media server would have to open /dev/video0 itself and would lose
+# that race with the driver.
+[Unit]
+Description=Flyto robot camera MJPEG stream (loopback)
+Requires=flyto-camera-v4l2.service
+After=flyto-camera-v4l2.service
+
+[Service]
+Type=simple
+User=ubuntu
+Environment=PYTHONUNBUFFERED=1
+Environment=ROS_DOMAIN_ID=30
+ExecStart=/bin/bash -lc 'source /opt/ros/jazzy/setup.bash && exec ros2 run web_video_server web_video_server --ros-args \
+  -p port:=8080 \
+  -p address:=127.0.0.1'
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=10
+
+[Install]
+WantedBy=multi-user.target
