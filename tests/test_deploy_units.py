@@ -39,9 +39,14 @@ UNIT_DIR = pathlib.Path(__file__).resolve().parents[1] / "deploy" / "systemd"
 HOME_PATHS = frozenset({"home_path_hardcoded"})
 
 EXPECTED: dict[str, frozenset[str]] = {
-    # Added 2026-08-27. Clean, and they are the proof the table is reachable:
-    # both had `unbounded_restart` when written and it was found by this test.
-    "flyto-camera-v4l2.service": frozenset(),
+    # Added 2026-08-27. The stream unit is clean, and both are the proof this
+    # table is reachable: each had `unbounded_restart` when written and this
+    # test is what found it. The v4l2 unit gained a home path later the same
+    # day, when `camera_info_url` was pointed at a stable operator-chosen
+    # calibration file -- the alternative was leaving it on a default derived
+    # from the camera's USB product string, which changes when the camera is
+    # swapped and takes the intrinsics silently with it.
+    "flyto-camera-v4l2.service": HOME_PATHS,
     "flyto-camera-stream.service": frozenset(),
     "flyto-slam.service": frozenset(),
     "flyto-camera-gateway.service": HOME_PATHS,
