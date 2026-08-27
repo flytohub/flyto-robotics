@@ -144,13 +144,27 @@ and nothing depends on it. `flyto-modules-vision` — whose `vision.observe` is
 the designed consumer and whose defaults already point at this gateway — is not
 installed in flyto-cloud's venv.
 
-**Mapping has never been dispatched.** `grep -c device_executor
-~/.flyto/device-events.jsonl` → 0. Two independent reasons: the executor's wire
-protocol was wrong until today (it wrote a trailing newline, which the registry
-rejects, and read `module_id` off the top level instead of from inside
-`request`), and this branch has never been cut as a release —
-`git cat-file -p 8c751d7:deploy/executors` reports the path does not exist, so
-the deployed tree the job runner imports does not contain it.
+**Mapping has never been dispatched, but the robot side is complete.**
+`grep -c device_executor ~/.flyto/device-events.jsonl` → 0, because the
+executor's wire protocol was wrong until today: it wrote a trailing newline,
+which the registry rejects outright, and read `module_id` off the top of the
+envelope instead of from inside `request`.
+
+That is fixed and the whole path is now reachable, verified against the live
+robot with the runner's own interpreter: `flyto-job-runner.service` runs
+`/home/ubuntu/.flyto/runner-venv/bin/python`, its manifest directory defaults to
+`/etc/flyto/device-executors/` where `flyto-mapping.json` sits, and that
+interpreter loading `DeviceExecutorRegistry` finds all three module ids.
+`_generic_step` resolves `{"module": "mapping.start", "params": {}}` to
+`('mapping.start', {})` and correctly declines `robotics.motion.move_relative`
+to the delivery path.
+
+An earlier draft of this section claimed the branch had never been cut as a
+release and so the deployed tree lacked `deploy/executors`. That was wrong: the
+manifest names `/home/ubuntu/executors/`, which is installed separately, and
+the release does carry `deploy/device_executor_registry.py`. **The only thing
+still missing is on the other side — no flyto-cloud workflow has a `mapping.*`
+step yet, so nothing has ever asked for one.**
 
 **`flyto-slam.service` is `static`, deliberately.** It has no `[Install]`
 section, so it can only ever be started by the executor. A robot that booted
