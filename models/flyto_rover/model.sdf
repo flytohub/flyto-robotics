@@ -320,8 +320,10 @@
       <sensor name="route_camera" type="camera">
         <topic>/flyto/camera/image</topic>
         <update_rate>15</update_rate>
-        <always_on>true</always_on>
-        <visualize>true</visualize>
+        <!-- The Nav2 lab does not consume video. Keep the optional camera
+             demand-driven so it cannot starve safety-critical sensors. -->
+        <always_on>false</always_on>
+        <visualize>false</visualize>
         <camera>
           <horizontal_fov>1.20</horizontal_fov>
           <image>
