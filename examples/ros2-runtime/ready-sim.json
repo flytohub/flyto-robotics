@@ -1,7 +1,7 @@
 {
   "contract_version": "flyto.robotics.ros2-runtime-snapshot.v1",
   "profile_id": "flyto2.ros2.standard.v1",
-  "profile_snapshot": "517dd9426508784c53d07d51dbb6b5e79f7c11578aa49b499a14a60e8a8184b0",
+  "profile_snapshot": "9da500f099541b4129fa089b5e83b5c643023aafaa04c6f164f4251902575630",
   "robot_id": "flyto-rover-sim-001",
   "deployment_mode": "simulation",
   "observed_at": "2026-08-01T10:00:00Z",
@@ -16,5 +16,5 @@
       "observation_sequence": "synthetic-sim:ready:1"
     }
   ],
-  "snapshot": "20ffdffe66654d35a8a06d890172242358b9db75bbf4b4161fafe4fc189879d9"
+  "snapshot": "260b92a37ecc0bdd0aec2da9b3b93abc8f1ff622bb384e3265f575f69aee5467"
 }
