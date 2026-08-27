@@ -43,6 +43,16 @@ def test_standard_profile_is_portable_registered_and_ai_safe() -> None:
     manifest = standard_ros2_adapter_manifest("robot-001")
 
     assert manifest["direct_actuation"] is False
+    assert manifest["adapters"][0]["managed_nodes"] == [
+        "/behavior_server",
+        "/bt_navigator",
+        "/controller_server",
+        "/map_server",
+        "/planner_server",
+        "/smoother_server",
+        "/velocity_smoother",
+        "/waypoint_follower",
+    ]
     assert manifest["adapters"][0]["supported_modes"] == [
         "hardware",
         "simulation",
