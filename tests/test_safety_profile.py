@@ -14,6 +14,7 @@ look correct in a test that only ever checked speeds.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -28,6 +29,7 @@ from flyto_robotics.safety_profile import (
     is_more_conservative,
     load_profile,
     parse_profile,
+    update_profile,
 )
 
 SITE = {
@@ -216,6 +218,41 @@ class TestTheAuditRecord:
             after=after,
             reason="synthetic",
         )
+
+    @pytest.mark.skipif(os.name != "posix", reason="file modes are POSIX-only here")
+    def test_profile_and_audit_are_private_even_under_a_permissive_umask(self, tmp_path):
+        profile = tmp_path / "safety-profile.json"
+        audit = tmp_path / "safety-profile.audit.jsonl"
+        previous = os.umask(0)
+        try:
+            update_profile(
+                profile,
+                audit,
+                limits={"max_linear_speed": 0.2},
+                changed_by="synthetic-operator",
+                reason="synthetic",
+                at="2026-08-27T00:00:00Z",
+            )
+        finally:
+            os.umask(previous)
+        assert profile.stat().st_mode & 0o777 == 0o600
+        assert audit.stat().st_mode & 0o777 == 0o600
+
+    def test_a_symlink_cannot_redirect_the_audit_append(self, tmp_path):
+        outside = tmp_path / "outside.jsonl"
+        outside.write_text("unchanged\n", encoding="utf-8")
+        audit = tmp_path / "audit.jsonl"
+        audit.symlink_to(outside)
+        with pytest.raises(SafetyProfileError, match="could not be written"):
+            update_profile(
+                tmp_path / "profile.json",
+                audit,
+                limits={"max_linear_speed": 0.2},
+                changed_by="synthetic-operator",
+                reason="synthetic",
+                at="2026-08-27T00:00:00Z",
+            )
+        assert outside.read_text(encoding="utf-8") == "unchanged\n"
 
     def test_a_tightening_is_not_flagged_as_relaxing(self):
         record = self.before_after({"max_linear_speed": 0.3}, {"max_linear_speed": 0.2})
