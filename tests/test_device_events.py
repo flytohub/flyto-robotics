@@ -18,6 +18,7 @@ to do with what is being tested.
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import re
@@ -66,6 +67,7 @@ from flyto_robotics.device_events import (
     parse_device_event,
     record_byte_size,
 )
+from flyto_robotics.fsio import atomic_write
 
 JOURNAL_BYTES = 64 * 1024
 
@@ -97,6 +99,54 @@ def event(sequence: int, **changes: object) -> dict:
 def journal_path(tmp_path: Path) -> Path:
     # A subdirectory the journal creates itself, so it owns the 0700 mode.
     return tmp_path.resolve() / "state" / "events.ndjson"
+
+
+@pytest.mark.skipif(os.name != "posix", reason="file modes are POSIX-only here")
+def test_atomic_write_is_private_from_creation_even_with_a_permissive_umask(tmp_path: Path):
+    target = tmp_path / "state" / "result.json"
+    previous = os.umask(0)
+    try:
+        atomic_write(target, "synthetic", 0o600)
+    finally:
+        os.umask(previous)
+    assert target.stat().st_mode & 0o777 == 0o600
+
+
+def test_atomic_write_does_not_reuse_an_attacker_planted_fixed_temporary(tmp_path: Path):
+    target = tmp_path / "result.json"
+    planted = tmp_path / ".result.json.tmp"
+    planted.write_text("attacker-owned", encoding="utf-8")
+    atomic_write(target, "trusted", 0o600)
+    assert target.read_text(encoding="utf-8") == "trusted"
+    assert planted.read_text(encoding="utf-8") == "attacker-owned"
+
+
+def test_runner_never_logs_secret_bearing_completion_detail(monkeypatch, tmp_path, caplog):
+    runner_path = Path(__file__).resolve().parents[1] / "deploy" / "flyto_job_runner.py"
+    monkeypatch.setenv("FLYTO_RUNNER_DATA_DIR", str(tmp_path / "runner"))
+    spec = importlib.util.spec_from_file_location("flyto_job_runner_log_test", runner_path)
+    assert spec and spec.loader
+    runner = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(runner)
+    monkeypatch.setattr(runner, "_post", lambda *_args, **_kwargs: {"ok": True})
+
+    secret = "Bearer synthetic-secret-that-must-not-be-logged"
+    with caplog.at_level("INFO", logger="flyto.job_runner"):
+        runner._report_completion(
+            {"device_id": "synthetic-device"},
+            job_id="synthetic-job",
+            headers={},
+            body={
+                "status": "success",
+                "variables": {
+                    "detail": secret,
+                    "evidence": [{"kind": "mission_summary"}],
+                },
+            },
+        )
+    assert secret not in caplog.text
+    assert "synthetic-job reported success" in caplog.text
+    assert "mission_summary" in caplog.text
 
 
 def rotating(path: Path, *, max_events: int = 2) -> DeviceEventJournal:

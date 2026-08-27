@@ -1643,10 +1643,9 @@ def _report_completion(
     # the cloud already considered done.
     variables = body.get("variables", {})
     logger.info(
-        "job %s reported %s: %s | evidence: %s",
+        "job %s reported %s | evidence: %s",
         job_id,
         body.get("status"),
-        variables.get("detail"),
         [item["kind"] for item in variables.get("evidence", [])],
     )
 

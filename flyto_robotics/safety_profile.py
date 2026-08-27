@@ -28,6 +28,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Literal
 
+from .fsio import atomic_write
+
 #: How a profile value constrains the job's value.
 #:
 #: ``at_most``  the job may not exceed it   — speeds, where lower is safer
@@ -261,25 +263,9 @@ def change_record(
     }
 
 
-def _atomic_write(path: Any, text: str, mode: int = 0o644) -> None:
+def _atomic_write(path: Any, text: str, mode: int = 0o600) -> None:
     """Replace a file's contents or leave the old ones entirely alone."""
-    import os as _os
-    from pathlib import Path as _Path
-
-    target = _Path(path)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    partial = target.with_suffix(target.suffix + ".partial")
-    partial.unlink(missing_ok=True)
-    descriptor = _os.open(partial, _os.O_CREAT | _os.O_EXCL | _os.O_WRONLY, mode)
-    try:
-        with _os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            handle.write(text)
-            handle.flush()
-            _os.fsync(handle.fileno())
-        _os.replace(partial, target)
-    except BaseException:
-        partial.unlink(missing_ok=True)
-        raise
+    atomic_write(path, text, mode)
 
 
 def update_profile(
@@ -316,13 +302,19 @@ def update_profile(
     )
 
     audit = _Path(audit_path)
-    audit.parent.mkdir(parents=True, exist_ok=True)
+    audit.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     try:
         # Open before writing the profile: if the record cannot be kept, the
         # change does not happen.
-        with audit.open("a", encoding="utf-8") as handle:
+        import os as _os
+
+        flags = _os.O_APPEND | _os.O_CREAT | _os.O_WRONLY | getattr(_os, "O_NOFOLLOW", 0)
+        descriptor = _os.open(audit, flags, 0o600)
+        _os.fchmod(descriptor, 0o600)
+        with _os.fdopen(descriptor, "a", encoding="utf-8") as handle:
             handle.write(_json.dumps(record, sort_keys=True) + "\n")
             handle.flush()
+            _os.fsync(handle.fileno())
     except OSError as exc:
         raise SafetyProfileError(
             f"{audit} could not be written, so the change was not made"

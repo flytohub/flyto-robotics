@@ -469,8 +469,12 @@ def _advisory_lock(layout: Layout, *, enabled: bool = True):
     layout.state_dir.mkdir(parents=True, exist_ok=True, mode=_STATE_DIR_MODE)
     if (layout.state_dir.stat().st_mode & 0o777) != _STATE_DIR_MODE:
         layout.state_dir.chmod(_STATE_DIR_MODE)
-    descriptor = os.open(layout.lock_file, os.O_RDWR | os.O_CREAT, 0o640)
+    flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(layout.lock_file, flags, 0o600)
     try:
+        # Existing installations may have the former 0640 lock. Tighten the
+        # opened inode, avoiding a path-based chmod race and preserving owner.
+        os.fchmod(descriptor, 0o600)
         try:
             fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError as error:
@@ -1460,7 +1464,9 @@ def open_activation_window(
             "unexpected_error",
             "an activation window needs a finite, positive duration in seconds",
         )
-    layout.state_dir.mkdir(parents=True, exist_ok=True)
+    layout.state_dir.mkdir(parents=True, exist_ok=True, mode=_STATE_DIR_MODE)
+    if (layout.state_dir.stat().st_mode & 0o777) != _STATE_DIR_MODE:
+        layout.state_dir.chmod(_STATE_DIR_MODE)
     document = _window_document(action, version, min(requested, ACTIVATION_WINDOW_SECONDS))
     atomic_write(
         layout.activation_window_file,

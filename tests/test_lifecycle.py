@@ -59,6 +59,14 @@ class TestInstall:
         # The report must survive a round trip: it is what a fleet tool parses.
         assert json.loads(json.dumps(report))["version"] == "1.0.0"
 
+    @pytest.mark.skipif(os.name != "posix", reason="file modes are POSIX-only here")
+    def test_the_lifecycle_lock_is_tightened_on_the_open_inode(self, layout: Layout) -> None:
+        layout.state_dir.mkdir(parents=True, mode=0o750)
+        layout.lock_file.write_text("", encoding="utf-8")
+        layout.lock_file.chmod(0o666)
+        with lifecycle._advisory_lock(layout):
+            assert layout.lock_file.stat().st_mode & 0o777 == 0o600
+
     def test_running_the_same_install_twice_changes_nothing(
         self, layout: Layout, tmp_path: Path
     ) -> None:
