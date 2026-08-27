@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import subprocess
 
 import pytest
@@ -425,3 +426,50 @@ def test_the_module_ids_the_manifest_declares_are_the_ones_handled():
          / "deploy/executors/flyto-mapping.json").read_text(encoding="utf-8")
     )
     assert set(manifest["module_ids"]) == set(executor.HANDLERS)
+
+
+# ---------------------------------------------------------------------------
+# The floor is stated in two places. They have to agree.
+# ---------------------------------------------------------------------------
+
+
+def _make_map_sh() -> str:
+    import pathlib
+
+    return (pathlib.Path(__file__).resolve().parents[1]
+            / "deploy/make-map.sh").read_text(encoding="utf-8")
+
+
+def test_the_shell_path_and_the_executor_use_the_same_battery_floor():
+    """One decision, one number.
+
+    Two implementations of the same precondition are two chances to be right,
+    and the one a person runs by hand at a venue is the one nobody reviews.
+    """
+    declared = re.search(r"^MIN_MAPPING_VOLTS=([0-9.]+)$", _make_map_sh(), re.MULTILINE)
+    assert declared, "make-map.sh must declare MIN_MAPPING_VOLTS as a literal"
+    assert float(declared.group(1)) == executor.MIN_MAPPING_VOLTS
+
+
+def test_the_shell_path_refuses_a_reading_it_cannot_parse():
+    """It used to warn and launch SLAM anyway.
+
+    The executor refused the same case, so the two disagreed in opposite
+    directions on the branch that is reached most often — an unreadable battery
+    is routine when `ros2 topic echo --once` expires.
+    """
+    text = _make_map_sh()
+    assert '=~ ^[0-9]+(\\.[0-9]+)?$' in text, "the reading must be validated as a decimal"
+    assert "自行確認電量" not in text, "the fail-open branch must be gone"
+
+
+def test_the_shell_path_does_not_hide_awks_own_failure():
+    """`awk` given a malformed value exits 2, which `if` reads as false.
+
+    `volts="0/0"` was allowed and `volts="abc def"` refused, and `2>/dev/null`
+    on the comparison hid which had happened.
+    """
+    comparison = [line for line in _make_map_sh().splitlines()
+                  if line.startswith("if awk ")]
+    assert comparison, "expected the awk comparison to survive"
+    assert "2>/dev/null" not in comparison[0]

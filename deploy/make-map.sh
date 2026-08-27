@@ -22,6 +22,12 @@
 # perimeter once produces a map that looks finished and is skewed.
 set -euo pipefail
 
+# Kept in step with MIN_MAPPING_VOLTS in
+# deploy/executors/flyto_mapping_executor.py. tests/test_mapping_executor.py
+# parses this literal and asserts the two agree, because a floor that is
+# right in one path and wrong in the other is worse than one wrong number.
+MIN_MAPPING_VOLTS=11.6
+
 MAP_DIR="${FLYTO_MAP_DIR:-/home/ubuntu/.flyto/maps}"
 MAP_NAME="${1:-lab}"
 MAP_PATH="$MAP_DIR/$MAP_NAME"
@@ -60,19 +66,35 @@ echo "  ✓ bringup 運作中"
 # dropped from 11.19 V in twenty minutes without moving, and the sag once the
 # wheels are turning is immediate. This is checked once, at the start, so the
 # number has to carry the whole run rather than the first second of it.
+# Fails closed, and that is a correction. This used to print a warning and
+# launch SLAM anyway when the reading was missing, while
+# deploy/executors/flyto_mapping_executor.py refused the same case — one
+# decision with two opposite answers, and the permissive one was the path a
+# person runs by hand at a venue. An unreadable battery is routine here: the
+# `ros2 topic echo` below expires often enough that this branch is reached in
+# normal use.
 volts=$(timeout 15 ros2 topic echo /battery_state --once --field voltage 2>/dev/null | head -1 || true)
-if [ -n "$volts" ]; then
-  echo "  電池: ${volts} V"
-  if awk "BEGIN{exit !($volts < 11.6)}" 2>/dev/null; then
-    echo "  ✗ 電壓 ${volts} V，低於建圖所需的 11.6 V。" >&2
-    echo "    建圖要連續跑好幾分鐘，馬達一上負載電壓就會下沉，中途沒電整份作廢；" >&2
-    echo "    LiPo 過放是損壞不是沒電。請先充飽再跑。" >&2
-    exit 1
-  fi
-  echo "  ✓ 電壓足夠"
-else
-  echo "  ⚠ 讀不到電池狀態，自行確認電量"
+volts=${volts//[[:space:]]/}
+
+# Validated as a decimal literal before it reaches awk. Interpolating an
+# unchecked value made a malformed reading a *syntax error*: `awk` exited 2,
+# `if` read that as false, and the run was allowed. `volts="0/0"` allowed;
+# `volts="abc def"` refused. `2>/dev/null` hid the difference.
+if [[ ! "$volts" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+  echo "  ✗ 讀不到可信的電池電壓（收到: '''${volts:-空}'''）。" >&2
+  echo "    建圖要連續跑好幾分鐘，不能在不知道電量的情況下開始。" >&2
+  echo "    確認 turtlebot3-bringup 正常、LiPo 有接，再試一次。" >&2
+  exit 1
 fi
+
+echo "  電池: ${volts} V"
+if awk "BEGIN{exit !($volts < $MIN_MAPPING_VOLTS)}"; then
+  echo "  ✗ 電壓 ${volts} V，低於建圖所需的 ${MIN_MAPPING_VOLTS} V。" >&2
+  echo "    建圖要連續跑好幾分鐘，馬達一上負載電壓就會下沉，中途沒電整份作廢；" >&2
+  echo "    LiPo 過放是損壞不是沒電。請先充飽再跑。" >&2
+  exit 1
+fi
+echo "  ✓ 電壓足夠"
 
 mkdir -p "$MAP_DIR"
 
