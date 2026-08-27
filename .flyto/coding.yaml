@@ -49,6 +49,12 @@ checks:
             )
             environment_root = pathlib.Path(environment)
             python = environment_root / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+            wheelhouse = root / ".flyto-wheelhouse"
+            dependency_source = (
+                ["--no-index", "--find-links", str(wheelhouse)]
+                if wheelhouse.is_dir()
+                else []
+            )
             subprocess.run(
                 [
                     str(python),
@@ -56,6 +62,7 @@ checks:
                     "pip",
                     "--isolated",
                     "install",
+                    *dependency_source,
                     "-r",
                     str(root / "requirements-dev.txt"),
                 ],
