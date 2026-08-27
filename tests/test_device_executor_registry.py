@@ -341,7 +341,7 @@ def test_stdio_uses_closed_process_boundary_and_no_job_data_in_argv(tmp_path):
     handle = registry.prepare("local.action", {"private": "only-stdin"})
     argv, options = calls[0]
     assert argv == child_command(source)
-    assert "private" not in " ".join(argv)
+    assert "only-stdin" not in " ".join(argv)
     assert options == {
         "stdin": subprocess.PIPE, "stdout": subprocess.PIPE,
         "stderr": subprocess.DEVNULL, "shell": False,
