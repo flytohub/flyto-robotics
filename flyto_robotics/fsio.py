@@ -21,6 +21,7 @@ Two properties, both load-bearing:
 from __future__ import annotations
 
 import os
+import tempfile
 from pathlib import Path
 
 __all__ = ["atomic_write", "fsync_dir", "fsync_path"]
@@ -52,14 +53,19 @@ def fsync_dir(path: Path) -> None:
     fsync_path(path, directory=True)
 
 
-def atomic_write(path: Path, text: str, mode: int = 0o644) -> Path:
+def atomic_write(path: Path, text: str, mode: int = 0o600) -> Path:
     """Write ``text`` to ``path`` durably and with exactly ``mode``."""
 
     path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.tmp")
-    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    descriptor, temporary_name = tempfile.mkstemp(
+        dir=path.parent, prefix=f".{path.name}.", suffix=".tmp"
+    )
+    temporary = Path(temporary_name)
     try:
+        # mkstemp creates 0600 irrespective of the process umask. Set the
+        # requested final mode on the still-private inode before publishing it.
+        os.fchmod(descriptor, mode)
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
             handle.write(text)
             handle.flush()
@@ -67,9 +73,6 @@ def atomic_write(path: Path, text: str, mode: int = 0o644) -> Path:
     except BaseException:
         temporary.unlink(missing_ok=True)
         raise
-    # umask can clear bits that O_CREAT requested, so the mode is asserted
-    # rather than assumed. A 0600 bundle that lands at 0644 is a silent leak.
-    os.chmod(temporary, mode)
     os.replace(temporary, path)
     fsync_dir(path.parent)
     return path
