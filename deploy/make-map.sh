@@ -31,8 +31,14 @@ if [ ! -f /opt/ros/jazzy/setup.bash ]; then
   exit 2
 fi
 
+# ROS's setup.bash reads variables it has not set (AMENT_TRACE_SETUP_FILES is
+# the first one to bite), so `set -u` has to come off across the source and go
+# straight back on. Sourcing it with -u active fails on line 8 before this
+# script has done anything at all.
 # shellcheck disable=SC1091
+set +u
 source /opt/ros/jazzy/setup.bash
+set -u
 export ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-30}"
 export TURTLEBOT3_MODEL="${TURTLEBOT3_MODEL:-burger}"
 
