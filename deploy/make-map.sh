@@ -48,11 +48,19 @@ echo "  ✓ bringup 運作中"
 # A mapping run is minutes of continuous driving. Starting one at 20% and
 # having the base brown out mid-loop loses the whole run, and a LiPo taken
 # below its floor is damaged rather than merely empty.
+#
+# 11.6 V and not 11.0. The floor for *an* operation is not the floor for one
+# that runs for minutes under motor load: an idle 3S pack reading 11.03 V had
+# dropped from 11.19 V in twenty minutes without moving, and the sag once the
+# wheels are turning is immediate. This is checked once, at the start, so the
+# number has to carry the whole run rather than the first second of it.
 volts=$(timeout 15 ros2 topic echo /battery_state --once --field voltage 2>/dev/null | head -1 || true)
 if [ -n "$volts" ]; then
   echo "  電池: ${volts} V"
-  if awk "BEGIN{exit !($volts < 11.0)}" 2>/dev/null; then
-    echo "  ✗ 電壓偏低。建圖要連續跑好幾分鐘，中途沒電會整份作廢。請先充電。" >&2
+  if awk "BEGIN{exit !($volts < 11.6)}" 2>/dev/null; then
+    echo "  ✗ 電壓 ${volts} V，低於建圖所需的 11.6 V。" >&2
+    echo "    建圖要連續跑好幾分鐘，馬達一上負載電壓就會下沉，中途沒電整份作廢；" >&2
+    echo "    LiPo 過放是損壞不是沒電。請先充飽再跑。" >&2
     exit 1
   fi
   echo "  ✓ 電壓足夠"
