@@ -54,15 +54,32 @@ sudo visudo -c
 
 ### About step 3
 
-The job runner runs as `ubuntu`, and starting a systemd unit needs root. The
-sudoers file grants exactly two commands by full path — `systemctl start
-flyto-slam.service` and `systemctl stop flyto-slam.service` — and nothing else.
-
-That enumeration is the security property. `systemctl *` would hand a general
-privilege-escalation primitive to anything that can reach the job runner, and
-the entire reason the executor boundary exists is that a dispatched job must
-not be able to become arbitrary host execution. Widening this file gives that
-away quietly.
-
 Run `visudo -c` after installing. A malformed file in `/etc/sudoers.d` can lock
 sudo out of the machine, and this robot has no console attached.
+
+The file grants exactly two commands by full path and nothing else, because
+`systemctl *` would hand a general privilege-escalation primitive to anything
+that can reach the job runner, and the reason the executor boundary exists is
+that a dispatched job must not become arbitrary host execution.
+
+**On the current TurtleBot3 that enumeration buys nothing, and it is worth
+knowing why.** Ubuntu's cloud-init ships `/etc/sudoers.d/90-cloud-init-users`
+containing:
+
+    ubuntu ALL=(ALL) NOPASSWD:ALL
+
+flyto-job-runner.service runs as `ubuntu`. So the executor can already run any
+command as root, this file is a no-op, and the boundary's central property —
+that a dispatched job cannot become arbitrary host execution — is **not
+enforced on that machine**. It is enforced by the contract (bounded JSON, a
+fixed module-id set, a timeout) and by nothing below it.
+
+That is a property of the image, not of this executor, and it is left alone
+here on purpose: narrowing a running robot's own administrative access is a
+change that can lock out a machine with no console, and it is not a decision to
+make as a side effect of installing a mapping feature. It is the right decision
+to make deliberately, before the robot is on a venue network.
+
+This file is still worth installing: it is correct, it is what the executor
+needs on any host that does *not* hand `ubuntu` blanket root, and it stops
+being a no-op the moment the cloud-init grant is tightened.
