@@ -174,6 +174,39 @@ nothing here. Left alone on purpose: narrowing a running robot's own
 administrative access can lock out a machine with no console, `eth0` and `usb0`
 are down, and wlan0 is the only route in.
 
+**Every ROS node is reachable from the venue LAN, and `/cmd_vel` has no
+gate in front of it.** Verified 2026-08-27. The three services this work added
+or touched are correctly loopback-only — `127.0.0.1:8766` (delivery gateway),
+`:9000` (camera gateway), `:8080` (MJPEG) — but DDS is not:
+`turtlebot3_ros` is bound to `192.168.0.34:37087`, `v4l2_camera` to `:39030`,
+`robot_state_pub` to `0.0.0.0:51689`, and `ufw status` is `inactive`.
+`ros2 topic info /cmd_vel -v` shows `Publisher count: 0, Subscription count: 1`
+with the subscriber being `turtlebot3_node` itself. So anything on that network
+speaking DDS on domain 30 can publish `TwistStamped` and drive the robot,
+bypassing the delivery gateway, the paired credential and `cmd_vel_policy`
+entirely. `SECURITY.md` names this class as the most interesting report against
+this repository.
+
+Not fixed here, and deliberately. This box has no console, `eth0` and `usb0`
+are down and wlan0 is the only route in, so a wrong firewall rule is an
+unrecoverable lockout; and a `ufw` default-deny may break same-host DDS
+discovery — `before.rules` has no allow for `239.255.0.1:7400` and whether Fast
+DDS falls back to shared-memory metatraffic is untested here. The choice between
+a Fast DDS XML whitelist and SROS 2 enclaves is unmade. **Settle it on a bench
+robot before a venue, not on this one.**
+
+**The stream URL discloses a ROS topic name, which `STATE.md` says this
+boundary does not do.** The observation payload still carries no ROS or device
+identifiers — `provider: ros_image` and an operator-assigned `source_id`, no
+topic, no device path. The *catalog* is different: its `url` is
+`http://127.0.0.1:8080/stream?topic=/camera/image_raw`, because that is the
+address web_video_server actually serves and a reference that does not resolve
+is not a reference. Removing the leak from flyto-cloud's `.env` moved the topic
+name back onto the robot, which is where ROS is the subject rather than a leak —
+but it is in a public response body, and the STATE.md sentence was written
+before there was a second route. Scoped rather than silently contradicted; see
+`docs/CONTRACTS.md`.
+
 **A workflow agent moved this checkout to `main` mid-session** and the branch
 had to be recovered. Nothing was lost — the work was committed and pushed — but
 if a tree looks wrong, check `git reflog` before concluding files were deleted.
@@ -191,6 +224,5 @@ if a tree looks wrong, check `git reflog` before concluding files were deleted.
   what the camera sees.
 - Cut a release containing `deploy/executors/` so the job runner can actually
   reach the mapping executor.
-- `docs/INSTALLATION.md` enumerates twelve `FLYTO_CAMERA_*` settings and none of
-  the four stream ones, so an operator following it cannot configure the stream
-  half at all.
+- Decide the DDS restriction on a bench robot, then apply it here. This is the
+  one item on this list that is a competition blocker rather than a gap.
