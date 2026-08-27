@@ -18,16 +18,44 @@ once per venue, before deliveries, and it belongs on the generic installed
 executor protocol that ``flyto_job_runner`` already routes anything not
 prefixed ``robotics.`` to.
 
+## The wire protocol, which the first version of this file got wrong twice
+
+``_StdioOwner`` in ``deploy/device_executor_registry.py`` is the only caller
+that matters, and it is stricter than it looks. Both mistakes below shipped and
+made this executor fail 100% of the time, for every module id, silently to
+anyone reading only this file:
+
+**It is two phases, not one.** ``prepare`` receives
+``{"contract_version","operation":"prepare","request":{...}}`` and returns an
+opaque JSON payload; ``execute`` receives that payload back under
+``{"operation":"execute","prepared":{...}}`` and returns the result. The
+``module_id`` is *nested inside* ``request``, never at the top level.
+
+**Exactly one JSON value, and nothing after it.** ``_call`` does
+``raw_decode(text)`` and then ``if end != len(text): raise
+RegistryError("stdio_output_invalid")``. ``print()`` appends a newline, so every
+response it wrote was rejected before it was ever parsed. Use
+``sys.stdout.write`` and emit no trailing byte.
+
+Everything checkable is checked in ``execute``. ``prepare`` can only fail by
+raising, which the registry reports as ``prepare_failed`` with no reason code
+of ours attached, so a refusal decided there would lose the very thing the
+contract keeps ``refused`` distinct from ``failed`` to carry.
+
 ## The environment this runs in
 
 The registry starts this with ``env={}``, ``cwd="/"``, stderr discarded, and a
-bounded timeout it will kill through. So: no PATH, no ROS environment, no
-inherited anything — every binary is named absolutely, and ROS is sourced by an
-explicit ``bash -lc`` for the two calls that need it. Nothing here may block for
-longer than the manifest's timeout, which is why starting SLAM hands off to
-systemd rather than holding it: a mapping run outlives this process by design,
-since the driving happens between the request that starts it and the one that
-saves the map.
+bounded timeout it will kill through. So every binary is named absolutely.
+``_ros`` is the exception and is honest about it: ROS needs a login shell, so
+those two calls run ``bash -lc`` with ``HOME`` set, which sources a profile
+owned by the account this already runs as. That crosses no boundary here, but
+it is not "no inherited anything" and the earlier docstring claiming so was
+wrong.
+
+Nothing may block longer than the manifest's timeout, which is why starting
+SLAM hands off to systemd rather than holding it: a mapping run outlives this
+process by design, since the driving happens between the request that starts it
+and the one that saves the map.
 
 ## What it refuses, and why refusing is the point
 
@@ -42,6 +70,9 @@ safe to begin" does not read as "this broke".
 from __future__ import annotations
 
 import json
+import math
+import re
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -62,7 +93,8 @@ ROS_DOMAIN_ID = "30"
 
 # 11.6 V and not the 11.0 V an idle pack sits at: a mapping run drives for
 # minutes and the sag under motor load is immediate. Checked once, at the
-# start, so the number has to carry the whole run.
+# start, so the number has to carry the whole run. Kept in step with
+# deploy/make-map.sh, which enforces the same floor for the same reason.
 MIN_MAPPING_VOLTS = 11.6
 
 # Bounded well inside the manifest's own timeout so a slow ROS call is reported
@@ -70,8 +102,19 @@ MIN_MAPPING_VOLTS = 11.6
 # would lose the reason.
 ROS_CALL_TIMEOUT = 20
 SAVE_TIMEOUT = 60
+# `timeout` inside the shell, not just around it. `bash -lc` execs into `ros2`,
+# which spawns map_saver_cli as its own child, so killing the process this
+# started leaves the saver orphaned to PID 1 -- still holding the deadline it
+# was given. GNU timeout signals the process group, so nothing survives it.
+SAVER_SHELL_TIMEOUT = 55
+SAVER_MAP_TIMEOUT = 45.0
 
-MAX_MAP_NAME = 64
+# A map name reaches a filesystem path and a shell command line, so it is
+# whitelisted rather than sanitised. `.isalnum()` is not this: it spans all of
+# Unicode's letter and number categories, so `café`, `лаб` and -- the one that
+# actually hurts -- fullwidth `ｌａｂ`, indistinguishable from `lab` in a
+# directory listing, all passed.
+MAP_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}\Z")
 
 
 def _result(status: str, reason_code: str, *, detail: str = "",
@@ -104,6 +147,26 @@ def _unit_active(unit: str) -> bool:
     return done.returncode == 0
 
 
+def _stop_slam() -> int | None:
+    """Stop SLAM and report the return code. ``None`` means it could not be run.
+
+    Returned rather than discarded because a stop can genuinely fail: a
+    concurrent ``flyto-nav2`` start cancels this job (the unit declares
+    ``Conflicts=``), and D-Bus errors surface the same way. Reporting success
+    over a unit that is still holding ``/map`` would leave the next
+    ``mapping.start`` refusing for a reason nobody was told about.
+    """
+    try:
+        done = subprocess.run(
+            [SUDO, "-n", SYSTEMCTL, "stop", SLAM_UNIT],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, timeout=40, env={},
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return done.returncode
+
+
 def _ros(command: str, timeout: int) -> tuple[int, str]:
     """Run one ROS command in a sourced login shell. Returns (code, stdout)."""
     try:
@@ -121,6 +184,17 @@ def _ros(command: str, timeout: int) -> tuple[int, str]:
 
 
 def _battery_volts() -> float | None:
+    """The pack voltage, or ``None`` when it cannot be believed.
+
+    ``None`` covers unreadable *and* unbelievable. A bare ``float()`` accepts
+    ``nan``, and every comparison against NaN is False — so a NaN reading would
+    slip past the floor check and start a mapping run whose evidence reads
+    "battery nan V". ``0.0`` gets the same treatment: turtlebot3_node fills
+    unmeasured fields with zero rather than NaN, so a zero is far more likely to
+    be "nothing reported" than a pack at zero volts, and answering
+    ``battery_too_low`` to it would send someone to charge a battery that is
+    fine.
+    """
     code, out = _ros(
         "timeout 15 ros2 topic echo /battery_state --once --field voltage", ROS_CALL_TIMEOUT,
     )
@@ -128,24 +202,19 @@ def _battery_volts() -> float | None:
         return None
     for line in out.splitlines():
         try:
-            return float(line.strip())
+            value = float(line.strip())
         except ValueError:
             continue
+        if not math.isfinite(value) or value <= 0.0:
+            return None
+        return value
     return None
 
 
 def _map_name(params: dict) -> str:
-    """A map name that cannot escape the map directory.
-
-    This value reaches a filesystem path, so it is whitelisted rather than
-    sanitised: anything with a separator, a dot-segment or an unexpected
-    character is refused outright instead of being rewritten into something
-    that looks safe and is not.
-    """
+    """A map name that cannot escape the map directory or the shell."""
     raw = params.get("map_name", "lab")
-    if not isinstance(raw, str) or not 0 < len(raw) <= MAX_MAP_NAME:
-        raise ValueError("map_name_invalid")
-    if not raw.replace("-", "").replace("_", "").isalnum():
+    if not isinstance(raw, str) or MAP_NAME.fullmatch(raw) is None:
         raise ValueError("map_name_invalid")
     return raw
 
@@ -164,8 +233,9 @@ def start(params: dict) -> dict:
     volts = _battery_volts()
     if volts is None:
         return _result("refused", "battery_unknown",
-                       detail="Battery state could not be read, so a run long enough to "
-                              "matter cannot be started safely.")
+                       detail="Battery state could not be read or was not a believable "
+                              "voltage, so a run long enough to matter cannot be "
+                              "started safely.")
     if volts < MIN_MAPPING_VOLTS:
         return _result("refused", "battery_too_low",
                        detail=f"{volts:.2f} V is below the {MIN_MAPPING_VOLTS} V a mapping "
@@ -195,35 +265,40 @@ def start(params: dict) -> dict:
     )
 
 
-def save(params: dict) -> dict:
+def _promote(staged: Path, target: Path) -> bool:
+    """Move a staged map onto its published name, fixing the yaml's own pointer.
+
+    The saver is written to a staging basename and renamed into place because
+    ``flyto-nav2.service`` gates on ``ConditionPathExists`` for the published
+    ``.yaml``. Writing there directly means a partial or late write is the thing
+    that flips Nav2 from "will not start" to "starts on a map no job certified".
+
+    ``map_saver_cli`` writes ``image: <staged>.pgm`` into its yaml, so the
+    pointer has to be rewritten or the renamed pair points at a file that is no
+    longer there.
+    """
+    staged_yaml, staged_pgm = staged.with_suffix(".yaml"), staged.with_suffix(".pgm")
+    target_yaml, target_pgm = target.with_suffix(".yaml"), target.with_suffix(".pgm")
     try:
-        name = _map_name(params)
-    except ValueError:
-        return _result("refused", "map_name_invalid")
+        text = staged_yaml.read_text(encoding="utf-8")
+        fixed = "\n".join(
+            f"image: {target_pgm.name}" if line.startswith("image:") else line
+            for line in text.splitlines()
+        ) + "\n"
+        staged_pgm.replace(target_pgm)
+        target_yaml.write_text(fixed, encoding="utf-8")
+        staged_yaml.unlink(missing_ok=True)
+    except (OSError, UnicodeError):
+        return False
+    return True
 
-    if not _unit_active(SLAM_UNIT):
-        return _result("refused", "mapping_not_running",
-                       detail="Nothing is recording, so there is no map to save.")
 
-    target = MAP_DIR / name
-    try:
-        MAP_DIR.mkdir(parents=True, exist_ok=True)
-    except OSError:
-        return _result("failed", "map_directory_unwritable")
+def _map_shape(yaml_path: Path, image_path: Path) -> str:
+    """Resolution and cell count, read back from what was actually written.
 
-    code, _ = _ros(
-        f"ros2 run nav2_map_server map_saver_cli -f {target} "
-        f"--ros-args -p save_map_timeout:=10000.0",
-        SAVE_TIMEOUT,
-    )
-    yaml_path, image_path = target.with_suffix(".yaml"), target.with_suffix(".pgm")
-    if code != 0 or not yaml_path.is_file() or not image_path.is_file():
-        return _result("failed", "map_save_failed",
-                       detail="map_saver_cli did not produce both a .yaml and a .pgm.")
-
-    # Read back what was written rather than reporting what was asked for. A
-    # saver that wrote a map of nothing still exits zero, and a one-cell map is
-    # the failure that would otherwise reach Nav2 as a working venue.
+    ``map_saver_cli`` exits zero having written a map of nothing, and a one-cell
+    map reaching Nav2 as a working venue is the failure worth catching here.
+    """
     resolution, cells = "", ""
     try:
         for line in yaml_path.read_text(encoding="utf-8").splitlines():
@@ -237,64 +312,144 @@ def save(params: dict) -> dict:
                 break
     except (OSError, UnicodeError):
         pass
+    return f"{cells or 'unknown'} cells at {resolution or 'unknown'} m"
+
+
+def save(params: dict) -> dict:
+    try:
+        name = _map_name(params)
+    except ValueError:
+        return _result("refused", "map_name_invalid")
+
+    if not _unit_active(SLAM_UNIT):
+        return _result("refused", "mapping_not_running",
+                       detail="Nothing is recording, so there is no map to save.")
+
+    try:
+        MAP_DIR.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return _result("failed", "map_directory_unwritable")
+
+    target = MAP_DIR / name
+    staged = MAP_DIR / f".staging-{name}"
+    code, _ = _ros(
+        f"timeout {SAVER_SHELL_TIMEOUT} ros2 run nav2_map_server map_saver_cli "
+        f"-f {shlex.quote(str(staged))} "
+        f"--ros-args -p save_map_timeout:={SAVER_MAP_TIMEOUT}",
+        SAVE_TIMEOUT,
+    )
+    staged_yaml, staged_pgm = staged.with_suffix(".yaml"), staged.with_suffix(".pgm")
+    if code != 0 or not staged_yaml.is_file() or not staged_pgm.is_file():
+        staged_yaml.unlink(missing_ok=True)
+        staged_pgm.unlink(missing_ok=True)
+        return _result("failed", "map_save_failed",
+                       detail="map_saver_cli did not produce both a .yaml and a .pgm.")
+
+    if not _promote(staged, target):
+        return _result("failed", "map_publish_failed",
+                       detail="The map was recorded but could not be renamed into place.")
+
+    shape = _map_shape(target.with_suffix(".yaml"), target.with_suffix(".pgm"))
+    evidence = [{"kind": "map.recorded", "usable": True, "detail": f"{name}: {shape}"}]
 
     # SLAM has done its job; leaving it holding /map is what stops Nav2 from
     # being startable next, and Conflicts= would then stop the map from ever
     # being used by the thing it was recorded for.
-    subprocess.run([SUDO, "-n", SYSTEMCTL, "stop", SLAM_UNIT],
-                   stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                   stderr=subprocess.DEVNULL, timeout=40, env={}, check=False)
+    #
+    # Reported as evidence rather than as a reason_code, because the job runner
+    # reads only `status` and `evidence` from this result and substitutes its
+    # own detail -- a reason_code saying SLAM is still up would reach nobody.
+    stopped = _stop_slam()
+    if stopped != 0:
+        evidence.append({
+            "kind": "mapping.session",
+            "usable": False,
+            "detail": "The map was saved but slam_toolbox is still running; "
+                      "flyto-nav2 will refuse to start until it is stopped.",
+        })
 
-    detail = f"{name}: {cells or 'unknown'} cells at {resolution or 'unknown'} m"
-    return _result(
-        "succeeded", "map_recorded", detail=detail,
-        evidence=[{"kind": "map.recorded", "usable": True, "detail": detail}],
-    )
+    return _result("succeeded", "map_recorded", detail=f"{name}: {shape}", evidence=evidence)
 
 
 def abort(params: dict) -> dict:
     if not _unit_active(SLAM_UNIT):
         return _result("succeeded", "mapping_not_running",
-                       detail="Nothing was recording.", evidence=[])
-    try:
-        subprocess.run([SUDO, "-n", SYSTEMCTL, "stop", SLAM_UNIT],
-                       stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                       stderr=subprocess.DEVNULL, timeout=40, env={}, check=False)
-    except (OSError, subprocess.SubprocessError):
-        return _result("failed", "slam_stop_failed")
+                       detail="Nothing was recording.")
+    stopped = _stop_slam()
+    if stopped is None:
+        return _result("failed", "slam_stop_failed",
+                       detail="systemctl could not be run.")
+    if stopped != 0:
+        return _result("failed", "slam_stop_failed",
+                       detail="systemctl did not stop SLAM; it may have been cancelled "
+                              "by a conflicting unit.")
     return _result("succeeded", "mapping_aborted", detail="Recording discarded.")
 
 
 HANDLERS = {"mapping.start": start, "mapping.save": save, "mapping.abort": abort}
 
+# A marker the prepared payload carries so `execute` can tell a payload this
+# executor minted from arbitrary JSON that reached it another way.
+PREPARED_MARKER = "flyto.mapping.prepared.v1"
 
-def main() -> int:
-    try:
-        request = json.loads(sys.stdin.read(65_536) or "{}")
-    except (ValueError, OSError):
-        print(json.dumps(_result("failed", "request_unreadable")), flush=True)
-        return 0
-    if not isinstance(request, dict) or request.get("contract_version") != CONTRACT_VERSION:
-        print(json.dumps(_result("failed", "contract_version_unsupported")), flush=True)
-        return 0
 
-    handler = HANDLERS.get(request.get("module_id"))
-    if handler is None:
-        print(json.dumps(_result("refused", "module_not_supported")), flush=True)
-        return 0
+def _emit(payload: dict) -> int:
+    """Write exactly one JSON value and nothing after it.
 
+    `_call` does `raw_decode` and then refuses anything with trailing bytes, so
+    a newline here rejects the whole response as `stdio_output_invalid` before
+    it is ever looked at. `print` was what broke every call this file made.
+    """
+    sys.stdout.write(json.dumps(payload, separators=(",", ":")))
+    sys.stdout.flush()
+    return 0
+
+
+def _prepare(envelope: dict) -> int:
+    request = envelope.get("request")
+    if not isinstance(request, dict):
+        return _emit({"marker": PREPARED_MARKER, "module_id": "", "params": {}})
+    module_id = request.get("module_id")
     params = request.get("params")
+    return _emit({
+        "marker": PREPARED_MARKER,
+        "module_id": module_id if isinstance(module_id, str) else "",
+        "params": params if isinstance(params, dict) else {},
+    })
+
+
+def _execute(envelope: dict) -> int:
+    prepared = envelope.get("prepared")
+    if not isinstance(prepared, dict) or prepared.get("marker") != PREPARED_MARKER:
+        return _emit(_result("failed", "prepared_payload_invalid"))
+    handler = HANDLERS.get(prepared.get("module_id"))
+    if handler is None:
+        return _emit(_result("refused", "module_not_supported"))
+    params = prepared.get("params")
     if not isinstance(params, dict):
         params = {}
-
     try:
-        result = handler(params)
+        return _emit(handler(params))
     except Exception:  # noqa: BLE001 - a crash must still be a valid result
         # The registry reads stdout, not exit codes, and an executor that dies
         # without answering is indistinguishable from one that hung.
-        result = _result("failed", "executor_error")
-    print(json.dumps(result), flush=True)
-    return 0
+        return _emit(_result("failed", "executor_error"))
+
+
+def main() -> int:
+    try:
+        envelope = json.loads(sys.stdin.read(65_536) or "{}")
+    except (ValueError, OSError):
+        return _emit(_result("failed", "request_unreadable"))
+    if not isinstance(envelope, dict) or envelope.get("contract_version") != CONTRACT_VERSION:
+        return _emit(_result("failed", "contract_version_unsupported"))
+
+    operation = envelope.get("operation")
+    if operation == "prepare":
+        return _prepare(envelope)
+    if operation == "execute":
+        return _execute(envelope)
+    return _emit(_result("failed", "operation_unsupported"))
 
 
 if __name__ == "__main__":
