@@ -228,3 +228,31 @@ def test_stream_ttl_is_clamped_rather_than_refused():
     assert CameraStreamCatalog("robot-front", ttl_seconds=0).ttl_seconds == 1
     with pytest.raises(CameraConfigurationError):
         CameraStreamCatalog("robot-front", ttl_seconds=True)
+
+
+# The two route strings are a network contract with consumers in another repo,
+# and nothing pinned them. Proven by mutation on 2026-08-27: rewriting both
+# literals to `/api/spaces/zone-camera/obs` and `/stream-catalog` left the whole
+# camera suite green (42 passed) while both consumers would 404.
+#
+# flyto-cloud's `scripts/adapters/vision_stream_adapter.py` spells the catalog
+# path as its `DEFAULT_CATALOG_PATH`, and `flyto-modules-vision`'s
+# `gateway.OBSERVATION_PATH` spells the observation one. Vendored here as
+# literals rather than imported, because importing across repos is what the
+# architecture's "no cross-repository source imports" rule forbids -- and
+# because a shared constant that moved would move on both sides at once, which
+# is the failure this is meant to catch.
+CONSUMER_OBSERVATION_PATH = "/api/spaces/zone-camera/observation"
+CONSUMER_STREAM_PATH = "/api/spaces/zone-camera/streams"
+
+
+def test_the_route_literals_are_the_ones_the_consumers_ask_for():
+    """Renaming either of these is a silent 404 in two other repositories."""
+    assert ROUTE == CONSUMER_OBSERVATION_PATH
+    assert STREAM_ROUTE == CONSUMER_STREAM_PATH
+
+
+def test_the_contract_version_is_the_one_the_adapter_validates():
+    """`vision_stream_adapter.describe()` refuses any other value by version
+    rather than misreading it, so this string is load-bearing across repos."""
+    assert CATALOG_CONTRACT == "flyto.vision.stream-catalog.v1"
