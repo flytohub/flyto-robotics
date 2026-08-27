@@ -75,6 +75,7 @@ setup(
             "flyto-recovery-portal = flyto_robotics.recovery_portal:main",
             "flyto-resource-agent = flyto_robotics.resource_agent:main",
             "flyto-ros2-readiness-probe = flyto_robotics.ros2_probe_node:main",
+            "parameter_bridge_guard = flyto_robotics.bridge_guard:main",
             "ros2_closed_loop_lab = flyto_robotics.ros2_closed_loop_lab:main",
             "ros2_safety_supervisor = flyto_robotics.ros2_safety_node:main",
             "ros2_sensor_guard = flyto_robotics.ros2_sensor_guard:main",

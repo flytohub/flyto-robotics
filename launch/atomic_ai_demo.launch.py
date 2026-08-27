@@ -41,9 +41,10 @@ def _launch_runtime(context: object) -> list[object]:
         launch_arguments={"gz_args": " ".join(gz_arguments)}.items(),
     )
     bridge = Node(
-        package="ros_gz_bridge",
-        executable="parameter_bridge",
+        package="flyto_robotics",
+        executable="parameter_bridge_guard",
         name="flyto_atomic_gazebo_bridge",
+        ros_arguments=["--disable-rosout-logs"],
         parameters=[{"config_file": str(share / "config/bridge.yaml")}],
         output="screen",
     )
