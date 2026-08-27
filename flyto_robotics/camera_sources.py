@@ -14,9 +14,13 @@ from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 
 from .camera_observation import (
+    DEFAULT_STREAM_TTL,
+    MAX_STREAM_LABEL,
+    STREAM_PROTOCOLS,
     CameraConfigurationError,
     validate_bind,
     validate_source_id,
+    validate_stream_url,
     validate_zone,
 )
 
@@ -102,6 +106,14 @@ class CameraSettings:
     width: int
     height: int
     framerate: str
+    #: Where this camera can be watched. Empty is the honest default: most
+    #: robots have no media server, and a missing optional address is not a
+    #: fault -- the catalog says `configured: false` and the observation route
+    #: carries on unaffected.
+    stream_url: str
+    stream_protocol: str
+    stream_label: str
+    stream_ttl_seconds: int
 
     @classmethod
     def from_environ(cls, environ: Mapping[str, str] | None = None) -> CameraSettings:
@@ -138,10 +150,23 @@ class CameraSettings:
         height = _camera_dimension(env.get("FLYTO_CAMERA_HEIGHT", "720"),
                                    "camera_height_invalid")
         framerate = _camera_framerate(env.get("FLYTO_CAMERA_FRAMERATE", "10"))
+        stream_url = env.get("FLYTO_CAMERA_STREAM_URL", "")
+        if stream_url:
+            stream_url = validate_stream_url(stream_url)
+        stream_protocol = _bounded_text(env.get("FLYTO_CAMERA_STREAM_PROTOCOL", "mjpeg"),
+                                        16, "camera_stream_protocol_invalid")
+        if stream_protocol not in STREAM_PROTOCOLS:
+            raise CameraConfigurationError("camera_stream_protocol_invalid")
+        stream_label = _bounded_text(env.get("FLYTO_CAMERA_STREAM_LABEL", ""),
+                                     MAX_STREAM_LABEL, "camera_stream_label_invalid",
+                                     allow_empty=True)
+        stream_ttl = _integer(env.get("FLYTO_CAMERA_STREAM_TTL_SECONDS",
+                                      str(DEFAULT_STREAM_TTL)), "camera_stream_ttl_invalid")
         return cls(provider, source_id, rotation, flip, device, topic,
                    validate_bind(env.get("FLYTO_CAMERA_BIND", "127.0.0.1")), port,
                    validate_zone(env.get("FLYTO_CAMERA_ZONE", "camera-zone")), freshness,
-                   width, height, framerate)
+                   width, height, framerate,
+                   stream_url, stream_protocol, stream_label, stream_ttl)
 
     def public_metadata(self) -> dict:
         return {"provider": self.provider, "source_id": self.source_id}

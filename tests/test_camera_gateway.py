@@ -253,6 +253,10 @@ def test_avfoundation_main_clean_stop_returns_success_semantics(monkeypatch):
         freshness_seconds = 2.0
         provider = "avfoundation"
         source_id = "camera-0"
+        stream_url = ""
+        stream_protocol = "mjpeg"
+        stream_label = ""
+        stream_ttl_seconds = 120
 
     class Server:
         daemon_threads = False

@@ -4,9 +4,12 @@ import pytest
 
 from flyto_robotics.camera_gateway import _settings
 from flyto_robotics.camera_observation import (
+    CATALOG_CONTRACT,
     ROUTE,
+    STREAM_ROUTE,
     CameraConfigurationError,
     CameraObservation,
+    CameraStreamCatalog,
     validate_bind,
 )
 
@@ -99,3 +102,129 @@ def test_zone_and_freshness_are_bounded():
         CameraObservation("ward/a", 2)
     with pytest.raises(CameraConfigurationError):
         CameraObservation("ward-a", 301)
+
+
+def test_unconfigured_catalog_says_so_rather_than_inventing_an_address():
+    """A robot with no media server must be distinguishable from a broken one.
+
+    An empty stream list on its own reads as "this room has no cameras" and
+    sends an operator looking for a hardware fault that is not there.
+    """
+    catalog = CameraStreamCatalog("robot-front")
+    body = catalog.payload()
+    assert body["contract_version"] == CATALOG_CONTRACT
+    assert body["configured"] is False
+    assert body["streams"] == []
+    assert "FLYTO_CAMERA_STREAM_URL" in body["unconfigured_reason"]
+
+
+def test_configured_catalog_serves_the_contract_the_adapter_validates():
+    catalog = CameraStreamCatalog(
+        "robot-front",
+        url="http://127.0.0.1:8080/stream?topic=/camera/image_raw",
+        protocol="mjpeg",
+        label="TurtleBot3 front camera",
+    )
+    body = catalog.payload()
+    assert body["contract_version"] == CATALOG_CONTRACT
+    assert body["configured"] is True
+    assert body["unconfigured_reason"] == ""
+    (row,) = body["streams"]
+    assert row["resource_id"] == "robot-front"
+    assert row["zone_id"] == "robot-front"
+    assert row["protocol"] == "mjpeg"
+    assert row["url"] == "http://127.0.0.1:8080/stream?topic=/camera/image_raw"
+    assert row["label"] == "TurtleBot3 front camera"
+    assert row["ttl_seconds"] == 120
+
+
+def test_a_camera_answers_both_questions_under_one_id():
+    """`resource_id` must equal the zone the observation route reports.
+
+    One camera answering "what is there" and "where to watch it" under two
+    different ids is two cameras to whoever approves them, and approving the
+    stream would not be approving the thing that produced the evidence.
+    """
+    state = CameraObservation(
+        "robot-front", 2, clock=lambda: 1,
+        streams=CameraStreamCatalog("robot-front", url="http://127.0.0.1:8080/s"),
+    )
+    state.accept_frame()
+    (observed,) = state.payload()
+    (offered,) = state.streams.payload()["streams"]
+    assert observed["zone"] == offered["zone_id"] == offered["resource_id"]
+
+
+def test_streams_route_is_absent_rather_than_empty_when_no_catalog_is_built():
+    """404, not an empty catalog: "this build does not serve that contract" and
+    "this robot has no media server" are different answers."""
+    state = CameraObservation("robot-front", 2, clock=lambda: 1)
+    assert state.handle("GET", STREAM_ROUTE).status == 404
+
+
+def test_streams_route_refuses_anything_but_get():
+    state = CameraObservation(
+        "robot-front", 2, clock=lambda: 1, streams=CameraStreamCatalog("robot-front"),
+    )
+    result = state.handle("POST", STREAM_ROUTE)
+    assert result.status == 405
+    assert result.allow == "GET"
+
+
+def test_streams_route_serves_ascii_json_the_adapter_can_parse():
+    state = CameraObservation(
+        "robot-front", 2, clock=lambda: 1,
+        streams=CameraStreamCatalog(
+            "robot-front", url="http://127.0.0.1:8080/s", label="前視鏡頭",
+        ),
+    )
+    result = state.handle("GET", STREAM_ROUTE)
+    assert result.status == 200
+    body = json.loads(result.body)
+    assert body["contract_version"] == CATALOG_CONTRACT
+    # Non-ASCII labels survive as escapes rather than breaking the ascii encode.
+    assert body["streams"][0]["label"] == "前視鏡頭"
+
+
+def test_observation_route_is_unaffected_by_a_configured_stream():
+    """Evidence must never depend on anything being watchable."""
+    state = CameraObservation(
+        "robot-front", 2, clock=lambda: 1,
+        streams=CameraStreamCatalog("robot-front", url="http://127.0.0.1:8080/s"),
+    )
+    state.accept_frame()
+    result = state.handle("GET", ROUTE)
+    assert result.status == 200
+    assert json.loads(result.body)[0]["usable"] is True
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "not-a-url",
+        "ftp://host/stream",          # not a scheme a browser opens
+        "http://",                    # no host
+        "http://host/\nstream",       # control character
+        "http://host/" + "x" * 3000,  # unbounded
+        " http://host/stream",        # unstripped
+    ],
+)
+def test_stream_url_is_refused_when_it_is_not_one_a_browser_could_open(url):
+    with pytest.raises(CameraConfigurationError):
+        CameraStreamCatalog("robot-front", url=url)
+
+
+def test_stream_protocol_and_label_are_bounded():
+    with pytest.raises(CameraConfigurationError):
+        CameraStreamCatalog("robot-front", protocol="carrier-pigeon")
+    with pytest.raises(CameraConfigurationError):
+        CameraStreamCatalog("robot-front", label="x" * 129)
+
+
+def test_stream_ttl_is_clamped_rather_than_refused():
+    """A host misconfigured with a week-long lifetime should serve a short one,
+    not stop serving. The refusal that matters happens where it is minted."""
+    assert CameraStreamCatalog("robot-front", ttl_seconds=100_000).ttl_seconds == 900
+    assert CameraStreamCatalog("robot-front", ttl_seconds=0).ttl_seconds == 1
+    with pytest.raises(CameraConfigurationError):
+        CameraStreamCatalog("robot-front", ttl_seconds=True)
