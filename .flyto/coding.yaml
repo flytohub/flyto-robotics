@@ -5,11 +5,83 @@ version: flyto.coding-config.v1
 
 checks:
   - name: verify
-    # Pin the interpreter to the repository-local virtualenv: the sanitized
-    # worker's bare `python3` is the CommandLineTools build, which has neither
-    # ruff nor pytest, and any user-site interpreter is machine-specific. `.venv`
-    # is self-contained and checked out beside the Makefile, so verify is
-    # reproducible on every worker.
-    argv: ["make", "PYTHON=.venv/bin/python", "verify"]
+    argv:
+      - "python"
+      - "-c"
+      - |
+        import os
+        import pathlib
+        import subprocess
+        import sys
+        import tempfile
+
+        candidates = [(sys.executable,)]
+        if os.name == "nt":
+            candidates.extend(("py", version) for version in ("-3.13", "-3.12", "-3.11"))
+        else:
+            candidates.extend((name,) for name in ("python3.13", "python3.12", "python3.11", "python3"))
+
+        interpreter = None
+        for candidate in candidates:
+            try:
+                probe = subprocess.run(
+                    [*candidate, "-c", "import sys; raise SystemExit(sys.version_info < (3, 11))"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    check=False,
+                )
+            except OSError:
+                continue
+            if probe.returncode == 0:
+                interpreter = candidate
+                break
+        if interpreter is None:
+            raise SystemExit("verification requires Python 3.11 or newer")
+
+        root = pathlib.Path.cwd()
+        clean_environment = os.environ.copy()
+        clean_environment["PYTHONNOUSERSITE"] = "1"
+        with tempfile.TemporaryDirectory(prefix="flyto-robotics-verify-") as environment:
+            subprocess.run(
+                [*interpreter, "-m", "venv", environment],
+                check=True,
+                env=clean_environment,
+            )
+            environment_root = pathlib.Path(environment)
+            python = environment_root / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+            subprocess.run(
+                [
+                    str(python),
+                    "-m",
+                    "pip",
+                    "--isolated",
+                    "install",
+                    "-r",
+                    str(root / "requirements-dev.txt"),
+                ],
+                check=True,
+                env=clean_environment,
+            )
+            subprocess.run(
+                [
+                    str(python),
+                    "-m",
+                    "pip",
+                    "--isolated",
+                    "install",
+                    "--no-build-isolation",
+                    "--no-deps",
+                    "--editable",
+                    str(root),
+                ],
+                check=True,
+                env=clean_environment,
+            )
+            subprocess.run(
+                ["make", "PYTHON=" + str(python), "verify"],
+                cwd=root,
+                check=True,
+                env=clean_environment,
+            )
     timeout_seconds: 900
     required: true
