@@ -1,0 +1,8 @@
+{
+  "contract_version": "device-executor-v1",
+  "provider": "flyto-mapping",
+  "module_ids": ["mapping.start", "mapping.save", "mapping.abort"],
+  "transport": "json_stdio",
+  "command": ["/usr/bin/python3", "/home/ubuntu/executors/flyto_mapping_executor.py"],
+  "timeout_seconds": 120
+}
