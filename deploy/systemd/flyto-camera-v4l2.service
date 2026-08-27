@@ -15,6 +15,8 @@ Description=Flyto robot camera V4L2 to ROS 2 publisher
 After=network-online.target
 Wants=network-online.target
 ConditionPathExists=/dev/v4l/by-id/usb-XC-TECH_Web_Camera_20251103.1921-video-index0
+StartLimitIntervalSec=300
+StartLimitBurst=3
 
 [Service]
 Type=simple
