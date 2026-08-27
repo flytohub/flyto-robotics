@@ -1,0 +1,49 @@
+# Nav2 — the navigation stack the robot already had installed and never ran.
+#
+# `ros2_action_executor.py` is a full NavigateToPose client and refuses anything
+# whose interface_type is not `nav2_msgs/action/NavigateToPose`, so the whole
+# semantic-navigation path depends on this action server existing. It did not,
+# because nothing started Nav2. Verified 2026-08-27: the stack comes up on this
+# Pi 4 (amcl, map_server, planner/controller/smoother/behavior servers,
+# bt_navigator, both costmaps) and the LiDAR writes real obstacles into the
+# local costmap — 1333 occupied cells in a 60x60 window at 5 cm.
+#
+# ## Why the map path is a condition and not just a parameter
+#
+# The repository ships `maps/nav2_lab.pgm`: a 20x20-pixel synthetic 8 m square
+# with a drawn-on perimeter, at 0.4 m per cell. It exists so the launch files
+# have something to load, and localising against it would place the robot in a
+# room that does not exist — AMCL would converge, the costmap would look
+# plausible, and every goal would be computed in a fictional frame. That is
+# worse than not navigating, because it fails silently.
+#
+# So this unit refuses to start until a map recorded from this actual venue
+# exists at the path below. `deploy/make-map.sh` is what puts one there.
+# Deliberately not enabled by default for the same reason.
+[Unit]
+Description=Flyto Nav2 navigation stack
+After=turtlebot3-bringup.service
+Requires=turtlebot3-bringup.service
+ConditionPathExists=/home/ubuntu/.flyto/maps/lab.yaml
+StartLimitIntervalSec=300
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=ubuntu
+Environment=PYTHONUNBUFFERED=1
+Environment=ROS_DOMAIN_ID=30
+Environment=TURTLEBOT3_MODEL=burger
+ExecStart=/bin/bash -lc 'source /opt/ros/jazzy/setup.bash && exec ros2 launch turtlebot3_navigation2 navigation2.launch.py \
+  use_sim_time:=False \
+  map:=/home/ubuntu/.flyto/maps/lab.yaml'
+Restart=on-failure
+RestartSec=10
+# Nav2 brings its lifecycle nodes down in order; SIGINT is what its launch
+# handles, and killing the group outright leaves bond timers complaining on the
+# next start.
+KillSignal=SIGINT
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target
