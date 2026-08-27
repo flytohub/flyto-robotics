@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
@@ -22,6 +23,102 @@ SAFETY_STOP_REASONS = {"emergency_stop", *FAULT_SCENARIOS.values()}
 
 class Ros2ActionExecutionError(RuntimeError):
     """Raised when an authorized action cannot complete safely."""
+
+
+def _wait_for_stable_readiness(
+    predicate: Callable[[], bool],
+    *,
+    spin_once: Callable[[float], None],
+    timeout_seconds: float,
+    stability_seconds: float,
+    clock: Callable[[], float] = time.monotonic,
+) -> bool:
+    """Require continuously ready runtime state within one absolute deadline."""
+
+    for value, label, minimum, maximum in (
+        (timeout_seconds, "readiness timeout", 0.1, 60.0),
+        (stability_seconds, "readiness stability", 0.0, 10.0),
+    ):
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(float(value))
+            or not minimum <= float(value) <= maximum
+        ):
+            raise ValueError(f"{label} is outside its safe range")
+    started_at = clock()
+    if (
+        isinstance(started_at, bool)
+        or not isinstance(started_at, (int, float))
+        or not math.isfinite(float(started_at))
+    ):
+        return False
+    deadline = float(started_at) + float(timeout_seconds)
+    ready_since: float | None = None
+    while True:
+        observed_at = clock()
+        if (
+            isinstance(observed_at, bool)
+            or not isinstance(observed_at, (int, float))
+            or not math.isfinite(float(observed_at))
+            or float(observed_at) < float(started_at)
+        ):
+            return False
+        if predicate():
+            if ready_since is None:
+                ready_since = observed_at
+            if observed_at - ready_since >= stability_seconds:
+                return True
+        else:
+            ready_since = None
+        remaining = deadline - clock()
+        if remaining <= 0:
+            return False
+        spin_once(min(0.1, remaining))
+
+
+def _inputs_ready_for_goal(
+    latest: dict[str, Any],
+    *,
+    sensor_timeout_seconds: float,
+    transform_ready: Callable[[], bool],
+    clock: Callable[[], float] = time.monotonic,
+) -> bool:
+    """Require current sensor receipts, reset safety, and TF before dispatch."""
+
+    timeout = _finite(
+        sensor_timeout_seconds,
+        "sensor_timeout_seconds",
+        minimum=0.05,
+        maximum=5.0,
+    )
+    now = clock()
+    if (
+        isinstance(now, bool)
+        or not isinstance(now, (int, float))
+        or not math.isfinite(float(now))
+    ):
+        return False
+    odometry_seen_at = latest.get("odometry_seen_at")
+    lidar_seen_at = latest.get("lidar_seen_at")
+    if (
+        latest.get("pose") is None
+        or latest.get("safety") is not False
+        or odometry_seen_at is None
+        or lidar_seen_at is None
+    ):
+        return False
+    for observed_at in (odometry_seen_at, lidar_seen_at):
+        if (
+            isinstance(observed_at, bool)
+            or not isinstance(observed_at, (int, float))
+            or not math.isfinite(float(observed_at))
+        ):
+            return False
+        age = float(now) - float(observed_at)
+        if age < 0.0 or age > timeout:
+            return False
+    return bool(transform_ready())
 
 
 @dataclass(frozen=True)
@@ -313,6 +410,7 @@ def execute_rclpy_navigation(
     prepared: PreparedNavigation,
     *,
     odometry_topic: str,
+    lidar_topic: str = "/flyto/scan",
     safety_state_topic: str,
     safety_reason_topic: str,
     fault_state_topic: str,
@@ -320,6 +418,7 @@ def execute_rclpy_navigation(
     emergency_stop_service: str,
     scenario: str,
     cancel_after_displacement_m: float = 0.25,
+    sensor_timeout_seconds: float = 0.55,
 ) -> NavigationOutcome:
     """Execute one real ROS action while monitoring odometry and independent stop."""
 
@@ -328,9 +427,18 @@ def execute_rclpy_navigation(
     from nav2_msgs.action import NavigateToPose
     from nav_msgs.msg import Odometry
     from rclpy.action import ActionClient
-    from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
+    from rclpy.duration import Duration
+    from rclpy.qos import (
+        DurabilityPolicy,
+        QoSProfile,
+        ReliabilityPolicy,
+        qos_profile_sensor_data,
+    )
+    from rclpy.time import Time
+    from sensor_msgs.msg import LaserScan
     from std_msgs.msg import Bool, String
     from std_srvs.srv import Trigger
+    from tf2_ros import Buffer, TransformListener
 
     if scenario not in {
         "success",
@@ -345,8 +453,16 @@ def execute_rclpy_navigation(
         minimum=0.05,
         maximum=10.0,
     )
+    _finite(
+        sensor_timeout_seconds,
+        "sensor_timeout_seconds",
+        minimum=0.05,
+        maximum=5.0,
+    )
     latest: dict[str, Any] = {
         "pose": None,
+        "odometry_seen_at": None,
+        "lidar_seen_at": None,
         "safety": None,
         "safety_reason": None,
         "safety_seen_at": None,
@@ -356,6 +472,10 @@ def execute_rclpy_navigation(
 
     def on_odometry(message: Any) -> None:
         latest["pose"] = _station_from_odometry(message)
+        latest["odometry_seen_at"] = time.monotonic()
+
+    def on_lidar(_message: Any) -> None:
+        latest["lidar_seen_at"] = time.monotonic()
 
     def on_safety(message: Any) -> None:
         latest["safety"] = bool(message.data)
@@ -374,6 +494,12 @@ def execute_rclpy_navigation(
             latest["fault_seen_at"] = time.monotonic()
 
     odom_sub = node.create_subscription(Odometry, odometry_topic, on_odometry, 20)
+    lidar_sub = node.create_subscription(
+        LaserScan,
+        lidar_topic,
+        on_lidar,
+        qos_profile_sensor_data,
+    )
     safety_qos = QoSProfile(
         depth=1,
         durability=DurabilityPolicy.TRANSIENT_LOCAL,
@@ -415,20 +541,36 @@ def execute_rclpy_navigation(
         prepared.target.interface_name,
     )
     stop_client = node.create_client(Trigger, emergency_stop_service)
+    transform_buffer = Buffer(cache_time=Duration(seconds=10.0))
+    transform_listener = TransformListener(
+        transform_buffer,
+        node,
+        spin_thread=False,
+    )
     try:
-        startup_deadline = time.monotonic() + 30.0
-        while (
-            latest["pose"] is None or latest["safety"] is None
-        ) and time.monotonic() < startup_deadline:
-            rclpy.spin_once(node, timeout_sec=0.1)
-        if latest["pose"] is None:
-            raise Ros2ActionExecutionError("fresh odometry was not observed")
-        if latest["safety"] is not False:
-            raise Ros2ActionExecutionError("emergency stop is not reset")
         if not action_client.wait_for_server(timeout_sec=15.0):
             raise Ros2ActionExecutionError("authorized action server is unavailable")
         if not stop_client.wait_for_service(timeout_sec=5.0):
             raise Ros2ActionExecutionError("independent emergency stop is unavailable")
+        if not _wait_for_stable_readiness(
+            lambda: _inputs_ready_for_goal(
+                latest,
+                sensor_timeout_seconds=sensor_timeout_seconds,
+                transform_ready=lambda: transform_buffer.can_transform(
+                    prepared.frame_id,
+                    "base_link",
+                    Time(),
+                    timeout=Duration(seconds=0.0),
+                ),
+            ),
+            spin_once=lambda timeout: rclpy.spin_once(node, timeout_sec=timeout),
+            timeout_seconds=30.0,
+            stability_seconds=0.15,
+        ):
+            raise Ros2ActionExecutionError(
+                "fresh odometry, fresh LiDAR, reset safety, and stable "
+                f"{prepared.frame_id} to base_link transform were not observed"
+            )
 
         initial_pose = latest["pose"]
         monitor = NavigationExecutionMonitor(
@@ -436,6 +578,11 @@ def execute_rclpy_navigation(
             initial_pose,
             started_at=datetime.now(timezone.utc),
         )
+
+        # Keep the listener alive until action teardown. Each Nav2 process has
+        # its own TF buffer, so a stable local window is the bounded signal used
+        # before goal submission rather than a one-shot topic sighting.
+        _ = transform_listener
 
         goal = NavigateToPose.Goal()
         goal.pose.header.frame_id = prepared.frame_id
@@ -448,6 +595,11 @@ def execute_rclpy_navigation(
         def on_feedback(message: Any) -> None:
             monitor.feedback(float(message.feedback.distance_remaining))
 
+        # Arm the independent watchdog before goal submission. The bounded
+        # freshness gate above prevents an old startup receipt from being
+        # mistaken for an execution-time dropout, while a real loss during the
+        # action handshake still fails closed before motion can continue.
+        publish_execution_state(True)
         monitor.begin_goal_submission()
         send_future = action_client.send_goal_async(
             goal,
@@ -463,7 +615,6 @@ def execute_rclpy_navigation(
                 finished_at=datetime.now(timezone.utc),
             )
         monitor.accept_goal()
-        publish_execution_state(True)
         result_future = goal_handle.get_result_async()
         deadline = time.monotonic() + prepared.target.timeout_seconds
         cancel_future: Any | None = None
@@ -542,6 +693,7 @@ def execute_rclpy_navigation(
         action_client.destroy()
         node.destroy_client(stop_client)
         node.destroy_subscription(odom_sub)
+        node.destroy_subscription(lidar_sub)
         node.destroy_subscription(safety_sub)
         node.destroy_subscription(reason_sub)
         node.destroy_subscription(fault_sub)

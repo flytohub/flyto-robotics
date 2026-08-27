@@ -15,6 +15,22 @@ FAULT_SCENARIOS = {
 }
 
 
+class TerminationRequest:
+    """Record a process termination request without entering ROS from a handler."""
+
+    def __init__(self) -> None:
+        self.signum: int | None = None
+
+    @property
+    def requested(self) -> bool:
+        return self.signum is not None
+
+    def record(self, signum: int, _frame: Any = None) -> None:
+        """Keep the signal handler lock-free and limited to one assignment."""
+
+        self.signum = int(signum)
+
+
 class FaultInjectionController:
     """Arm one bounded fault only after the rover receives a motion command."""
 
@@ -23,17 +39,33 @@ class FaultInjectionController:
         scenario: str,
         *,
         delay_seconds: float,
+        minimum_displacement_m: float = 0.0,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         if scenario not in FAULT_SCENARIOS:
             raise ValueError("fault scenario is unsupported")
-        if not math.isfinite(delay_seconds) or not 0.05 <= delay_seconds <= 30.0:
+        if (
+            isinstance(delay_seconds, bool)
+            or not isinstance(delay_seconds, (int, float))
+            or not math.isfinite(float(delay_seconds))
+            or not 0.05 <= float(delay_seconds) <= 30.0
+        ):
             raise ValueError("fault delay is outside its safe range")
+        if (
+            isinstance(minimum_displacement_m, bool)
+            or not isinstance(minimum_displacement_m, (int, float))
+            or not math.isfinite(float(minimum_displacement_m))
+            or not 0.0 <= float(minimum_displacement_m) <= 10.0
+        ):
+            raise ValueError("fault displacement is outside its safe range")
         self.scenario = scenario
         self.delay_seconds = float(delay_seconds)
+        self.minimum_displacement_m = float(minimum_displacement_m)
         self.clock = clock
         self.motion_started_at: float | None = None
         self.activated_at: float | None = None
+        self.initial_position: tuple[float, float] | None = None
+        self.observed_displacement_m = 0.0
 
     @property
     def active(self) -> bool:
@@ -42,8 +74,37 @@ class FaultInjectionController:
     def observe_command(self, linear_x: float, angular_z: float) -> None:
         if self.motion_started_at is not None:
             return
+        if any(
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(float(value))
+            for value in (linear_x, angular_z)
+        ):
+            return
         if abs(float(linear_x)) >= 0.01 or abs(float(angular_z)) >= 0.01:
             self.motion_started_at = self.clock()
+
+    def observe_odometry(self, x: float, y: float) -> None:
+        """Track direct physical displacement without trusting commanded motion."""
+
+        if any(
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(float(value))
+            for value in (x, y)
+        ):
+            return
+        position = (float(x), float(y))
+        if self.initial_position is None:
+            self.initial_position = position
+            return
+        self.observed_displacement_m = max(
+            self.observed_displacement_m,
+            math.hypot(
+                position[0] - self.initial_position[0],
+                position[1] - self.initial_position[1],
+            ),
+        )
 
     def activation_due(self) -> bool:
         return (
@@ -51,6 +112,7 @@ class FaultInjectionController:
             and self.motion_started_at is not None
             and not self.active
             and self.clock() - self.motion_started_at >= self.delay_seconds
+            and self.observed_displacement_m >= self.minimum_displacement_m
         )
 
     def activate(self) -> None:
@@ -81,6 +143,7 @@ class Ros2SensorGuard:
             DurabilityPolicy,
             QoSProfile,
             ReliabilityPolicy,
+            qos_profile_sensor_data,
         )
         from sensor_msgs.msg import LaserScan
         from std_msgs.msg import String
@@ -98,11 +161,15 @@ class Ros2SensorGuard:
         ):
             self.node.declare_parameter(name, default)
         self.node.declare_parameter("fault_delay_seconds", 0.35)
+        self.node.declare_parameter("fault_min_displacement_m", 0.10)
         scenario = str(self.node.get_parameter("fault_scenario").value)
         self.controller = FaultInjectionController(
             scenario,
             delay_seconds=float(
                 self.node.get_parameter("fault_delay_seconds").value
+            ),
+            minimum_displacement_m=float(
+                self.node.get_parameter("fault_min_displacement_m").value
             ),
         )
         self._transition_type = Transition
@@ -113,11 +180,10 @@ class Ros2SensorGuard:
             durability=DurabilityPolicy.TRANSIENT_LOCAL,
             reliability=ReliabilityPolicy.RELIABLE,
         )
-        relay_qos = QoSProfile(
-            depth=10,
-            durability=DurabilityPolicy.VOLATILE,
-            reliability=ReliabilityPolicy.RELIABLE,
-        )
+        # LaserScan is a freshness signal, not a durable event stream.  The
+        # standard sensor-data profile keeps recent samples without reliable
+        # retransmission/backlog starving the safety path under CPU pressure.
+        relay_qos = qos_profile_sensor_data
         self.odometry_publisher = self.node.create_publisher(
             Odometry,
             str(self.node.get_parameter("odometry_topic").value),
@@ -162,6 +228,10 @@ class Ros2SensorGuard:
         self.controller.observe_command(message.linear.x, message.angular.z)
 
     def _relay_odometry(self, message: Any) -> None:
+        self.controller.observe_odometry(
+            message.pose.pose.position.x,
+            message.pose.pose.position.y,
+        )
         self._tick()
         if self.controller.should_forward("odometry"):
             self.odometry_publisher.publish(message)
@@ -199,21 +269,41 @@ class Ros2SensorGuard:
 
 
 def main() -> None:
+    import signal
+
     import rclpy
     from rclpy.node import Node
+    from rclpy.signals import SignalHandlerOptions
 
-    rclpy.init()
-    node = Node("sensor_guard")
-    Ros2SensorGuard(node)
+    termination = TerminationRequest()
+    managed_signals = (signal.SIGINT, signal.SIGTERM)
+    previous_handlers = {
+        managed_signal: signal.getsignal(managed_signal)
+        for managed_signal in managed_signals
+    }
+    for managed_signal in managed_signals:
+        signal.signal(managed_signal, termination.record)
+
+    node: Node | None = None
     try:
-        rclpy.spin(node)
+        # ROS shutdown is deliberately performed from normal control flow.
+        # Calling into rclpy from an asynchronous signal handler can strand an
+        # executor during launch teardown, so the handler above only records.
+        rclpy.init(signal_handler_options=SignalHandlerOptions.NO)
+        node = Node("sensor_guard")
+        Ros2SensorGuard(node)
+        while rclpy.ok() and not termination.requested:
+            rclpy.spin_once(node, timeout_sec=0.1)
     except KeyboardInterrupt:
         pass
     except RuntimeError:
         if rclpy.ok():
             raise
     finally:
-        node.destroy_node()
+        for managed_signal, previous_handler in previous_handlers.items():
+            signal.signal(managed_signal, previous_handler)
+        if node is not None:
+            node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()
 
