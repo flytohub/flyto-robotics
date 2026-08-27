@@ -1,0 +1,59 @@
+# Robot-local camera observation gateway — the evidence half of the camera.
+#
+# Adapted from the "camera" lifecycle profile in
+# flyto_robotics/data/lifecycle-profiles.json. Four deliberate departures from
+# that template, because this robot was deployed by hand rather than by the
+# lifecycle installer and the stock unit does not start here:
+#
+#   1. Requires= named flyto-robot-agent.service, which this robot does not
+#      have. The real precondition is the process that owns the camera, so it
+#      requires the v4l2 driver instead. Without this the unit fails on a
+#      dependency that will never exist.
+#   2. The template calls {python} directly. provider=ros_image imports rclpy
+#      and sensor_msgs, so the Jazzy environment has to be sourced first — the
+#      same bash -lc form flyto-delivery.service already uses.
+#   3. WorkingDirectory is the release the delivery gateway actually runs from.
+#      /home/ubuntu/flyto-robotics is a stale rsync copy that predates these
+#      modules and has no camera_gateway.py at all.
+#   4. ProtectHome=yes would make that release directory unreadable, so it is
+#      read-only here, and ROS is pointed at the private /tmp for its logs.
+#
+# No pixels cross this boundary: camera_observation retains only a monotonic
+# acceptance time, and validate_bind() refuses any bind that is not literal
+# IPv4 loopback.
+[Unit]
+Description=Flyto robot-local camera observation gateway
+Requires=flyto-camera-v4l2.service
+After=flyto-camera-v4l2.service
+StartLimitIntervalSec=300
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/.flyto/releases/flyto-robotics-8c751d7
+EnvironmentFile=/home/ubuntu/flyto-camera.env
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONPATH=/home/ubuntu/.flyto/releases/flyto-robotics-8c751d7
+Environment=ROS_DOMAIN_ID=30
+Environment=ROS_HOME=/tmp/flyto-camera
+Environment=ROS_LOG_DIR=/tmp/flyto-camera/log
+ExecStart=/bin/bash -lc 'source /opt/ros/jazzy/setup.bash && exec python3 -m flyto_robotics.camera_gateway'
+Restart=on-failure
+RestartSec=5
+KillSignal=SIGINT
+TimeoutStopSec=20
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ProtectControlGroups=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_NETLINK AF_UNIX
+
+[Install]
+WantedBy=multi-user.target
