@@ -24,6 +24,9 @@ from .camera_observation import (
     validate_zone,
 )
 
+# Both, and neither supersedes the other: `avfoundation` is the capture path
+# for a camera attached to the operator's workstation, `ros_image` for one on
+# the robot. See DECISIONS.md, 2026-08-13.
 PROVIDERS = frozenset({"ros_image", "avfoundation"})
 FLIPS = frozenset({"none", "horizontal", "vertical", "both"})
 ROTATIONS = frozenset({0, 90, 180, 270})

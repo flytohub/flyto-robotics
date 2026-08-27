@@ -481,9 +481,22 @@ The planner sees abilities, not implementation languages.
 # Robot-local camera observation producer
 
 The provider-neutral `camera` lifecycle profile extends `generic` and owns the
-local producer for the fixed `GET /api/spaces/zone-camera/observation`
-contract. The `ros2` profile extends `camera` and adds only its ROS service; all
-inherited units remain byte-identical. A
+local producer for two fixed routes: `GET /api/spaces/zone-camera/observation`,
+which answers what can be seen here now, and
+`GET /api/spaces/zone-camera/streams`, which answers where it can be watched
+under `flyto.vision.stream-catalog.v1`. They are separate because evidence must
+never depend on anything being watchable — a venue whose media path is down must
+still be able to prove a zone was visible — and because only one of them carries
+an address a browser will open. `camera` and `ros2` are sibling profiles: both extend `generic`,
+neither extends the other, and a device activates exactly one of them. The
+inherited `generic` units remain byte-identical in each.
+
+Siblings rather than a chain because `_resolve` enforces strictly-additive
+inheritance, so making `ros2` extend `camera` would give every ROS 2 site the
+camera gateway with no way to decline it. `bootstrap.py` already pairs the two
+disjointly — `ros2` with flyto-modules-robotics, `camera-host` with
+flyto-modules-vision. A site wanting both needs its own registry profile, which
+is what `--profiles` is for. A
 thin ROS adapter accepts only structurally valid RGB/BGR `sensor_msgs/Image`
 frames; the transport-neutral core retains only the monotonic acceptance time.
 Pixels and ROS/device identifiers never cross the HTTP boundary, which is
