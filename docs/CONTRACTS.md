@@ -60,7 +60,17 @@ not run a validator for.
 
 **No frame crosses this boundary and none can.** The route maps one configured
 zone onto one address; the pixels go camera → topic → media server → browser,
-and this process is on none of that path. `resource_id` and `zone_id` are both
+and this process is on none of that path.
+
+**The observation route emits no ROS or device identifier; this one emits an
+address, and an address has whatever shape its server gave it.** On a robot
+serving MJPEG through `web_video_server`, that shape is
+`?topic=/camera/image_raw`. `STATE.md` says of the observation producer that
+ROS and device identifiers never cross the HTTP boundary, and that remains
+exactly true of the payload it describes — `provider` and an operator-assigned
+`source_id`, nothing else. It was written before there was a second route, and
+it does not extend to this one: a reference whose URL has been scrubbed of the
+thing that makes it resolve is not a reference. `resource_id` and `zone_id` are both
 the zone the observation route reports, because one camera answering under two
 ids would be two cameras to whoever approves them.
 
