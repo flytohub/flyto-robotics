@@ -4,6 +4,47 @@ All notable project changes are recorded here.
 
 ## Unreleased
 
+- The camera gateway now serves the stream half of the vision-gateway
+  contract. `GET /api/spaces/zone-camera/streams` answers
+  `flyto.vision.stream-catalog.v1` instead of 404, configured by four
+  operator-only `FLYTO_CAMERA_STREAM_*` settings. This removes the workaround
+  that had put a ROS topic name into flyto-cloud's own configuration; the
+  platform no longer needs to know what ROS is. flyto-cloud's vision adapter
+  reaches the robot on its own defaults, and its conformance kit certifies the
+  stream through the tunnel.
+- Nav2 is installed as `flyto-nav2.service` and left **disabled**. The stack is
+  verified to come up on the Pi with the LiDAR feeding both costmaps and
+  `/navigate_to_pose` advertised, but the only map in this repository is a
+  20x20-pixel synthetic square, and localising against it converges into a room
+  that does not exist. The unit's start condition names a map recorded from a
+  real venue, so it cannot start until one exists.
+- Recording that map is now a job flyto-cloud can dispatch rather than an ssh
+  session: `mapping.start` / `mapping.save` / `mapping.abort` on the installed
+  device-executor protocol, with `flyto-slam.service` holding SLAM between the
+  request that starts it and the one that saves. Nothing in the mission engine
+  changes — commissioning must not become a word the AI planner can compose a
+  delivery plan out of.
+- Fixed: the mapping executor never spoke the registry's wire protocol, so
+  every call it made failed. It wrote a trailing newline, which the registry
+  rejects outright, and read `module_id` from the top of the envelope instead of
+  from inside `request`. Both were invisible to hand-checks that fed it the
+  shape its author imagined. It now has 66 tests, six of them modelling the
+  caller.
+- Fixed: `flyto-camera-v4l2.service` and `flyto-camera-stream.service` restarted
+  without a start limit, which is the defect that once had `flyto-shortcut` at
+  NRestarts=193 flapping a healthy lidar. `validate_unit` now runs over
+  `deploy/systemd/` — the hand-written units actually installed on the robot,
+  which nothing had been pointing it at.
+- Fixed: `deploy/make-map.sh` launched SLAM anyway when the battery could not be
+  read, while the executor refused the identical case. An unreadable pack is
+  routine, so that branch was normal use rather than an edge.
+- Documentation: three files said the `ros2` lifecycle profile extends `camera`;
+  the data has said `generic` since the file was created and three CI-green
+  tests enforce it. `docs/INSTALLATION.md` claimed in the present perfect that no
+  camera deployment had been performed. Both corrected, with the dated
+  `STATE.md` closure record left standing and marked superseded rather than
+  rewritten.
+
 - Added the versioned Cloud job / robot receipt join. Trace-bearing Space jobs
   now fail before gateway use unless `flyto.cloud.device-job-handoff.v1` binds
   the paired device, trace, exact workflow digest, and Cloud completion

@@ -15,12 +15,21 @@ Description=Flyto robot camera V4L2 to ROS 2 publisher
 After=network-online.target
 Wants=network-online.target
 ConditionPathExists=/dev/v4l/by-id/usb-XC-TECH_Web_Camera_20251103.1921-video-index0
+StartLimitIntervalSec=300
+StartLimitBurst=3
 
 [Service]
 Type=simple
 User=ubuntu
 Environment=PYTHONUNBUFFERED=1
 Environment=ROS_DOMAIN_ID=30
+# camera_info_url is named explicitly because the default is derived from the
+# device's own USB product string -- it resolves to
+# `web_camera:_web_camera.yaml`, a filename with a colon in it that changes
+# the moment the camera is swapped, silently taking the calibration with it.
+# A stable operator-chosen name keeps the intrinsics tied to the mount rather
+# than to a vendor field. The file not existing is a warning, not a failure.
+#
 # output_encoding=rgb8 is required, not cosmetic: camera_observation.accept_image
 # admits only rgb8/bgr8 with step == width*3 and clears the observation for
 # anything else, so a YUYV passthrough would read as a camera that never saw.
@@ -28,7 +37,8 @@ ExecStart=/bin/bash -lc 'source /opt/ros/jazzy/setup.bash && exec ros2 run v4l2_
   -r __ns:=/camera \
   -p video_device:=/dev/v4l/by-id/usb-XC-TECH_Web_Camera_20251103.1921-video-index0 \
   -p output_encoding:=rgb8 \
-  -p image_size:=[640,480]'
+  -p image_size:=[640,480] \
+  -p camera_info_url:=file:///home/ubuntu/.flyto/camera_info/tb3-front.yaml'
 Restart=on-failure
 RestartSec=5
 TimeoutStopSec=10

@@ -1,5 +1,39 @@
 # Decisions
 
+## 2026-08-27 — Commissioning is a dispatched device job, never a mission primitive
+
+Decision: recording a venue map is `mapping.start` / `mapping.save` /
+`mapping.abort` on the installed device-executor protocol, dispatched by
+`deploy/flyto_job_runner.py`'s non-`robotics.`-prefixed path. No `start_slam`
+enters `workflow.PrimitiveKind`, and the mission engine is untouched. The
+driving between start and save stays on the already-approved
+`robotics.motion.*` capabilities with their sensor gates.
+
+Reason: a primitive is a word the AI planner composes delivery plans out of. A
+plan able to emit "begin remapping the building" halfway through carrying
+something would have to be *refused* at validation rather than being
+inexpressible, and every refusal is a rule someone can get wrong. Mapping
+happens once per venue, before deliveries, so it belongs on the generic
+executor path the architecture already says remains required. Rejected: giving
+the executor its own way to move the robot — a second, unreviewed motion path
+alongside one that already carries the safety envelope.
+
+## 2026-08-27 — Nav2 ships disabled rather than localised against a fiction
+
+Decision: `deploy/systemd/flyto-nav2.service` is installed and not enabled. Its
+`ConditionPathExists` names a map recorded from the actual venue, so the unit
+cannot start until one exists.
+
+Reason: `maps/nav2_lab.pgm` is a 20x20-pixel synthetic 8 m square with a
+drawn-on perimeter at 0.4 m per cell, present so the launch files load. AMCL
+against it converges, the costmap looks plausible, and every goal is computed in
+a room that does not exist — it fails silently, which is worse than not
+navigating at all. Rejected: enabling the unit and treating the synthetic map as
+a placeholder, which makes "Nav2 is running" true and "the robot knows where it
+is" false at the same time. State as of this date: unit installed, `disabled`,
+`inactive`, and `/home/ubuntu/.flyto/maps/` does not exist, so the condition has
+never once been satisfied.
+
 ## 2026-08-22 — Cloud dispatch and robot execution use two separate proofs
 
 Decision: every trace-bearing Space job must carry
@@ -21,6 +55,22 @@ attributes transport; it is not a TPM-backed hardware attestation. The receipt
 is always `task_completion_eligible=false`. Only Cloud's independent evidence
 rules may complete a Task, and the deterministic controller and safe-stop
 policy remain the only motion authority.
+
+## 2026-08-13 — The AVFoundation provider is a topology, not a duplicate
+
+Decision: `camera_sources.PROVIDERS` carries both `ros_image` and
+`avfoundation`, and neither supersedes the other.
+
+Reason: the camera was first mounted externally, on the operator's Mac rather
+than on the robot, and `avfoundation` is the capture path for that arrangement —
+the only one that works when the device is attached to the workstation. Mounting
+a UVC camera on the robot on 2026-08-27 made `ros_image` the deployed provider;
+it did not make the other redundant. Reading it as redundant is the specific
+mistake this entry exists to prevent, and it has already been made once: on
+2026-08-27 the provider was assessed as duplicating flyto-cloud's own macOS
+capture path, because the original topology was recorded nowhere and the cause
+had to be recovered from the person who chose it. The profile is described as
+provider-neutral in three documents; what was missing was the history.
 
 ## 2026-08-13 — Plan delivery and capability discovery share one authority
 

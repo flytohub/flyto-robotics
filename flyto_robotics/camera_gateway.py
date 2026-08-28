@@ -9,7 +9,11 @@ import signal
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from .camera_observation import CameraConfigurationError, CameraObservation
+from .camera_observation import (
+    CameraConfigurationError,
+    CameraObservation,
+    CameraStreamCatalog,
+)
 from .camera_sources import AvfoundationRuntime, CameraSettings, probe_source
 
 
@@ -128,6 +132,17 @@ def main(argv: list[str] | None = None) -> None:  # pragma: no cover - ROS runti
         observation = CameraObservation(
             settings.zone, settings.freshness_seconds, provider=settings.provider,
             source_id=settings.source_id,
+            # The catalog is built even when no address is configured. It then
+            # answers `configured: false` with the reason, which is what tells
+            # an operator "this robot has no media server" apart from "this
+            # build does not serve that contract" (a 404).
+            streams=CameraStreamCatalog(
+                settings.zone,
+                url=settings.stream_url,
+                protocol=settings.stream_protocol,
+                label=settings.stream_label,
+                ttl_seconds=settings.stream_ttl_seconds,
+            ),
         )
         if args.check_settings:
             _emit({"action_code": "none", "ok": True,
