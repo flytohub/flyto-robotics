@@ -1,0 +1,13 @@
+# Privileges for the mapping device executor. Install to /etc/sudoers.d/flyto-mapping
+# with mode 0440, then run `visudo -c`.
+#
+# flyto-job-runner.service sets User=ubuntu, so the executor it spawns runs as
+# ubuntu and cannot start a system unit on its own.
+#
+# Two commands, both by full path, and no wildcard. `systemctl *` here would be
+# a general privilege-escalation primitive handed to anything that can reach the
+# job runner, and the whole reason the device-executor boundary exists is that a
+# dispatched job must not be able to become arbitrary host execution. Widening
+# this file gives that property away without anything appearing to break.
+ubuntu ALL=(root) NOPASSWD: /usr/bin/systemctl start flyto-slam.service
+ubuntu ALL=(root) NOPASSWD: /usr/bin/systemctl stop flyto-slam.service

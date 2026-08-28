@@ -16,7 +16,7 @@ another robot vendor's runtime.
 
 `camera` is a provider-neutral additive profile. It extends `generic`, keeps
 every generic unit byte-identical, and owns `flyto-camera-gateway.service`.
-`ros2` extends `camera` and adds only `flyto-robot-ros2.service`; the inherited
+`ros2` extends `generic` and adds only `flyto-robot-ros2.service`; the inherited
 generic and camera units remain byte-identical. Every owned unit is written,
 enabled, restarted, and verified active by the same transactional activation.
 Select `ros2` only on a device whose ROS 2 adapter and environment have already
@@ -118,11 +118,49 @@ to `FLYTO_CAMERA_ROTATION=0|90|180|270`, and flip to
 `FLYTO_CAMERA_FLIP=none|horizontal|vertical|both`. Also set the bounded
 `FLYTO_CAMERA_ZONE`; workflows cannot select the source, transforms, topic, or
 HTTP listener. `FLYTO_CAMERA_BIND` accepts only a literal IPv4
-loopback address and defaults to `127.0.0.1`. The only observation route is
-the fixed `GET http://127.0.0.1:9000/api/spaces/zone-camera/observation`.
-`FLYTO_CAMERA_PORT` is operator-only
-configuration and defaults to `9000`, matching the canonical vision consumer;
-workflow or job data cannot override it.
+loopback address and defaults to `127.0.0.1`. `FLYTO_CAMERA_PORT` is
+operator-only configuration and defaults to `9000`, matching the canonical
+vision consumer; workflow or job data cannot override it.
+
+The gateway serves two fixed routes on that address, answering two different
+questions:
+
+| Route | Answers | Contract |
+|---|---|---|
+| `GET /api/spaces/zone-camera/observation` | what can be seen here now | evidence items |
+| `GET /api/spaces/zone-camera/streams` | where it can be watched | `flyto.vision.stream-catalog.v1` |
+
+Evidence must never depend on anything being watchable, which is why they are
+separate: a venue whose media path is down must still be able to prove a zone
+was visible.
+
+### Configuring the stream half
+
+Four operator-only settings, all optional. Leave `FLYTO_CAMERA_STREAM_URL`
+unset and the catalog answers `configured: false` with a reason — a robot with a
+working camera and no media server in front of it has nothing to hand a browser,
+and inventing an address would produce a viewer spinning forever against a port
+nobody is listening on.
+
+| Setting | Meaning | Default |
+|---|---|---|
+| `FLYTO_CAMERA_STREAM_URL` | The address a browser opens. Validated as an absolute `http`/`https`/`ws`/`wss` URL, at most 2048 ASCII characters. | unset |
+| `FLYTO_CAMERA_STREAM_PROTOCOL` | `mjpeg`, `whep`, `webrtc` or `hls`. | `mjpeg` |
+| `FLYTO_CAMERA_STREAM_LABEL` | What an operator sees in the approval list. At most 128 characters. | the zone id |
+| `FLYTO_CAMERA_STREAM_TTL_SECONDS` | How long a minted reference stays good. Clamped to 1–900. | `120` |
+
+**Whether that address may be served is decided elsewhere, on purpose.**
+flyto-cloud refuses to mint a plaintext reference whose host is not loopback,
+and it makes that decision rather than the gateway because the gateway is the
+party that would be exposed — a party cannot be relied on to refuse its own
+misconfiguration. So `FLYTO_CAMERA_STREAM_URL` is checked here only for being a
+URL. A camera served over `http://` across a venue network will not merely be
+insecure; it will not appear in the operations room at all. Point the URL at
+loopback and reach it through a tunnel.
+
+The resource is the zone, so `resource_id` and `zone_id` in the catalog are both
+`FLYTO_CAMERA_ZONE`. One camera answering "what is there" and "where to watch
+it" under two different ids would be two cameras to whoever approves them.
 
 The camera unit permits only `AF_INET`, `AF_INET6`, `AF_NETLINK`, and `AF_UNIX`:
 IPv4 is required for the loopback HTTP listener and DDS, IPv4/IPv6 cover ROS 2
@@ -138,11 +176,22 @@ reachable.
 The gateway retains frame acceptance time only. It emits no pixels, raw device
 identity, serial, device path, or content hash. The bounded host inventory is
 only XC-TECH vendor `0x5843`, product `0x7884`, with `1280x720@10fps` metadata;
-that inventory is not deployment or operational proof. A read-only macOS
-check established only that direct AVFoundation null-output capture can use
-`1280x720` at 10 fps with the configured orientation; automated validation
-does not probe device capabilities. No Pi camera or ROS image topic has been
-observed, and no deployment was performed.
+that inventory is not deployment or operational proof by itself.
+
+As of 2026-08-27 it is backed by an operating device on one TurtleBot3. The
+same XC-TECH part is present as a USB camera on `/dev/video0`, owned by
+`flyto-camera-v4l2.service` — a UVC device admits one streaming opener, so the
+driver holds it and the gateway and MJPEG server both subscribe to the topic
+rather than opening the device. `ros-jazzy-v4l2-camera` publishes
+`/camera/image_raw` as `rgb8` at 640x480, which is what
+`camera_observation.accept_image` admits, and the gateway answers
+`provider: ros_image`.
+
+Two things the earlier text got right and that survive: there is still **no Pi
+camera** — no CSI ribbon device, the part is USB — and the `1280x720@10fps`
+figure came from a read-only macOS AVFoundation check rather than from probing
+the device, so it describes what that capture path could ask for and not the
+mode in use. The deployed mode is 640x480.
 
 This producer/lifecycle closure is not the full Cloud-device `vision.observe`
 path. `deploy/flyto_job_runner.py` still rejects non-robotics work and is a

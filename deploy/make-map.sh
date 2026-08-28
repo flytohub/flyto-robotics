@@ -1,0 +1,153 @@
+#!/bin/bash
+# Record a map of the actual venue, so Nav2 can stop pretending.
+#
+# Run this ON THE ROBOT (ssh in first). It starts SLAM, waits while you drive
+# the robot around the space, and saves the result where flyto-nav2.service
+# expects it. Until that file exists, flyto-nav2.service refuses to start —
+# see the ConditionPathExists in the unit and the reason above it.
+#
+# ## Why slam_toolbox and not cartographer
+#
+# Both are installed and TurtleBot3's own documentation uses cartographer, but
+# it also assumes SLAM runs on a remote PC rather than the Pi. There is no
+# remote PC here — the workstation is a Mac with no ROS — so this has to fit on
+# a Pi 4 that is already running the camera, the MJPEG server and bringup.
+# slam_toolbox in async mode is the lighter of the two and degrades by
+# processing fewer scans rather than by falling behind unboundedly.
+#
+# ## Drive slowly
+#
+# Loop closure is what keeps a map square, and it needs the robot to revisit
+# places it has already seen with enough overlap to match. Racing around the
+# perimeter once produces a map that looks finished and is skewed.
+set -euo pipefail
+
+# Kept in step with MIN_MAPPING_VOLTS in
+# deploy/executors/flyto_mapping_executor.py. tests/test_mapping_executor.py
+# parses this literal and asserts the two agree, because a floor that is
+# right in one path and wrong in the other is worse than one wrong number.
+MIN_MAPPING_VOLTS=11.6
+
+MAP_DIR="${FLYTO_MAP_DIR:-/home/ubuntu/.flyto/maps}"
+MAP_NAME="${1:-lab}"
+MAP_PATH="$MAP_DIR/$MAP_NAME"
+
+if [ ! -f /opt/ros/jazzy/setup.bash ]; then
+  echo "這台不是機器人 —— 找不到 /opt/ros/jazzy。請先 ssh 進機器人再跑。" >&2
+  exit 2
+fi
+
+# ROS's setup.bash reads variables it has not set (AMENT_TRACE_SETUP_FILES is
+# the first one to bite), so `set -u` has to come off across the source and go
+# straight back on. Sourcing it with -u active fails on line 8 before this
+# script has done anything at all.
+# shellcheck disable=SC1091
+set +u
+source /opt/ros/jazzy/setup.bash
+set -u
+export ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-30}"
+export TURTLEBOT3_MODEL="${TURTLEBOT3_MODEL:-burger}"
+
+echo "=== 前置檢查 ==="
+
+if ! systemctl is-active --quiet turtlebot3-bringup; then
+  echo "  ✗ turtlebot3-bringup 沒在跑 —— 沒有 /scan 和 /odom 就無法建圖" >&2
+  echo "    sudo systemctl start turtlebot3-bringup" >&2
+  exit 1
+fi
+echo "  ✓ bringup 運作中"
+
+# A mapping run is minutes of continuous driving. Starting one at 20% and
+# having the base brown out mid-loop loses the whole run, and a LiPo taken
+# below its floor is damaged rather than merely empty.
+#
+# 11.6 V and not 11.0. The floor for *an* operation is not the floor for one
+# that runs for minutes under motor load: an idle 3S pack reading 11.03 V had
+# dropped from 11.19 V in twenty minutes without moving, and the sag once the
+# wheels are turning is immediate. This is checked once, at the start, so the
+# number has to carry the whole run rather than the first second of it.
+# Fails closed, and that is a correction. This used to print a warning and
+# launch SLAM anyway when the reading was missing, while
+# deploy/executors/flyto_mapping_executor.py refused the same case — one
+# decision with two opposite answers, and the permissive one was the path a
+# person runs by hand at a venue. An unreadable battery is routine here: the
+# `ros2 topic echo` below expires often enough that this branch is reached in
+# normal use.
+volts=$(timeout 15 ros2 topic echo /battery_state --once --field voltage 2>/dev/null | head -1 || true)
+volts=${volts//[[:space:]]/}
+
+# Validated as a decimal literal before it reaches awk. Interpolating an
+# unchecked value made a malformed reading a *syntax error*: `awk` exited 2,
+# `if` read that as false, and the run was allowed. `volts="0/0"` allowed;
+# `volts="abc def"` refused. `2>/dev/null` hid the difference.
+if [[ ! "$volts" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+  echo "  ✗ 讀不到可信的電池電壓（收到: '''${volts:-空}'''）。" >&2
+  echo "    建圖要連續跑好幾分鐘，不能在不知道電量的情況下開始。" >&2
+  echo "    確認 turtlebot3-bringup 正常、LiPo 有接，再試一次。" >&2
+  exit 1
+fi
+
+echo "  電池: ${volts} V"
+if awk "BEGIN{exit !($volts < $MIN_MAPPING_VOLTS)}"; then
+  echo "  ✗ 電壓 ${volts} V，低於建圖所需的 ${MIN_MAPPING_VOLTS} V。" >&2
+  echo "    建圖要連續跑好幾分鐘，馬達一上負載電壓就會下沉，中途沒電整份作廢；" >&2
+  echo "    LiPo 過放是損壞不是沒電。請先充飽再跑。" >&2
+  exit 1
+fi
+echo "  ✓ 電壓足夠"
+
+mkdir -p "$MAP_DIR"
+
+echo
+echo "=== 啟動 SLAM ==="
+ros2 launch slam_toolbox online_async_launch.py use_sim_time:=False &
+SLAM_PID=$!
+# Stop SLAM however this script leaves, including Ctrl-C. A stray slam_toolbox
+# holding /map is the next run's confusing failure.
+trap 'kill $SLAM_PID 2>/dev/null || true; wait $SLAM_PID 2>/dev/null || true' EXIT INT TERM
+sleep 10
+
+if ! kill -0 $SLAM_PID 2>/dev/null; then
+  echo "  ✗ slam_toolbox 沒起來" >&2
+  exit 1
+fi
+echo "  ✓ SLAM 運作中"
+
+cat <<'GUIDE'
+
+=== 現在請開另一個終端機，ssh 進機器人，跑遙控 ===
+
+    ssh ubuntu@flyto-robot.local
+    source /opt/ros/jazzy/setup.bash && export ROS_DOMAIN_ID=30 TURTLEBOT3_MODEL=burger
+    ros2 run turtlebot3_teleop teleop_keyboard
+
+  開慢一點。沿著牆邊走完一圈，然後**回到起點附近再走一次**——
+  回訪同一個地方是迴環閉合的依據，也是地圖不會歪掉的原因。
+  把每個要送達的站點都開過去一趟。
+
+  開完之後回到這個視窗，按 Enter 存檔。
+
+GUIDE
+
+read -r -p "開完了就按 Enter 存檔（Ctrl-C 放棄）… "
+
+echo
+echo "=== 存檔到 $MAP_PATH ==="
+ros2 run nav2_map_server map_saver_cli -f "$MAP_PATH" --ros-args -p save_map_timeout:=10000.0
+
+if [ -f "$MAP_PATH.yaml" ] && [ -f "$MAP_PATH.pgm" ]; then
+  echo
+  echo "  ✓ 存好了:"
+  ls -lh "$MAP_PATH.yaml" "$MAP_PATH.pgm" | sed 's/^/    /'
+  echo
+  echo "  地圖資訊:"
+  grep -E "resolution|origin" "$MAP_PATH.yaml" | sed 's/^/    /'
+  echo
+  if [ "$MAP_NAME" = "lab" ]; then
+    echo "  flyto-nav2.service 的啟動條件現在滿足了。開啟導航："
+    echo "    sudo systemctl enable --now flyto-nav2"
+  fi
+else
+  echo "  ✗ 存檔失敗 —— $MAP_PATH.yaml / .pgm 沒有產生" >&2
+  exit 1
+fi

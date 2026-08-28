@@ -1,0 +1,11 @@
+{
+  "contract_version": "flyto.robotics.mapping-executor.v1",
+  "slam_unit": "flyto-slam.service",
+  "map_dir": "/home/ubuntu/.flyto/maps",
+  "readiness_unit": "turtlebot3-bringup.service",
+  "navigation_unit": "flyto-nav2.service",
+  "ros_setup": "/opt/ros/jazzy/setup.bash",
+  "ros_domain_id": 30,
+  "battery_topic": "/battery_state",
+  "min_mapping_volts": 11.6
+}

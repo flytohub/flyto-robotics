@@ -507,12 +507,21 @@ only the synthetic zone, kind, fixed detail code, and explicit `usable` state,
 never pixels, ROS/device identifiers, secrets, or content. Missing or malformed
 frames produce no usable observation, and accepted frames become explicitly
 unusable after the bounded freshness window. The generic lifecycle profile is
-unchanged; `ros2` extends `camera` and adds only its ROS service. The lifecycle
+unchanged; `camera` and `ros2` are siblings, both extending `generic`, and a
+device activates one of them. The lifecycle
 writes, enables, restarts, and checks the DDS-compatible camera systemd unit,
 while installed-wheel `--help` and `--check-settings` remain ROS/ffmpeg-free.
 Host inventory is bounded to XC-TECH vendor `0x5843`, product `0x7884`, and
 `1280x720@10fps` metadata; it proves no camera operation. No Pi camera or ROS
-image topic was observed, and no deployment occurred. The explicit remaining
+image topic was observed, and no deployment occurred.
+
+> Superseded 2026-08-27 for the second sentence only. A USB camera of the same
+> bounded part now runs on one TurtleBot3, publishing `/camera/image_raw` in
+> `rgb8` at 640x480, and the gateway serves both the observation route and
+> `/api/spaces/zone-camera/streams`. The record above stands as what was true on
+> 2026-08-13. There is still no Pi (CSI) camera, and no mission consumes the
+> evidence the gateway produces. See
+> `handoffs/2026-08-27-camera-stream-half-nav2-and-mapping-as-a-job.md`. The explicit remaining
 blocker is that delivery-only `deploy/flyto_job_runner.py` rejects non-robotics
 work: this producer/lifecycle is not full Cloud-device `vision.observe`, and a
 generic installed executor protocol remains required.

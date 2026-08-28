@@ -30,6 +30,70 @@ The stable external API is file-based and language-neutral:
 - `flyto-robotics plan-ai` calls an HTTPS planner, then validates and atomically
   writes its returned plan.
 
+#### The vision gateway serves two questions, and three faults
+
+`flyto.vision.stream-catalog.v1` is served at
+`GET /api/spaces/zone-camera/streams` beside the observation route on the same
+loopback listener. There is no schema file for it, as there is none for
+`flyto.robotics.capability-catalog.v1` — both are served over HTTP to consumers
+in another repository, and what those consumers validate is the
+`contract_version` literal and the field set, not a JSON Schema this repo does
+not run a validator for.
+
+```json
+{
+  "contract_version": "flyto.vision.stream-catalog.v1",
+  "configured": true,
+  "unconfigured_reason": "",
+  "streams": [
+    {
+      "resource_id": "robot-front",
+      "zone_id": "robot-front",
+      "protocol": "mjpeg",
+      "url": "http://127.0.0.1:8080/stream?topic=/camera/image_raw",
+      "label": "TurtleBot3 front camera",
+      "ttl_seconds": 120
+    }
+  ]
+}
+```
+
+**No frame crosses this boundary and none can.** The route maps one configured
+zone onto one address; the pixels go camera → topic → media server → browser,
+and this process is on none of that path.
+
+**The observation route emits no ROS or device identifier; this one emits an
+address, and an address has whatever shape its server gave it.** On a robot
+serving MJPEG through `web_video_server`, that shape is
+`?topic=/camera/image_raw`. `STATE.md` says of the observation producer that
+ROS and device identifiers never cross the HTTP boundary, and that remains
+exactly true of the payload it describes — `provider` and an operator-assigned
+`source_id`, nothing else. It was written before there was a second route, and
+it does not extend to this one: a reference whose URL has been scrubbed of the
+thing that makes it resolve is not a reference. `resource_id` and `zone_id` are both
+the zone the observation route reports, because one camera answering under two
+ids would be two cameras to whoever approves them.
+
+Three faults an operator has to tell apart, and each has its own answer:
+
+| Answer | Means |
+|---|---|
+| `404` | this build does not serve the contract at all |
+| `200` with `configured: false` and a reason | this robot has no media server in front of its camera |
+| `200` with `configured: true` and an empty `streams` | a media server is configured and serves nothing |
+
+An empty list on its own reads as "this room has no cameras" and sends someone
+looking for a hardware fault that is not there, which is why the first two are
+distinguishable rather than collapsed into it.
+
+**Whether the address may be handed to a browser is not decided here.**
+flyto-cloud refuses to mint a plaintext reference whose host is not loopback,
+and it owns that rule because the gateway is the party that would be exposed —
+a party cannot be relied on to refuse its own misconfiguration. This end
+validates only that the value is a URL a browser could open. Two copies of a
+security rule drift, and the dangerous outcome is whichever copy is more
+permissive.
+
 #### Flyto2 + ROS 2 semantic pairing
 
 Flyto2 owns language understanding, capability planning, resource policy, and
