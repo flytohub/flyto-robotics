@@ -3,6 +3,11 @@
   "provider": "flyto-mapping",
   "module_ids": ["mapping.start", "mapping.save", "mapping.abort"],
   "transport": "json_stdio",
-  "command": ["/usr/bin/python3", "/home/ubuntu/executors/flyto_mapping_executor.py"],
+  "command": [
+    "/usr/bin/python3",
+    "/home/ubuntu/executors/flyto_mapping_executor.py",
+    "--config",
+    "/etc/flyto/mapping.json"
+  ],
   "timeout_seconds": 120
 }

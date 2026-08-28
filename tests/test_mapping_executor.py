@@ -17,18 +17,50 @@ import json
 import math
 import re
 import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 
 from deploy.device_executor_contract import CONTRACT_VERSION, validate_result
 from deploy.executors import flyto_mapping_executor as executor
+from deploy.executors.mapping_settings import CONTRACT_VERSION as SETTINGS_CONTRACT_VERSION
+from deploy.executors.mapping_settings import MappingSettings
+
+
+def _settings_values(map_dir: str = "/tmp/flyto-test-maps", **overrides) -> dict:
+    values = {
+        "contract_version": SETTINGS_CONTRACT_VERSION,
+        "slam_unit": "flyto-slam.service",
+        "map_dir": map_dir,
+        "readiness_unit": "turtlebot3-bringup.service",
+        "navigation_unit": "flyto-nav2.service",
+        "ros_setup": "/opt/ros/jazzy/setup.bash",
+        "ros_domain_id": 30,
+        "battery_topic": "/battery_state",
+        "min_mapping_volts": 11.6,
+    }
+    values.update(overrides)
+    return values
+
+
+def _robot_settings(map_dir: str = "/tmp/flyto-test-maps", **overrides) -> MappingSettings:
+    values = _settings_values(map_dir, **overrides)
+    values.pop("contract_version")
+    return MappingSettings(**values)
+
+
+def _write_settings(path: Path, **overrides) -> Path:
+    path.write_text(json.dumps(_settings_values(**overrides)), encoding="utf-8")
+    return path
 
 # ---------------------------------------------------------------------------
 # Wire protocol. These are the tests that would have caught the shipped bug.
 # ---------------------------------------------------------------------------
 
 
-def _call(operation: str, payload_name: str, payload, capsys) -> str:
+def _call(operation: str, payload_name: str, payload, capsys,
+          argv: list[str] | None = None) -> str:
     """Send exactly what `_StdioOwner._call` sends, and return raw stdout."""
     envelope = {"contract_version": CONTRACT_VERSION, "operation": operation,
                 payload_name: payload}
@@ -38,7 +70,7 @@ def _call(operation: str, payload_name: str, payload, capsys) -> str:
     import sys
     saved, sys.stdin = sys.stdin, io.StringIO(monkey_stdin)
     try:
-        executor.main()
+        executor.main(argv)
     finally:
         sys.stdin = saved
     return capsys.readouterr().out
@@ -118,6 +150,113 @@ def test_a_wrong_contract_version_is_refused(capsys):
 
 
 # ---------------------------------------------------------------------------
+# Machine settings. A typo must stop the executor, not select a default.
+# ---------------------------------------------------------------------------
+
+
+def test_prepare_does_not_need_the_settings_file_to_exist(capsys, tmp_path):
+    out = _call(
+        "prepare",
+        "request",
+        {"module_id": "mapping.abort", "params": {}},
+        capsys,
+        ["--config", str(tmp_path / "absent.json")],
+    )
+    prepared = _decode_as_registry_does(out)
+    assert prepared["module_id"] == "mapping.abort"
+
+
+def test_execute_loads_the_config_path_from_the_manifest_argv(monkeypatch, capsys, tmp_path):
+    config = _write_settings(
+        tmp_path / "mapping.json",
+        slam_unit="vendor-slam.service",
+        readiness_unit=None,
+        navigation_unit=None,
+        battery_topic=None,
+        min_mapping_volts=None,
+    )
+    seen = []
+    monkeypatch.setattr(executor, "_unit_active", lambda unit: seen.append(unit) or False)
+
+    out = _call(
+        "execute",
+        "prepared",
+        {"marker": executor.PREPARED_MARKER, "module_id": "mapping.abort", "params": {}},
+        capsys,
+        ["--config", str(config)],
+    )
+    result = validate_result(_decode_as_registry_does(out))
+    assert (result["status"], result["reason_code"]) == (
+        "succeeded", "mapping_not_running")
+    assert seen == ["vendor-slam.service"]
+
+
+def test_execute_reports_an_invalid_settings_file_as_a_result(capsys, tmp_path):
+    config = _write_settings(tmp_path / "mapping.json", slam_unti="typo.service")
+    out = _call(
+        "execute",
+        "prepared",
+        {"marker": executor.PREPARED_MARKER, "module_id": "mapping.abort", "params": {}},
+        capsys,
+        ["--config", str(config)],
+    )
+    result = validate_result(_decode_as_registry_does(out))
+    assert (result["status"], result["reason_code"]) == (
+        "failed", "mapping_settings_invalid")
+    assert "slam_unti" in result["detail"]
+
+
+def test_the_installed_executor_imports_its_sibling_settings_module(tmp_path):
+    config = _write_settings(
+        tmp_path / "mapping.json",
+        slam_unit="flyto-test-never-installed.service",
+        readiness_unit=None,
+        navigation_unit=None,
+        battery_topic=None,
+        min_mapping_volts=None,
+    )
+    envelope = {
+        "contract_version": CONTRACT_VERSION,
+        "operation": "execute",
+        "prepared": {
+            "marker": executor.PREPARED_MARKER,
+            "module_id": "mapping.abort",
+            "params": {},
+        },
+    }
+    script = Path(executor.__file__).resolve()
+    done = subprocess.run(
+        [sys.executable, str(script), "--config", str(config)],
+        input=json.dumps(envelope), capture_output=True, text=True,
+        timeout=10, env={},
+    )
+    assert done.returncode == 0, done.stderr
+    result = validate_result(_decode_as_registry_does(done.stdout))
+    assert result["reason_code"] == "unit_state_unknown"
+
+
+def test_a_machine_without_battery_telemetry_records_that_fact(monkeypatch):
+    settings = _robot_settings(
+        readiness_unit=None,
+        navigation_unit=None,
+        battery_topic=None,
+        min_mapping_volts=None,
+    )
+    monkeypatch.setattr(executor, "_unit_active", lambda unit: False)
+    monkeypatch.setattr(
+        executor,
+        "_battery_volts",
+        lambda _settings: pytest.fail("battery must not be read without both settings"),
+    )
+    monkeypatch.setattr(subprocess, "run", _fake_run(0))
+
+    result = executor.start({}, settings)
+    validate_result(result)
+    assert result["status"] == "succeeded"
+    assert "battery check not configured" in result["evidence"][0]["detail"]
+
+
+# ---------------------------------------------------------------------------
 # Every result the handlers can produce must satisfy the contract.
 # ---------------------------------------------------------------------------
 
@@ -151,32 +290,36 @@ def test_an_unbelievable_voltage_is_not_a_voltage(monkeypatch, raw):
     is far more likely to be an absent reading than a flat pack — and answering
     battery_too_low to it sends someone to charge a battery that is fine.
     """
+    settings = _robot_settings()
     monkeypatch.setattr(executor, "_ros", lambda *a, **k: (0, raw))
-    assert executor._battery_volts() is None
+    assert executor._battery_volts(settings) is None
 
 
 @pytest.mark.parametrize("raw,expected", [("11.45", 11.45), ("12.6", 12.6)])
 def test_a_believable_voltage_is_returned(monkeypatch, raw, expected):
+    settings = _robot_settings()
     monkeypatch.setattr(executor, "_ros", lambda *a, **k: (0, raw))
-    assert math.isclose(executor._battery_volts(), expected)
+    assert math.isclose(executor._battery_volts(settings), expected)
 
 
 def test_an_unreadable_battery_refuses_rather_than_guessing(monkeypatch):
+    settings = _robot_settings()
     monkeypatch.setattr(executor, "_unit_active",
-                        lambda unit: unit == executor.BRINGUP_UNIT)
-    monkeypatch.setattr(executor, "_battery_volts", lambda: None)
-    result = executor.start({})
+                        lambda unit: unit == settings.readiness_unit)
+    monkeypatch.setattr(executor, "_battery_volts", lambda _settings: None)
+    result = executor.start({}, settings)
     assert (result["status"], result["reason_code"]) == ("refused", "battery_unknown")
     validate_result(result)
 
 
 def test_a_low_pack_refuses_before_slam_is_touched(monkeypatch):
     started = []
+    settings = _robot_settings()
     monkeypatch.setattr(executor, "_unit_active",
-                        lambda unit: unit == executor.BRINGUP_UNIT)
-    monkeypatch.setattr(executor, "_battery_volts", lambda: 11.45)
+                        lambda unit: unit == settings.readiness_unit)
+    monkeypatch.setattr(executor, "_battery_volts", lambda _settings: 11.45)
     monkeypatch.setattr(subprocess, "run", lambda *a, **k: started.append(a))
-    result = executor.start({})
+    result = executor.start({}, settings)
     assert (result["status"], result["reason_code"]) == ("refused", "battery_too_low")
     assert not started, "SLAM must not be started by a refused run"
 
@@ -224,8 +367,9 @@ def test_a_non_string_name_is_refused(value):
 
 def test_save_refuses_a_bad_name_before_looking_at_slam(monkeypatch):
     looked = []
+    settings = _robot_settings()
     monkeypatch.setattr(executor, "_unit_active", lambda u: looked.append(u) or True)
-    result = executor.save({"map_name": "../escape"})
+    result = executor.save({"map_name": "../escape"}, settings)
     assert (result["status"], result["reason_code"]) == ("refused", "map_name_invalid")
     assert not looked
 
@@ -241,28 +385,48 @@ def _fake_run(returncode):
     return run
 
 
+def test_an_inactive_unit_is_distinct_from_a_unit_systemd_cannot_inspect(monkeypatch):
+    monkeypatch.setattr(subprocess, "run", _fake_run(3))
+    assert executor._unit_active("flyto-slam.service") is False
+
+    monkeypatch.setattr(subprocess, "run", _fake_run(4))
+    assert executor._unit_active("flyto-slam.service") is None
+
+
+def test_start_fails_closed_when_a_unit_state_cannot_be_read(monkeypatch):
+    settings = _robot_settings()
+    monkeypatch.setattr(executor, "_unit_active", lambda unit: None)
+    result = executor.start({}, settings)
+    assert (result["status"], result["reason_code"]) == (
+        "failed", "unit_state_unknown")
+    validate_result(result)
+
+
 def test_abort_reports_a_stop_that_did_not_happen(monkeypatch):
+    settings = _robot_settings()
     monkeypatch.setattr(executor, "_unit_active", lambda unit: True)
     monkeypatch.setattr(subprocess, "run", _fake_run(5))
-    result = executor.abort({})
+    result = executor.abort({}, settings)
     assert (result["status"], result["reason_code"]) == ("failed", "slam_stop_failed")
     validate_result(result)
 
 
 def test_abort_reports_a_stop_that_could_not_be_run(monkeypatch):
+    settings = _robot_settings()
     monkeypatch.setattr(executor, "_unit_active", lambda unit: True)
 
     def boom(*a, **k):
         raise OSError("no systemctl")
 
     monkeypatch.setattr(subprocess, "run", boom)
-    result = executor.abort({})
+    result = executor.abort({}, settings)
     assert (result["status"], result["reason_code"]) == ("failed", "slam_stop_failed")
 
 
 def test_abort_is_idempotent_when_nothing_is_recording(monkeypatch):
+    settings = _robot_settings()
     monkeypatch.setattr(executor, "_unit_active", lambda unit: False)
-    result = executor.abort({})
+    result = executor.abort({}, settings)
     assert (result["status"], result["reason_code"]) == ("succeeded", "mapping_not_running")
     assert result["evidence"] == []
 
@@ -270,10 +434,10 @@ def test_abort_is_idempotent_when_nothing_is_recording(monkeypatch):
 def test_a_leftover_slam_is_carried_as_evidence_not_a_reason_code(monkeypatch, tmp_path):
     """The job runner reads only `status` and `evidence` and substitutes its own
     detail, so a reason_code saying SLAM is still up would reach nobody."""
-    monkeypatch.setattr(executor, "MAP_DIR", tmp_path)
+    settings = _robot_settings(str(tmp_path))
     monkeypatch.setattr(executor, "_unit_active", lambda unit: True)
 
-    def fake_ros(command, timeout):
+    def fake_ros(_settings, command, timeout):
         staged = tmp_path / ".staging-lab"
         staged.with_suffix(".yaml").write_text(
             "image: .staging-lab.pgm\nresolution: 0.05\n", encoding="utf-8")
@@ -281,9 +445,9 @@ def test_a_leftover_slam_is_carried_as_evidence_not_a_reason_code(monkeypatch, t
         return 0, ""
 
     monkeypatch.setattr(executor, "_ros", fake_ros)
-    monkeypatch.setattr(executor, "_stop_slam", lambda: 1)
+    monkeypatch.setattr(executor, "_stop_slam", lambda _settings: 1)
 
-    result = executor.save({"map_name": "lab"})
+    result = executor.save({"map_name": "lab"}, settings)
     validate_result(result)
     assert result["status"] == "succeeded"
     kinds = {(e["kind"], e["usable"]) for e in result["evidence"]}
@@ -303,26 +467,26 @@ def test_a_failed_save_leaves_the_published_name_untouched(monkeypatch, tmp_path
     start" to "starts on a map no job certified", so the saver writes to a
     staging name and only a complete run is renamed into place.
     """
-    monkeypatch.setattr(executor, "MAP_DIR", tmp_path)
+    settings = _robot_settings(str(tmp_path))
     monkeypatch.setattr(executor, "_unit_active", lambda unit: True)
-    monkeypatch.setattr(executor, "_ros", lambda command, timeout: (124, ""))
+    monkeypatch.setattr(executor, "_ros", lambda settings, command, timeout: (124, ""))
 
-    result = executor.save({"map_name": "lab"})
+    result = executor.save({"map_name": "lab"}, settings)
     assert (result["status"], result["reason_code"]) == ("failed", "map_save_failed")
     assert not (tmp_path / "lab.yaml").exists()
     assert not (tmp_path / "lab.pgm").exists()
 
 
 def test_a_partial_save_is_cleaned_up_and_not_published(monkeypatch, tmp_path):
-    monkeypatch.setattr(executor, "MAP_DIR", tmp_path)
+    settings = _robot_settings(str(tmp_path))
     monkeypatch.setattr(executor, "_unit_active", lambda unit: True)
 
-    def half(command, timeout):
+    def half(_settings, command, timeout):
         (tmp_path / ".staging-lab.yaml").write_text("image: x\n", encoding="utf-8")
         return 0, ""
 
     monkeypatch.setattr(executor, "_ros", half)
-    result = executor.save({"map_name": "lab"})
+    result = executor.save({"map_name": "lab"}, settings)
     assert result["reason_code"] == "map_save_failed"
     assert not (tmp_path / ".staging-lab.yaml").exists()
     assert not (tmp_path / "lab.yaml").exists()
@@ -352,15 +516,15 @@ def test_the_saver_is_bounded_inside_the_shell_not_only_around_it(monkeypatch, t
     name. The bound has to be inside the shell.
     """
     seen = {}
-    monkeypatch.setattr(executor, "MAP_DIR", tmp_path)
+    settings = _robot_settings(str(tmp_path))
     monkeypatch.setattr(executor, "_unit_active", lambda unit: True)
 
-    def capture(command, timeout):
+    def capture(_settings, command, timeout):
         seen["command"] = command
         return 124, ""
 
     monkeypatch.setattr(executor, "_ros", capture)
-    executor.save({"map_name": "lab"})
+    executor.save({"map_name": "lab"}, settings)
     assert seen["command"].startswith(f"timeout {executor.SAVER_SHELL_TIMEOUT} ")
     assert f"save_map_timeout:={executor.SAVER_MAP_TIMEOUT}" in seen["command"]
     assert executor.SAVER_MAP_TIMEOUT < executor.SAVER_SHELL_TIMEOUT < executor.SAVE_TIMEOUT
@@ -382,25 +546,27 @@ def test_the_map_shape_is_read_back_from_what_was_written(tmp_path):
 @pytest.mark.parametrize(
     "active,expected",
     [
-        ({executor.SLAM_UNIT}, "mapping_already_running"),
-        ({executor.NAV2_UNIT}, "navigation_running"),
+        ({"flyto-slam.service"}, "mapping_already_running"),
+        ({"flyto-nav2.service"}, "navigation_running"),
         (set(), "sensors_unavailable"),
     ],
 )
 def test_start_refuses_for_the_nearest_reason(monkeypatch, active, expected):
+    settings = _robot_settings()
     monkeypatch.setattr(executor, "_unit_active", lambda unit: unit in active)
-    monkeypatch.setattr(executor, "_battery_volts", lambda: 12.4)
-    result = executor.start({})
+    monkeypatch.setattr(executor, "_battery_volts", lambda _settings: 12.4)
+    result = executor.start({}, settings)
     assert (result["status"], result["reason_code"]) == ("refused", expected)
     validate_result(result)
 
 
 def test_a_healthy_start_carries_the_voltage_as_evidence(monkeypatch):
+    settings = _robot_settings()
     monkeypatch.setattr(executor, "_unit_active",
-                        lambda unit: unit == executor.BRINGUP_UNIT)
-    monkeypatch.setattr(executor, "_battery_volts", lambda: 12.4)
+                        lambda unit: unit == settings.readiness_unit)
+    monkeypatch.setattr(executor, "_battery_volts", lambda _settings: 12.4)
     monkeypatch.setattr(subprocess, "run", _fake_run(0))
-    result = executor.start({})
+    result = executor.start({}, settings)
     validate_result(result)
     assert (result["status"], result["reason_code"]) == ("succeeded", "mapping_started")
     assert result["evidence"][0]["kind"] == "mapping.session"
@@ -408,11 +574,12 @@ def test_a_healthy_start_carries_the_voltage_as_evidence(monkeypatch):
 
 
 def test_a_start_that_systemctl_refuses_is_failed_not_succeeded(monkeypatch):
+    settings = _robot_settings()
     monkeypatch.setattr(executor, "_unit_active",
-                        lambda unit: unit == executor.BRINGUP_UNIT)
-    monkeypatch.setattr(executor, "_battery_volts", lambda: 12.4)
+                        lambda unit: unit == settings.readiness_unit)
+    monkeypatch.setattr(executor, "_battery_volts", lambda _settings: 12.4)
     monkeypatch.setattr(subprocess, "run", _fake_run(1))
-    result = executor.start({})
+    result = executor.start({}, settings)
     assert (result["status"], result["reason_code"]) == ("failed", "slam_start_failed")
 
 
@@ -426,6 +593,7 @@ def test_the_module_ids_the_manifest_declares_are_the_ones_handled():
          / "deploy/executors/flyto-mapping.json").read_text(encoding="utf-8")
     )
     assert set(manifest["module_ids"]) == set(executor.HANDLERS)
+    assert manifest["command"][-2:] == ["--config", "/etc/flyto/mapping.json"]
 
 
 # ---------------------------------------------------------------------------
@@ -440,7 +608,14 @@ def _make_map_sh() -> str:
             / "deploy/make-map.sh").read_text(encoding="utf-8")
 
 
-def test_the_shell_path_and_the_executor_use_the_same_battery_floor():
+def _turtlebot3_mapping_profile() -> dict:
+    return json.loads(
+        (Path(__file__).resolve().parents[1]
+         / "deploy/executors/turtlebot3-mapping.json").read_text(encoding="utf-8")
+    )
+
+
+def test_the_shell_path_and_the_turtlebot3_profile_use_the_same_battery_floor():
     """One decision, one number.
 
     Two implementations of the same precondition are two chances to be right,
@@ -448,7 +623,7 @@ def test_the_shell_path_and_the_executor_use_the_same_battery_floor():
     """
     declared = re.search(r"^MIN_MAPPING_VOLTS=([0-9.]+)$", _make_map_sh(), re.MULTILINE)
     assert declared, "make-map.sh must declare MIN_MAPPING_VOLTS as a literal"
-    assert float(declared.group(1)) == executor.MIN_MAPPING_VOLTS
+    assert float(declared.group(1)) == _turtlebot3_mapping_profile()["min_mapping_volts"]
 
 
 def test_the_shell_path_refuses_a_reading_it_cannot_parse():
