@@ -42,6 +42,19 @@ raising, which the registry reports as ``prepare_failed`` with no reason code
 of ours attached, so a refusal decided there would lose the very thing the
 contract keeps ``refused`` distinct from ``failed`` to carry.
 
+## Where its settings come from
+
+Everything this needs to know about the machine it is on lives in a JSON file
+named by ``--config`` in the manifest's own argv — see
+:mod:`mapping_settings`. It used to be thirteen constants, which meant a second
+robot with a different SLAM unit or a 4S pack was a fork of this file rather
+than a settings edit.
+
+Not the environment, though the camera gateway built the same day uses exactly
+that: the registry starts an executor with ``env={}``, so there is nothing to
+read. The manifest is already per-robot data and already carries the full argv,
+so it carries the path too.
+
 ## The environment this runs in
 
 The registry starts this with ``env={}``, ``cwd="/"``, stderr discarded, and a
@@ -69,13 +82,21 @@ safe to begin" does not read as "this broke".
 
 from __future__ import annotations
 
+import argparse
 import json
 import math
+import os
+import pwd
 import re
 import shlex
 import subprocess
 import sys
 from pathlib import Path
+
+if __package__:
+    from .mapping_settings import MappingSettings, MappingSettingsError
+else:  # Installed as a standalone executor beside mapping_settings.py.
+    from mapping_settings import MappingSettings, MappingSettingsError
 
 CONTRACT_VERSION = "device-executor-v1"
 
@@ -83,19 +104,7 @@ BASH = "/bin/bash"
 SUDO = "/usr/bin/sudo"
 SYSTEMCTL = "/usr/bin/systemctl"
 
-SLAM_UNIT = "flyto-slam.service"
-BRINGUP_UNIT = "turtlebot3-bringup.service"
-NAV2_UNIT = "flyto-nav2.service"
-
-MAP_DIR = Path("/home/ubuntu/.flyto/maps")
-ROS_SETUP = "/opt/ros/jazzy/setup.bash"
-ROS_DOMAIN_ID = "30"
-
-# 11.6 V and not the 11.0 V an idle pack sits at: a mapping run drives for
-# minutes and the sag under motor load is immediate. Checked once, at the
-# start, so the number has to carry the whole run. Kept in step with
-# deploy/make-map.sh, which enforces the same floor for the same reason.
-MIN_MAPPING_VOLTS = 11.6
+DEFAULT_CONFIG = Path("/etc/flyto/mapping.json")
 
 # Bounded well inside the manifest's own timeout so a slow ROS call is reported
 # as a refusal by this process rather than as a kill by the registry, which
@@ -135,7 +144,13 @@ def _result(status: str, reason_code: str, *, detail: str = "",
     return payload
 
 
-def _unit_active(unit: str) -> bool:
+def _unit_active(unit: str) -> bool | None:
+    """Whether a unit is active; ``None`` means systemd could not answer.
+
+    ``systemctl is-active`` uses 3 for an honestly inactive unit. Other
+    non-zero values include unknown units and D-Bus failures, neither of which
+    is evidence that it is safe to start a conflicting stack.
+    """
     try:
         done = subprocess.run(
             [SYSTEMCTL, "is-active", "--quiet", unit],
@@ -143,11 +158,15 @@ def _unit_active(unit: str) -> bool:
             stderr=subprocess.DEVNULL, timeout=10, env={},
         )
     except (OSError, subprocess.SubprocessError):
+        return None
+    if done.returncode == 0:
+        return True
+    if done.returncode == 3:
         return False
-    return done.returncode == 0
+    return None
 
 
-def _stop_slam() -> int | None:
+def _stop_slam(settings: MappingSettings) -> int | None:
     """Stop SLAM and report the return code. ``None`` means it could not be run.
 
     Returned rather than discarded because a stop can genuinely fail: a
@@ -158,7 +177,7 @@ def _stop_slam() -> int | None:
     """
     try:
         done = subprocess.run(
-            [SUDO, "-n", SYSTEMCTL, "stop", SLAM_UNIT],
+            [SUDO, "-n", SYSTEMCTL, "stop", settings.slam_unit],
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL, timeout=40, env={},
         )
@@ -167,14 +186,21 @@ def _stop_slam() -> int | None:
     return done.returncode
 
 
-def _ros(command: str, timeout: int) -> tuple[int, str]:
+def _ros(settings: MappingSettings, command: str, timeout: int) -> tuple[int, str]:
     """Run one ROS command in a sourced login shell. Returns (code, stdout)."""
+    shell_parts = []
+    if settings.ros_setup is not None:
+        shell_parts.append(f"source {shlex.quote(settings.ros_setup)}")
+    if settings.ros_domain_id is not None:
+        shell_parts.append(f"export ROS_DOMAIN_ID={settings.ros_domain_id}")
+    shell_parts.append(command)
+    runtime_account = pwd.getpwuid(os.getuid())
     try:
         done = subprocess.run(
-            [BASH, "-lc", f"source {ROS_SETUP} && export ROS_DOMAIN_ID={ROS_DOMAIN_ID} "
-                          f"&& {command}"],
+            [BASH, "-lc", " && ".join(shell_parts)],
             stdin=subprocess.DEVNULL, capture_output=True, text=True,
-            timeout=timeout, env={"HOME": "/home/ubuntu", "USER": "ubuntu"},
+            timeout=timeout,
+            env={"HOME": runtime_account.pw_dir, "USER": runtime_account.pw_name},
         )
     except subprocess.TimeoutExpired:
         return 124, ""
@@ -183,7 +209,7 @@ def _ros(command: str, timeout: int) -> tuple[int, str]:
     return done.returncode, (done.stdout or "")
 
 
-def _battery_volts() -> float | None:
+def _battery_volts(settings: MappingSettings) -> float | None:
     """The pack voltage, or ``None`` when it cannot be believed.
 
     ``None`` covers unreadable *and* unbelievable. A bare ``float()`` accepts
@@ -195,8 +221,13 @@ def _battery_volts() -> float | None:
     ``battery_too_low`` to it would send someone to charge a battery that is
     fine.
     """
+    if not settings.checks_battery:
+        return None
     code, out = _ros(
-        "timeout 15 ros2 topic echo /battery_state --once --field voltage", ROS_CALL_TIMEOUT,
+        settings,
+        f"timeout 15 ros2 topic echo {shlex.quote(settings.battery_topic)} "
+        "--once --field voltage",
+        ROS_CALL_TIMEOUT,
     )
     if code != 0:
         return None
@@ -219,31 +250,52 @@ def _map_name(params: dict) -> str:
     return raw
 
 
-def start(params: dict) -> dict:
-    if _unit_active(SLAM_UNIT):
+def start(params: dict, settings: MappingSettings) -> dict:
+    slam_active = _unit_active(settings.slam_unit)
+    if slam_active is None:
+        return _result("failed", "unit_state_unknown",
+                       detail="The configured SLAM unit could not be inspected.")
+    if slam_active:
         return _result("refused", "mapping_already_running",
                        detail="SLAM is already recording. Save or abort the run in progress.")
-    if _unit_active(NAV2_UNIT):
-        return _result("refused", "navigation_running",
-                       detail="Nav2 is running and both publish /map. Stop navigation first.")
-    if not _unit_active(BRINGUP_UNIT):
-        return _result("refused", "sensors_unavailable",
-                       detail="turtlebot3-bringup is not running, so there is no scan or odometry.")
+    if settings.navigation_unit is not None:
+        navigation_active = _unit_active(settings.navigation_unit)
+        if navigation_active is None:
+            return _result("failed", "unit_state_unknown",
+                           detail="The configured navigation unit could not be inspected.")
+        if navigation_active:
+            return _result("refused", "navigation_running",
+                           detail="Navigation is running and both stacks publish /map. "
+                                  "Stop navigation first.")
+    if settings.readiness_unit is not None:
+        readiness_active = _unit_active(settings.readiness_unit)
+        if readiness_active is None:
+            return _result("failed", "unit_state_unknown",
+                           detail="The configured readiness unit could not be inspected.")
+        if not readiness_active:
+            return _result("refused", "sensors_unavailable",
+                           detail="The configured readiness unit is not running, so scan or "
+                                  "odometry cannot be trusted.")
 
-    volts = _battery_volts()
-    if volts is None:
-        return _result("refused", "battery_unknown",
-                       detail="Battery state could not be read or was not a believable "
-                              "voltage, so a run long enough to matter cannot be "
-                              "started safely.")
-    if volts < MIN_MAPPING_VOLTS:
-        return _result("refused", "battery_too_low",
-                       detail=f"{volts:.2f} V is below the {MIN_MAPPING_VOLTS} V a mapping "
-                              f"run needs. Charge before starting.")
+    volts = None
+    if settings.checks_battery:
+        volts = _battery_volts(settings)
+        if volts is None:
+            return _result("refused", "battery_unknown",
+                           detail="Battery state could not be read or was not a believable "
+                                  "voltage, so a run long enough to matter cannot be "
+                                  "started safely.")
+        if volts < settings.min_mapping_volts:
+            return _result(
+                "refused",
+                "battery_too_low",
+                detail=f"{volts:.2f} V is below the {settings.min_mapping_volts} V a "
+                       "mapping run needs. Charge before starting.",
+            )
 
     try:
         done = subprocess.run(
-            [SUDO, "-n", SYSTEMCTL, "start", SLAM_UNIT],
+            [SUDO, "-n", SYSTEMCTL, "start", settings.slam_unit],
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL, timeout=30, env={},
         )
@@ -253,14 +305,16 @@ def start(params: dict) -> dict:
         return _result("failed", "slam_start_failed",
                        detail="systemctl refused to start SLAM.")
 
+    battery_detail = (f"battery {volts:.2f} V" if volts is not None
+                      else "battery check not configured for this machine")
     return _result(
         "succeeded", "mapping_started",
-        detail=f"SLAM recording at {volts:.2f} V. Drive the robot over the whole space, "
+        detail=f"SLAM recording ({battery_detail}). Drive the robot over the whole space, "
                f"revisiting where it has already been, then save.",
         evidence=[{
             "kind": "mapping.session",
             "usable": True,
-            "detail": f"slam_toolbox recording, battery {volts:.2f} V",
+            "detail": f"SLAM recording, {battery_detail}",
         }],
     )
 
@@ -315,24 +369,30 @@ def _map_shape(yaml_path: Path, image_path: Path) -> str:
     return f"{cells or 'unknown'} cells at {resolution or 'unknown'} m"
 
 
-def save(params: dict) -> dict:
+def save(params: dict, settings: MappingSettings) -> dict:
     try:
         name = _map_name(params)
     except ValueError:
         return _result("refused", "map_name_invalid")
 
-    if not _unit_active(SLAM_UNIT):
+    slam_active = _unit_active(settings.slam_unit)
+    if slam_active is None:
+        return _result("failed", "unit_state_unknown",
+                       detail="The configured SLAM unit could not be inspected.")
+    if not slam_active:
         return _result("refused", "mapping_not_running",
                        detail="Nothing is recording, so there is no map to save.")
 
     try:
-        MAP_DIR.mkdir(parents=True, exist_ok=True)
+        map_dir = Path(settings.map_dir)
+        map_dir.mkdir(parents=True, exist_ok=True)
     except OSError:
         return _result("failed", "map_directory_unwritable")
 
-    target = MAP_DIR / name
-    staged = MAP_DIR / f".staging-{name}"
+    target = map_dir / name
+    staged = map_dir / f".staging-{name}"
     code, _ = _ros(
+        settings,
         f"timeout {SAVER_SHELL_TIMEOUT} ros2 run nav2_map_server map_saver_cli "
         f"-f {shlex.quote(str(staged))} "
         f"--ros-args -p save_map_timeout:={SAVER_MAP_TIMEOUT}",
@@ -359,7 +419,7 @@ def save(params: dict) -> dict:
     # Reported as evidence rather than as a reason_code, because the job runner
     # reads only `status` and `evidence` from this result and substitutes its
     # own detail -- a reason_code saying SLAM is still up would reach nobody.
-    stopped = _stop_slam()
+    stopped = _stop_slam(settings)
     if stopped != 0:
         evidence.append({
             "kind": "mapping.session",
@@ -371,11 +431,15 @@ def save(params: dict) -> dict:
     return _result("succeeded", "map_recorded", detail=f"{name}: {shape}", evidence=evidence)
 
 
-def abort(params: dict) -> dict:
-    if not _unit_active(SLAM_UNIT):
+def abort(params: dict, settings: MappingSettings) -> dict:
+    slam_active = _unit_active(settings.slam_unit)
+    if slam_active is None:
+        return _result("failed", "unit_state_unknown",
+                       detail="The configured SLAM unit could not be inspected.")
+    if not slam_active:
         return _result("succeeded", "mapping_not_running",
                        detail="Nothing was recording.")
-    stopped = _stop_slam()
+    stopped = _stop_slam(settings)
     if stopped is None:
         return _result("failed", "slam_stop_failed",
                        detail="systemctl could not be run.")
@@ -418,25 +482,36 @@ def _prepare(envelope: dict) -> int:
     })
 
 
-def _execute(envelope: dict) -> int:
+def _execute(envelope: dict, config_path: Path) -> int:
     prepared = envelope.get("prepared")
     if not isinstance(prepared, dict) or prepared.get("marker") != PREPARED_MARKER:
         return _emit(_result("failed", "prepared_payload_invalid"))
     handler = HANDLERS.get(prepared.get("module_id"))
     if handler is None:
         return _emit(_result("refused", "module_not_supported"))
+    try:
+        settings = MappingSettings.from_file(config_path)
+    except MappingSettingsError as exc:
+        return _emit(_result("failed", "mapping_settings_invalid", detail=str(exc)))
     params = prepared.get("params")
     if not isinstance(params, dict):
         params = {}
     try:
-        return _emit(handler(params))
+        return _emit(handler(params, settings))
     except Exception:  # noqa: BLE001 - a crash must still be a valid result
         # The registry reads stdout, not exit codes, and an executor that dies
         # without answering is indistinguishable from one that hung.
         return _emit(_result("failed", "executor_error"))
 
 
-def main() -> int:
+def _arguments(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Flyto mapping device executor")
+    parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = _arguments([] if argv is None else argv)
     try:
         envelope = json.loads(sys.stdin.read(65_536) or "{}")
     except (ValueError, OSError):
@@ -448,9 +523,9 @@ def main() -> int:
     if operation == "prepare":
         return _prepare(envelope)
     if operation == "execute":
-        return _execute(envelope)
+        return _execute(envelope, args.config)
     return _emit(_result("failed", "operation_unsupported"))
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(main(sys.argv[1:]))
