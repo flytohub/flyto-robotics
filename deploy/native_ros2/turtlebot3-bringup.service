@@ -1,0 +1,31 @@
+[Unit]
+Description=TurtleBot3 ROS 2 bringup
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+SupplementaryGroups=dialout
+WorkingDirectory=/home/ubuntu
+RuntimeDirectory=turtlebot3
+Environment=HOME=/home/ubuntu
+Environment=ROS_HOME=/run/turtlebot3
+Environment=ROS_LOG_DIR=/run/turtlebot3/log
+Environment=ROS_DOMAIN_ID=30
+Environment=RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+Environment=TURTLEBOT3_MODEL=burger
+Environment=LDS_MODEL=LDS-03
+ExecStartPre=/usr/bin/mkdir -p /run/turtlebot3/log
+ExecStartPre=/bin/bash -lc 'for i in $(seq 1 90); do ip -4 addr show scope global | grep -q "inet " && ip -4 route show default | grep -q "^default " && exit 0; sleep 1; done; exit 1'
+ExecStart=/bin/bash -lc 'source /opt/ros/jazzy/setup.bash && exec ros2 launch turtlebot3_bringup robot.launch.py'
+Restart=on-failure
+RestartSec=5
+KillSignal=SIGINT
+TimeoutStopSec=20
+
+[Install]
+WantedBy=multi-user.target

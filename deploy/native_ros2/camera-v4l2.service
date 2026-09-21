@@ -1,0 +1,29 @@
+[Unit]
+Description=ROS 2 V4L2 camera publisher
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+SupplementaryGroups=video
+WorkingDirectory=/home/ubuntu
+RuntimeDirectory=ros-camera
+Environment=HOME=/home/ubuntu
+Environment=ROS_HOME=/run/ros-camera
+Environment=ROS_LOG_DIR=/run/ros-camera/log
+Environment=ROS_DOMAIN_ID=30
+Environment=RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+ExecStartPre=/usr/bin/mkdir -p /run/ros-camera/log
+ExecStartPre=/bin/bash -lc 'for i in $(seq 1 90); do ip -4 addr show scope global | grep -q "inet " && ip -4 route show default | grep -q "^default " && exit 0; sleep 1; done; exit 1'
+ExecStart=/bin/bash -lc 'source /opt/ros/jazzy/setup.bash && exec ros2 run v4l2_camera v4l2_camera_node --ros-args -r __ns:=/camera -p video_device:=/dev/v4l/by-id/usb-XC-TECH_Web_Camera_20251103.1921-video-index0 -p output_encoding:=yuv422_yuy2 -p image_size:=[640,480]'
+Restart=on-failure
+RestartSec=5
+KillSignal=SIGINT
+TimeoutStopSec=15
+
+[Install]
+WantedBy=multi-user.target

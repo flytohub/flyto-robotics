@@ -4,23 +4,21 @@ from setuptools import find_packages, setup
 
 PACKAGE_NAME = "flyto_robotics"
 
-
 setup(
     name=PACKAGE_NAME,
     version="0.1.0",
     packages=find_packages(exclude=("tests",)),
-    # The lifecycle renders units from data, so the data has to ship with the
-    # package. Without this, an installed wheel can start `flyto-robot` and then
-    # fail to render a single unit -- the classic "works from the checkout" bug.
-    package_data={PACKAGE_NAME: ["data/*.json"]},
+    package_data={PACKAGE_NAME: []},
     include_package_data=True,
     data_files=[
-        (f"share/{PACKAGE_NAME}/lifecycle", ["flyto_robotics/data/lifecycle-profiles.json"]),
         ("share/ament_index/resource_index/packages", [f"resource/{PACKAGE_NAME}"]),
         (f"share/{PACKAGE_NAME}", ["package.xml"]),
         (f"share/{PACKAGE_NAME}/launch", glob("launch/*.launch.py")),
         (f"share/{PACKAGE_NAME}/config", glob("config/*")),
         (f"share/{PACKAGE_NAME}/contracts", glob("contracts/*.json")),
+        # Upstream-only TurtleBot3/ROS 2 service examples. These units invoke
+        # /opt/ros packages directly and contain no Flyto2 runtime.
+        (f"share/{PACKAGE_NAME}/native_ros2", glob("deploy/native_ros2/*")),
         (f"share/{PACKAGE_NAME}/examples/jobs", glob("examples/jobs/*.json")),
         (
             f"share/{PACKAGE_NAME}/examples/goal-frames",
@@ -61,18 +59,16 @@ setup(
     zip_safe=False,
     maintainer="Flyto2 Robotics",
     maintainer_email="support@flyto2.com",
-    description="Flyto2 ROS 2, Gazebo, and physical robot boundary",
+    description="Flyto2 external ROS 2 adapter, Gazebo lab, and evidence toolkit",
     license="Proprietary",
     entry_points={
         "console_scripts": [
-            "flyto-job-runner = deploy:job_runner_main",
-            "flyto-robot = flyto_robotics.robot_cli:main",
+            # External-computer / lab tooling only. Robot-side Flyto2
+            # appliance launchers do not exist in this source tree.
             "flyto-robotics = flyto_robotics.cli:main",
             "flyto-device-events = flyto_robotics.device_event_cli:main",
             "flyto-robot-mcp = flyto_robotics.mcp_server:main",
-            "flyto-robot-doctor = flyto_robotics.robot_doctor:main",
             "flyto-camera-gateway = flyto_robotics.camera_gateway:main",
-            "flyto-recovery-portal = flyto_robotics.recovery_portal:main",
             "flyto-resource-agent = flyto_robotics.resource_agent:main",
             "flyto-ros2-readiness-probe = flyto_robotics.ros2_probe_node:main",
             "parameter_bridge_guard = flyto_robotics.bridge_guard:main",
