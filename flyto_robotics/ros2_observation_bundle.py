@@ -161,6 +161,16 @@ def evaluate_observation_bundle(value: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def runtime_snapshot(interfaces: Any) -> str:
+    """Hash a standard-interface inventory without depending on discovery order."""
+
+    normalized = sorted(
+        (str(item.kind), str(item.name), str(item.type))
+        for item in interfaces
+    )
+    return _snapshot({"interfaces": normalized})
+
+
 def _pose(value: Any) -> None:
     if not isinstance(value, Mapping) or set(value) != {"frame", "x", "y", "yaw"}:
         raise Ros2ObservationError("pose must contain frame, x, y, and yaw")

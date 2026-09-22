@@ -1,5 +1,10 @@
 # Flyto2 Robotics State
 
+## Adapter provider ownership closure (2026-09-22)
+
+Physical/vendor adapter implementation now lives outside Flyto2 Cloud. `flyto-robotics` ships the `flyto2.adapter-provider.v1` providers for Generic ROS2/rosbridge plus extracted OpenRMF and vision-stream integration; Flyto2 Runtime owns provider discovery/process lifecycle and assignment-scoped authority. Discovery is evidence only and grants no motion authority. The latest read-only TurtleBot3 preflight measured 0.143 m minimum LiDAR clearance, so the unchanged 0.35 m motion floor correctly prevented a new positive-movement acceptance.
+
+
 ## Current — external adapter / standard ROS 2 robot (2026-09-21)
 
 Production topology:

@@ -54,6 +54,23 @@ The repository does **not** own Flyto2 scheduling or task-completion authority.
 A ROS action completing successfully is execution evidence, not proof that the
 user's objective was achieved.
 
+## Architecture
+
+Equipment adapters are installed on the AI Space execution computer and loaded
+by Flyto2 Runtime through the versioned `flyto2.adapter-provider.v1` process
+protocol. Adapter identity maps to an executable by convention, for example
+`ros2.generic` maps to `flyto2-adapter-provider-ros2-generic`. The provider
+owns ROS 2, rosbridge, OpenRMF, camera-stream, and other transport details;
+Runtime owns assignment-scoped authority and process lifecycle; Cloud owns only
+resource/capability inventory, approval, routing, evidence, and verification.
+
+Provider discovery is passive. An installed provider may report a
+`flyto.resource-manifest.v1`, but discovery never grants motion or other
+effects. For execution, Runtime binds the exact commanded resource and approved
+capability allowlist to one assignment and exposes that authority only through a
+loopback endpoint to Flyto2 Core. The robot itself remains standard equipment
+with no Flyto2 credential or scheduler.
+
 ## Robot-side rule
 
 The current source tree contains no Flyto2 Pi job runner, robot lifecycle
@@ -102,7 +119,7 @@ flyto-camera-gateway --help
 flyto-resource-agent --help
 ```
 
-The Cloud-side Generic ROS 2 Adapter consumes standard interfaces such as:
+The Runtime-hosted Generic ROS 2 Adapter consumes standard interfaces such as:
 
 - `nav2_msgs/action/NavigateToPose`
 - `nav2_msgs/action/DriveOnHeading`
@@ -113,7 +130,10 @@ The Cloud-side Generic ROS 2 Adapter consumes standard interfaces such as:
 - `sensor_msgs/msg/LaserScan`
 - standard camera, TF, and map topics
 
-No adapter URL or Flyto2 credential is stored on the robot.
+No adapter URL or Flyto2 credential is stored on the robot. The installed
+provider command for this adapter is `flyto2-adapter-provider-ros2-generic`;
+Flyto2 Runtime discovers it from the execution computer's normal executable
+search path.
 
 ## Simulation and deterministic verification
 

@@ -20,6 +20,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 SETUP_PY = REPO_ROOT / "setup.py"
 
 EXTERNAL_CONSOLES = {
+    "flyto2-adapter-provider-ros2-generic": "flyto_robotics.adapter_provider:main",
     "flyto-robotics": "flyto_robotics.cli:main",
     "flyto-device-events": "flyto_robotics.device_event_cli:main",
     "flyto-robot-mcp": "flyto_robotics.mcp_server:main",
@@ -164,6 +165,9 @@ def test_built_wheel_contains_adapter_lab_code_but_not_pi_runtime(tmp_path: Path
             "flyto_robotics/ros2_execution.py",
             "flyto_robotics/ros2_execution_evidence.py",
             "flyto_robotics/ros2_observation_bundle.py",
+            "flyto_robotics/adapter_contract.py",
+            "flyto_robotics/adapter_provider.py",
+            "flyto_robotics/generic_ros2_adapter.py",
             "flyto_robotics/ros2_closed_loop_lab.py",
             "flyto_robotics/camera_gateway.py",
             "flyto_robotics/resource_agent.py",
@@ -190,8 +194,16 @@ def test_built_wheel_contains_adapter_lab_code_but_not_pi_runtime(tmp_path: Path
         parser = configparser.ConfigParser()
         parser.read_string(archive.read(entry_points[0]).decode("utf-8"))
         scripts = dict(parser.items("console_scripts"))
+        external_adapters = dict(parser.items("flyto2.external_adapters"))
+        resource_discoverers = dict(parser.items("flyto2.resource_discoverers"))
 
     assert scripts == EXTERNAL_CONSOLES
+    assert external_adapters == {
+        "ros2.generic": "flyto_robotics.adapter_provider:build_adapter"
+    }
+    assert resource_discoverers == {
+        "ros2.generic": "flyto_robotics.adapter_provider:discover_resource_manifests"
+    }
     assert RETIRED_APPLIANCE_CONSOLES.isdisjoint(scripts)
 
 

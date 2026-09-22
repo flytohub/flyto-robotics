@@ -55,14 +55,21 @@ setup(
         (f"share/{PACKAGE_NAME}/maps", glob("maps/*")),
         (f"share/{PACKAGE_NAME}/models/flyto_rover", glob("models/flyto_rover/*")),
     ],
-    install_requires=["setuptools"],
+    install_requires=["setuptools", "websockets>=12.0"],
     zip_safe=False,
     maintainer="Flyto2 Robotics",
     maintainer_email="support@flyto2.com",
     description="Flyto2 external ROS 2 adapter, Gazebo lab, and evidence toolkit",
     license="Proprietary",
     entry_points={
+        "flyto2.external_adapters": [
+            "ros2.generic = flyto_robotics.adapter_provider:build_adapter",
+        ],
+        "flyto2.resource_discoverers": [
+            "ros2.generic = flyto_robotics.adapter_provider:discover_resource_manifests",
+        ],
         "console_scripts": [
+            "flyto2-adapter-provider-ros2-generic = flyto_robotics.adapter_provider:main",
             # External-computer / lab tooling only. Robot-side Flyto2
             # appliance launchers do not exist in this source tree.
             "flyto-robotics = flyto_robotics.cli:main",
