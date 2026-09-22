@@ -1,5 +1,41 @@
 # Decisions
 
+## 2026-09-22 — Equipment transports are adapter providers, not Cloud or Runtime core
+
+Decision: ROS2, rosbridge, OpenRMF, camera-stream and vendor transport implementations belong in adapter packages such as `flyto-robotics`. Any compatible AI Space execution host may load those providers and bind one assignment's approved resource/capability authority. Flyto2 Runtime is one optional host, not a required layer. Provider discovery is passive evidence; execution authority is a separate allowlisted assignment contract.
+
+Reason: extracting physical transports from Cloud must not simply make Runtime the next monolith or prerequisite. A new robot or fleet integration should install a provider, not require changes to Cloud, Runtime, or Core.
+
+
+## 2026-09-21 — Standard ROS 2 robot, external Flyto2 execution host
+
+Decision: production Flyto2 robotics does not install Flyto2-specific runtime on
+the robot. TurtleBot3 is standard ROS 2 equipment. Flyto2 workflows and the
+Generic ROS 2 Adapter run on an external AI Space computer.
+
+Decision: execution-host placement and commanded equipment are separate
+authorities. The robot's resource id does not make the robot a queue worker.
+
+Decision: the current source tree no longer contains the Pi job-runner,
+robot lifecycle installer/profile registry, robot doctor, recovery portal,
+delivery gateway, or robot credential provisioning path. Historical evidence
+lives in Git history and dated handoffs, not executable current source.
+
+Decision: the low-level southbound contract is standard ROS 2. Action success
+and actuator receipts are execution facts; only Cloud's independent evidence
+rules may complete a Task.
+
+Reason: a robot should be replaceable or reinstallable from upstream ROS
+documentation without Flyto2 provisioning. Proprietary runtime on the Pi
+duplicates identity, scheduling and state, and turns ordinary ROS equipment into
+an appliance.
+
+All older decisions below that require a robot-local runner, lifecycle install,
+device credential, delivery gateway or recovery portal are historical design
+records and are superseded for production topology by this entry. Their safety
+findings remain useful.
+
+
 ## 2026-08-27 — Commissioning is a dispatched device job, never a mission primitive
 
 Decision: recording a venue map is `mapping.start` / `mapping.save` /

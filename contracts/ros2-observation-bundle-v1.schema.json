@@ -1,0 +1,118 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://flyto2.com/contracts/robotics/ros2-observation-bundle-v1.schema.json",
+  "title": "Flyto ROS 2 Observation Bundle v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract_version",
+    "observation_id",
+    "resource_id",
+    "runtime_snapshot",
+    "deployment_mode",
+    "provider",
+    "phase",
+    "execution_id",
+    "observed_at",
+    "pose",
+    "range",
+    "camera",
+    "map_tf_available",
+    "snapshot"
+  ],
+  "properties": {
+    "contract_version": {"const": "flyto.robotics.ros2-observation-bundle.v1"},
+    "observation_id": {"$ref": "#/$defs/id"},
+    "resource_id": {"$ref": "#/$defs/id"},
+    "runtime_snapshot": {"$ref": "#/$defs/digest"},
+    "deployment_mode": {"enum": ["simulation", "hardware"]},
+    "provider": {"$ref": "#/$defs/id"},
+    "phase": {"enum": ["preflight", "before", "after", "post_stop"]},
+    "execution_id": {
+      "oneOf": [
+        {"type": "null"},
+        {"$ref": "#/$defs/id"}
+      ]
+    },
+    "observed_at": {"type": "string", "format": "date-time", "maxLength": 64},
+    "pose": {
+      "oneOf": [
+        {"type": "null"},
+        {"$ref": "#/$defs/pose"}
+      ]
+    },
+    "range": {
+      "oneOf": [
+        {"type": "null"},
+        {"$ref": "#/$defs/range"}
+      ]
+    },
+    "camera": {
+      "oneOf": [
+        {"type": "null"},
+        {"$ref": "#/$defs/camera"}
+      ]
+    },
+    "map_tf_available": {"type": "boolean"},
+    "snapshot": {"$ref": "#/$defs/digest"}
+  },
+  "$defs": {
+    "id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,191}$"
+    },
+    "digest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "pose": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["frame", "x", "y", "yaw"],
+      "properties": {
+        "frame": {"enum": ["map", "odom"]},
+        "x": {"type": "number", "minimum": -1000, "maximum": 1000},
+        "y": {"type": "number", "minimum": -1000, "maximum": 1000},
+        "yaw": {
+          "type": "number",
+          "minimum": -3.141592653589793,
+          "maximum": 3.141592653589793
+        }
+      }
+    },
+    "range": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["minimum_range_m", "sample_count"],
+      "properties": {
+        "minimum_range_m": {"type": "number", "minimum": 0, "maximum": 1000},
+        "sample_count": {"type": "integer", "minimum": 1, "maximum": 1000000}
+      }
+    },
+    "camera": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "encoding",
+        "width",
+        "height",
+        "calibrated",
+        "calibration_snapshot",
+        "frame_snapshot"
+      ],
+      "properties": {
+        "encoding": {"type": "string", "minLength": 1, "maxLength": 64},
+        "width": {"type": "integer", "minimum": 1, "maximum": 16384},
+        "height": {"type": "integer", "minimum": 1, "maximum": 16384},
+        "calibrated": {"type": "boolean"},
+        "calibration_snapshot": {
+          "oneOf": [
+            {"type": "null"},
+            {"$ref": "#/$defs/digest"}
+          ]
+        },
+        "frame_snapshot": {"$ref": "#/$defs/digest"}
+      }
+    }
+  }
+}

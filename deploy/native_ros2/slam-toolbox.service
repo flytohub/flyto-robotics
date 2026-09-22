@@ -1,0 +1,33 @@
+[Unit]
+Description=ROS 2 SLAM Toolbox for TurtleBot3
+After=network-online.target turtlebot3-bringup.service
+Wants=network-online.target
+Requires=turtlebot3-bringup.service
+PartOf=turtlebot3-bringup.service
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu
+RuntimeDirectory=slam-toolbox
+Environment=HOME=/home/ubuntu
+Environment=ROS_HOME=/run/slam-toolbox
+Environment=ROS_LOG_DIR=/run/slam-toolbox/log
+Environment=ROS_DOMAIN_ID=30
+Environment=RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+Environment=TURTLEBOT3_MODEL=burger
+Environment=LDS_MODEL=LDS-03
+ExecStartPre=/usr/bin/mkdir -p /run/slam-toolbox/log
+ExecStartPre=/bin/bash -lc 'for i in $(seq 1 90); do ip -4 addr show scope global | grep -q "inet " && ip -4 route show default | grep -q "^default " && exit 0; sleep 1; done; exit 1'
+ExecStartPre=/bin/bash -lc "source /opt/ros/jazzy/setup.bash; python3 -c 'import rclpy,sys; from rclpy.node import Node; from rclpy.qos import qos_profile_sensor_data; from nav_msgs.msg import Odometry; from sensor_msgs.msg import LaserScan; rclpy.init(); n=Node(\"slam_ready_probe\"); seen=set(); n.create_subscription(Odometry,\"/odom\",lambda m:seen.add(\"odom\"),10); n.create_subscription(LaserScan,\"/scan\",lambda m:seen.add(\"scan\"),qos_profile_sensor_data); [rclpy.spin_once(n,timeout_sec=0.1) for _ in range(120) if len(seen)<2]; ok=len(seen)==2; n.destroy_node(); rclpy.shutdown(); sys.exit(0 if ok else 1)'"
+ExecStart=/bin/bash -lc 'source /opt/ros/jazzy/setup.bash && exec ros2 launch slam_toolbox online_async_launch.py autostart:=true use_lifecycle_manager:=false use_sim_time:=false'
+Restart=on-failure
+RestartSec=5
+KillSignal=SIGINT
+TimeoutStopSec=20
+
+[Install]
+WantedBy=multi-user.target

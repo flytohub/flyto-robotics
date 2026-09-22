@@ -6,9 +6,7 @@ import argparse
 import json
 import math
 import os
-import signal
 import sys
-import threading
 import xml.etree.ElementTree as ET
 from collections.abc import Sequence
 from datetime import datetime, timezone
@@ -25,7 +23,6 @@ from .ai_planner import (
 )
 from .capabilities import GoalFrame, default_capability_registry
 from .contracts import JobValidationError, load_job, write_json_atomic
-from .delivery_gateway import DeliveryGateway
 from .goal_planner import DeterministicDeliveryGoalPlanner
 from .guarded_handoff import load_policy, load_script
 from .human_approval import (
@@ -155,6 +152,7 @@ def validate_assets(root: Path = PROJECT_ROOT) -> list[str]:
         root / "contracts/ros2-runtime-snapshot-v1.schema.json",
         root / "contracts/ros2-execution-grant-v1.schema.json",
         root / "contracts/ros2-execution-evidence-v1.schema.json",
+        root / "contracts/ros2-observation-bundle-v1.schema.json",
         root / "contracts/ros2-stress-evidence-v1.schema.json",
     ]
     for path in json_paths:
@@ -674,53 +672,6 @@ def _parser() -> argparse.ArgumentParser:
     ros.add_argument("--semantic-map", type=Path)
     ros.add_argument("--semantic-map-id")
 
-    serve_delivery = subcommands.add_parser(
-        "serve-delivery",
-        help="serve the loopback AI Space delivery gateway",
-    )
-    serve_delivery.add_argument("--job", required=True, type=Path)
-    serve_delivery.add_argument("--host", default="127.0.0.1")
-    serve_delivery.add_argument("--port", type=int, default=8766)
-    serve_delivery.add_argument("--time-scale", type=float, default=1.0)
-    serve_delivery.add_argument(
-        "--confirmation-timeout",
-        type=float,
-        default=90.0,
-        help="QR scan window in mission seconds; must fit the job mission timeout",
-    )
-    serve_delivery.add_argument(
-        "--backend",
-        choices=("simulated", "ros2"),
-        default="simulated",
-        help="simulated planar kinematics or a live ROS 2 robot",
-    )
-    serve_delivery.add_argument(
-        "--gazebo",
-        action="store_true",
-        help="mark ros2 backend evidence as Gazebo physics instead of physical",
-    )
-    serve_delivery.add_argument(
-        "--semantic-map",
-        type=Path,
-        help="enable goal-driven deliveries resolved against this location map",
-    )
-    serve_delivery.add_argument("--semantic-map-id")
-    serve_delivery.add_argument(
-        "--odom-topic",
-        default="/flyto/odom",
-        help="odometry topic for the ros2 backend (TurtleBot3 uses /odom)",
-    )
-    serve_delivery.add_argument(
-        "--scan-topic",
-        default="/flyto/scan",
-        help="lidar topic for the ros2 backend (TurtleBot3 uses /scan)",
-    )
-    serve_delivery.add_argument(
-        "--cmd-vel-topic",
-        default="/flyto/cmd_vel",
-        help="velocity topic for the ros2 backend (TurtleBot3 uses /cmd_vel)",
-    )
-
     resolve_goal = subcommands.add_parser(
         "resolve-goal",
         help="resolve one operator goal into a validated delivery workflow",
@@ -1083,67 +1034,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                 ]
             print(json.dumps(report, ensure_ascii=False, sort_keys=True))
             return 0 if decision.accepted else 3
-        if args.command == "serve-delivery":
-            runner = None
-            if args.backend == "ros2":
-                try:
-                    from .ros2_delivery_runner import Ros2DeliveryRunner
-                except ImportError as exc:
-                    raise ValueError(
-                        "backend ros2 requires a ROS 2 environment with rclpy "
-                        f"({exc})"
-                    ) from exc
-
-                runner = Ros2DeliveryRunner(
-                    gazebo_physics=args.gazebo,
-                    odom_topic=args.odom_topic,
-                    scan_topic=args.scan_topic,
-                    cmd_vel_topic=args.cmd_vel_topic,
-                )
-            semantic_map = _semantic_map_store(
-                args.semantic_map,
-                args.semantic_map_id,
-            )
-            gateway = DeliveryGateway(
-                token=os.environ.get("FLYTO_ROBOTICS_DELIVERY_TOKEN", ""),
-                qr_secret=os.environ.get("FLYTO_ROBOTICS_QR_SECRET", ""),
-                job=load_job(args.job),
-                host=args.host,
-                port=args.port,
-                time_scale=args.time_scale,
-                confirmation_timeout_seconds=args.confirmation_timeout,
-                runner=runner,
-                semantic_map=semantic_map,
-            )
-            gateway.start()
-            host, port = gateway.address
-            print(
-                json.dumps(
-                    {
-                        "ok": True,
-                        "service": "flyto-robotics-delivery",
-                        "backend": args.backend,
-                        "goal_planner": (
-                            "deterministic" if semantic_map else "fixed_template"
-                        ),
-                        "listening": f"{host}:{port}",
-                        "approval_id": gateway.approval_id,
-                    },
-                    sort_keys=True,
-                ),
-                flush=True,
-            )
-            # Explicit handlers: SIGTERM (docker stop, systemd) must tear down
-            # cleanly, and SIGINT may be inherited as ignored when the server
-            # is started from a non-interactive background shell.
-            stop_requested = threading.Event()
-            signal.signal(signal.SIGINT, lambda *_: stop_requested.set())
-            signal.signal(signal.SIGTERM, lambda *_: stop_requested.set())
-            try:
-                stop_requested.wait()
-            finally:
-                gateway.stop()
-            return 0
     except (
         HumanDecisionValidationError,
         QRConfirmationValidationError,

@@ -22,6 +22,10 @@ The stable external API is file-based and language-neutral:
   capabilities to cancellable ROS 2 actions without exposing that graph to AI;
 - `contracts/ros2-runtime-snapshot-v1.schema.json` carries content-addressed
   action availability, lifecycle, freshness, and emergency-stop evidence;
+- `contracts/ros2-observation-bundle-v1.schema.json` is the common
+  simulation/hardware observation shape for pose, range, camera, map/TF and
+  calibration provenance. Simulation and hardware differ only by
+  `deployment_mode` / provider, not by evidence schema;
 - `contracts/result-v1.schema.json` validates terminal evidence;
 - `contracts/human-decision-v1.schema.json` validates signed approval envelopes;
 - `flyto-robotics validate-job` validates before motion;
@@ -191,6 +195,27 @@ python3 -m flyto_robotics.cli verify-ros2-execution-evidence \
 The evidence binds the resource plan, Space, robot, adapter, capability, live
 runtime and grant snapshots without exposing action names, message types or
 velocity commands.
+
+#### Simulation / physical observation parity
+
+Execution receipts and independent observations remain separate. A Nav2 action
+result says what the executor reported; a
+`flyto.robotics.ros2-observation-bundle.v1` document records what was
+independently observed around that execution.
+
+The same bundle is used for Gazebo and a physical robot:
+
+- `deployment_mode=simulation` or `hardware`;
+- pose in `map` or `odom`;
+- minimum-range evidence and sample count;
+- camera frame digest, dimensions and encoding;
+- explicit camera `calibrated` state plus calibration digest when present;
+- live `map -> odom` availability;
+- exact runtime snapshot and execution binding.
+
+An uncalibrated camera is valid raw visual evidence. It is not valid evidence
+for metric/geometric vision. No default intrinsics are invented to make a
+physical camera look equivalent to a calibrated simulator camera.
 
 #### Nav2 fault-injection stress gate
 

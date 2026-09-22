@@ -1,0 +1,33 @@
+[Unit]
+Description=ROS 2 Nav2 for TurtleBot3
+After=network-online.target turtlebot3-bringup.service slam-toolbox.service
+Wants=network-online.target
+Requires=turtlebot3-bringup.service slam-toolbox.service
+PartOf=turtlebot3-bringup.service slam-toolbox.service
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu
+RuntimeDirectory=nav2
+Environment=HOME=/home/ubuntu
+Environment=ROS_HOME=/run/nav2
+Environment=ROS_LOG_DIR=/run/nav2/log
+Environment=ROS_DOMAIN_ID=30
+Environment=RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+Environment=TURTLEBOT3_MODEL=burger
+Environment=LDS_MODEL=LDS-03
+ExecStartPre=/usr/bin/mkdir -p /run/nav2/log
+ExecStartPre=/bin/bash -lc 'for i in $(seq 1 90); do ip -4 addr show scope global | grep -q "inet " && ip -4 route show default | grep -q "^default " && exit 0; sleep 1; done; exit 1'
+ExecStartPre=/bin/bash -lc "source /opt/ros/jazzy/setup.bash; python3 -c 'import rclpy,sys; from rclpy.node import Node; from nav_msgs.msg import Odometry; from tf2_msgs.msg import TFMessage; rclpy.init(); n=Node(\"nav_ready_probe\"); seen=set(); n.create_subscription(Odometry,\"/odom\",lambda m:seen.add(\"odom\"),10); n.create_subscription(TFMessage,\"/tf\",lambda m:seen.add(\"map_tf\") if any(t.header.frame_id==\"map\" and t.child_frame_id==\"odom\" for t in m.transforms) else None,10); [rclpy.spin_once(n,timeout_sec=0.1) for _ in range(150) if len(seen)<2]; ok=seen=={\"odom\",\"map_tf\"}; n.destroy_node(); rclpy.shutdown(); sys.exit(0 if ok else 1)'"
+ExecStart=/bin/bash -lc 'source /opt/ros/jazzy/setup.bash && exec ros2 launch nav2_bringup bringup_launch.py slam:=False use_localization:=False use_composition:=False use_respawn:=True params_file:=/opt/ros/jazzy/share/turtlebot3_navigation2/param/burger.yaml use_sim_time:=False autostart:=True'
+Restart=on-failure
+RestartSec=5
+KillSignal=SIGINT
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

@@ -16,10 +16,17 @@ parameters:
 - IMU at 200 Hz with angular velocity and acceleration noise;
 - Gazebo physics at a `0.001 s` step, 150 solver iterations, real gravity,
   floor friction, contact, movable mass, walls, and obstacles;
-- the same `/flyto/cmd_vel`, `/flyto/odom`, and `/flyto/scan` topics consumed
-  by `serve-delivery --backend ros2` on the real robot;
-- the same Flyto mission contracts, sensor stabilization gate, obstacle stop,
-  stale-sensor stop, final zero command, and evidence writer.
+- the historical `/flyto/cmd_vel`, `/flyto/odom`, and `/flyto/scan`
+  simulation topics used to reproduce the pre-2026-09-21 delivery-gateway
+  evidence path;
+- the same legacy mission contracts, sensor stabilization gate, obstacle stop,
+  stale-sensor stop, final zero command, and evidence writer used by that
+  compatibility verifier.
+
+This compatibility path is **not** the physical production architecture. A real
+TurtleBot3 exposes upstream ROS 2 topics/actions, and Flyto2 reaches them from an
+external computer through the Generic ROS 2 Adapter. The production
+`flyto-robotics` CLI no longer exposes `serve-delivery`.
 
 The OpenCR firmware, Dynamixel electrical behavior, battery voltage, USB serial
 drivers, real wheel wear, and real Wi-Fi are hardware-only effects. Gazebo is
@@ -39,8 +46,9 @@ packages.
 
 The source repository is mounted read-only. A working copy, build output,
 runtime logs, and generated secrets stay inside the VM under
-`~/.local/share/flyto-robot-gazebo/`. The gateway listens on guest loopback port
-`8766`; Lima forwards loopback ports to the Mac.
+`~/.local/share/flyto-robot-gazebo/`. The legacy verifier may start its
+simulation-only gateway on guest loopback port `8766`; that port is not a
+TurtleBot3 production interface.
 
 Use an explicit lab fault when diagnosing fail-safe behavior:
 
