@@ -4,7 +4,7 @@ All notable project changes are recorded here.
 
 ## Unreleased
 
-- Ship Generic ROS2/rosbridge, OpenRMF and vision-stream integrations as external `flyto2.adapter-provider.v1` providers for Flyto2 Runtime instead of Cloud-bundled implementations.
+- Ship Generic ROS2/rosbridge, OpenRMF and vision-stream integrations as external adapter providers usable by the built-in AI Space host or optional process hosts such as Flyto2 Runtime, instead of Cloud-bundled transport implementations.
 - Add canonical `flyto2-adapter-provider-ros2-generic` packaging and passive `flyto.resource-manifest.v1` discovery while keeping assignment authority and the 0.35 m motion safety floor separate.
 
 - Reframe production around a standard ROS 2 robot controlled from an external

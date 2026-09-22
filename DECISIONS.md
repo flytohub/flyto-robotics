@@ -2,9 +2,9 @@
 
 ## 2026-09-22 — Equipment transports are adapter providers, not Cloud or Runtime core
 
-Decision: ROS2, rosbridge, OpenRMF, camera-stream and vendor transport implementations belong in adapter packages such as `flyto-robotics`. Flyto2 Runtime may discover/start those providers and bind one assignment's approved resource/capability authority, but Runtime core does not implement robot-specific transport and Cloud does not import it. Provider discovery is passive evidence; execution authority is a separate allowlisted assignment contract.
+Decision: ROS2, rosbridge, OpenRMF, camera-stream and vendor transport implementations belong in adapter packages such as `flyto-robotics`. Any compatible AI Space execution host may load those providers and bind one assignment's approved resource/capability authority. Flyto2 Runtime is one optional host, not a required layer. Provider discovery is passive evidence; execution authority is a separate allowlisted assignment contract.
 
-Reason: extracting physical transports from Cloud should not simply make Runtime the next monolith. A new robot or fleet integration should install a provider, not change Cloud or Runtime core source.
+Reason: extracting physical transports from Cloud must not simply make Runtime the next monolith or prerequisite. A new robot or fleet integration should install a provider, not require changes to Cloud, Runtime, or Core.
 
 
 ## 2026-09-21 — Standard ROS 2 robot, external Flyto2 execution host

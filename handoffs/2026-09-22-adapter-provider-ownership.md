@@ -8,17 +8,19 @@ Branch: `fix/external-ros2-adapter-architecture`
 The external equipment implementation now has a non-Cloud home.
 
 `flyto-robotics` owns the Generic ROS 2 / rosbridge implementation and the
-physical-robot evidence/safety semantics. It also ships provider implementations
-for the extracted OpenRMF and vision-stream adapters. Flyto2 Runtime discovers
-and starts providers; Cloud no longer imports these transports.
+physical-robot evidence/safety semantics. It also ships provider implementations for the extracted OpenRMF and
+vision-stream adapters. Any compatible AI Space execution host may load the
+providers. The built-in host uses Python plugin entry points; optional Flyto2
+Runtime can use the process-provider protocol. Cloud no longer imports these
+transports.
 
 The host protocol is `flyto2.adapter-provider.v1`. The canonical ROS provider
 executable is `flyto2-adapter-provider-ros2-generic`, matching Runtime's
 generic adapter-id-to-executable convention for `ros2.generic`.
 
 Discovery emits `flyto.resource-manifest.v1` evidence only. It grants no
-authority. Execution is separately bound by Runtime to the exact commanded
-resource and approved capability allowlist for one assignment.
+authority. Execution is separately bound by the selected host to the exact
+commanded resource and approved capability allowlist for one assignment.
 
 The Generic ROS 2 adapter preserves the existing physical safety behavior:
 fresh odometry and LiDAR are required, navigation additionally requires fresh

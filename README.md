@@ -57,12 +57,15 @@ user's objective was achieved.
 ## Architecture
 
 Equipment adapters are installed on the AI Space execution computer and loaded
-by Flyto2 Runtime through the versioned `flyto2.adapter-provider.v1` process
-protocol. Adapter identity maps to an executable by convention, for example
-`ros2.generic` maps to `flyto2-adapter-provider-ros2-generic`. The provider
-owns ROS 2, rosbridge, OpenRMF, camera-stream, and other transport details;
-Runtime owns assignment-scoped authority and process lifecycle; Cloud owns only
-resource/capability inventory, approval, routing, evidence, and verification.
+through a host-neutral adapter boundary. The built-in Python AI Space host uses
+`flyto2.external_adapters` / `flyto2.resource_discoverers` entry points; process
+hosts such as optional Flyto2 Runtime can use the versioned
+`flyto2.adapter-provider.v1` protocol. Adapter identity maps to the provider,
+for example `ros2.generic` maps to `flyto2-adapter-provider-ros2-generic` on the
+process-host path. The adapter owns ROS 2, rosbridge, OpenRMF, camera-stream and
+other transport details; the selected execution host owns assignment-scoped
+authority and lifecycle; Cloud owns resource/capability inventory, approval,
+routing, evidence and verification.
 
 Provider discovery is passive. An installed provider may report a
 `flyto.resource-manifest.v1`, but discovery never grants motion or other
@@ -119,7 +122,7 @@ flyto-camera-gateway --help
 flyto-resource-agent --help
 ```
 
-The Runtime-hosted Generic ROS 2 Adapter consumes standard interfaces such as:
+The Generic ROS 2 Adapter on the selected AI Space execution host consumes standard interfaces such as:
 
 - `nav2_msgs/action/NavigateToPose`
 - `nav2_msgs/action/DriveOnHeading`
@@ -131,9 +134,9 @@ The Runtime-hosted Generic ROS 2 Adapter consumes standard interfaces such as:
 - standard camera, TF, and map topics
 
 No adapter URL or Flyto2 credential is stored on the robot. The installed
-provider command for this adapter is `flyto2-adapter-provider-ros2-generic`;
-Flyto2 Runtime discovers it from the execution computer's normal executable
-search path.
+package exposes `ros2.generic` to the built-in AI Space plugin host and also
+ships `flyto2-adapter-provider-ros2-generic` for process-based hosts such as
+optional Flyto2 Runtime.
 
 ## Simulation and deterministic verification
 
