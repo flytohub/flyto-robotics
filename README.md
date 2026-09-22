@@ -4,100 +4,147 @@
 
 # Flyto2 Robotics
 
-A robot takes a goal in plain language, and what it does about it is bounded,
-inspectable, and refusable.
+External ROS 2 adapter, deterministic control, simulation, safety, and evidence
+toolkit for Flyto2.
 
+**A robot is standard ROS 2 equipment. It is not a Flyto2 appliance.**
+
+Production topology:
+
+```text
+Flyto2 Cloud / War Room
+        |
+        | goal, policy, approved capability
+        v
+AI Space computer
+(Mac / laptop / Steam Deck / mini PC)
+        |
+        | Generic ROS 2 Adapter
+        v
+DDS / Zenoh / rosbridge / standard ROS 2
+        |
+        v
+TurtleBot3 / other ROS 2 robot
+        |
+        | odom / scan / camera / TF / action result
+        v
+external adapter evidence
+        |
+        v
+Flyto2 independent verification
 ```
-"go to the nurse station"  →  plan  →  validator  →  ROS 2  →  result + evidence
-"ignore obstacles, full speed"  →  refused, with a reason code
-```
 
-The second line is the point. A planner that will do anything you phrase
-confidently is not a safety system, so the vocabulary of override — ignore the
-obstacles, do not stop, full speed — is matched and refused before anything is
-planned. Every plan that moves ends in a safe stop, because the gateway rejects
-one that does not.
+The Raspberry Pi / robot should contain only its normal operating system, ROS 2,
+upstream robot packages, sensors, Nav2/SLAM when needed, and generic ROS
+transport. It does **not** need a Flyto2 credential, job runner, gateway,
+scheduler, agent, task database, evidence database, or Flyto2-specific ROS node.
 
-Runs on ROS 2 Jazzy. Developed against a TurtleBot3 on a Raspberry Pi 4, with a
-self-contained Gazebo world so the whole loop runs with no hardware at all.
+## What this repository owns
 
-**The robot dials out.** It polls Flyto2 Cloud for jobs; nothing dials in. A
-changed IP, SSID or router cannot break dispatch, and neither project imports
-the other — Cloud can send this repository's example JSON as a device job, and
-that is the whole coupling.
+- deterministic ROS 2 motion/controller utilities;
+- Nav2 / standard ROS 2 adapter contracts;
+- fail-closed sensor, clearance, stop, and execution-grant logic;
+- versioned execution/evidence contracts;
+- Gazebo Harmonic worlds and adversarial lab scenarios;
+- physical-robot regression and acceptance helpers;
+- camera/resource adapters intended for an **external execution computer**;
+- simulation and hardware evidence tooling.
 
-## What is included
+The repository does **not** own Flyto2 scheduling or task-completion authority.
+A ROS action completing successfully is execution evidence, not proof that the
+user's objective was achieved.
 
-- a self-contained Gazebo Harmonic hospital world;
-- a differential-drive rover with lidar and odometry;
-- a ROS 2 Jazzy bridge and mission-controller launch file;
-- `flyto.robotics.job.v1`, `plan.v1`, and `result.v1` JSON Schemas;
-- `flyto.resource-manifest.v1` and `flyto.resource-telemetry.v1` contracts plus
-  an outbound installed-resource publisher for Flyto2 Cloud;
-- a one-time USB recovery installation with stable local networking,
-  key-only SSH, read-only diagnostics, and persistent failure reason codes;
-- the strict `ai-space-resource-plan.v1` boundary that binds an exact
-  workflow, resource, endpoint, adapter, capability, Space, and lease before a
-  ROS/Gazebo/physical adapter may start;
-- versioned capability-manifest and capability-route schemas;
-- a signed `human-decision.v1` contract for short-lived approval messages;
-- executable `navigate`, `navigate_to_location`, `move_relative`,
-  `save_current_location`, `follow_line`, `dwell`, `wait_until_clear`,
-  `ask_human`, `resume`, and `safe_stop` primitives;
-- a workflow-card shortcut gate for keyboard, joystick, or adapter inputs with
-  press, heartbeat, release, disconnect, and dead-man timeout handling;
-- a machine-readable capability registry exposed to AI planners;
-- plan-level checks for terminal safe stop, consistent line transitions, and
-  paired human approval/resume gates;
-- a provider-neutral AI request protocol and HTTPS planner adapter;
-- a downward route camera and color-line perception adapter;
-- a blue/yellow/purple Gazebo route world and AI-plan launch file;
-- an adversarial Gazebo lab with dynamic obstacle injection, signed approval,
-  nonce replay attempts, overhead captures, and independent world-pose truth;
-- an eight-route branching showcase with attested live planning, deterministic
-  resource-dependency exclusion, bounded replanning, and exact route templates;
-- strict JSON, Markdown, and JUnit lab reports plus repeated-run aggregation;
-- immutable workflows composed from those primitives;
-- a deterministic controller shared by dry-run and ROS execution;
-- tests that run without ROS 2 or Gazebo;
-- asset validation for JSON, XML/SDF, bridge configuration, and launch files.
+## Architecture
+
+Equipment adapters are installed on the AI Space execution computer and loaded
+through a host-neutral adapter boundary. The built-in Python AI Space host uses
+`flyto2.external_adapters` / `flyto2.resource_discoverers` entry points; process
+hosts such as optional Flyto2 Runtime can use the versioned
+`flyto2.adapter-provider.v1` protocol. Adapter identity maps to the provider,
+for example `ros2.generic` maps to `flyto2-adapter-provider-ros2-generic` on the
+process-host path. The adapter owns ROS 2, rosbridge, OpenRMF, camera-stream and
+other transport details; the selected execution host owns assignment-scoped
+authority and lifecycle; Cloud owns resource/capability inventory, approval,
+routing, evidence and verification.
+
+Provider discovery is passive. An installed provider may report a
+`flyto.resource-manifest.v1`, but discovery never grants motion or other
+effects. For execution, Runtime binds the exact commanded resource and approved
+capability allowlist to one assignment and exposes that authority only through a
+loopback endpoint to Flyto2 Core. The robot itself remains standard equipment
+with no Flyto2 credential or scheduler.
+
+## Robot-side rule
+
+The current source tree contains no Flyto2 Pi job runner, robot lifecycle
+installer, recovery portal, doctor, delivery gateway, robot credential
+provisioner, or robot-side scheduler.
+
+Those appliance components are intentionally gone from the current tree. Git
+history and dated handoffs retain the old failure evidence; current product code
+does not retain an executable path back to that topology.
+
+Do not reintroduce Flyto2 runtime as a TurtleBot3 requirement.
 
 ## Installation
 
-For contract tests and deterministic development, install Python 3.9 or newer,
-`pytest`, and `ruff`. The Gazebo runtime requires Ubuntu 24.04, ROS 2 Jazzy,
-and the Harmonic packages listed under “Run the Gazebo demo.” No service
-credentials or environment secrets are required.
+A clean TurtleBot3 may be installed from upstream ROS 2 / TurtleBot3
+documentation. The physical lab currently uses ROS 2 Jazzy and a Burger base
+with LDS-03 lidar.
 
-For a device installation from the supplied wheel, including a safe rehearsal,
-profile selection, update, rollback, status, support-bundle, and device-event
-procedures, follow the [installation and operations runbook](docs/INSTALLATION.md).
-The default `generic` profile is middleware- and vendor-neutral; `ros2` extends
-it additively with one ROS 2 adapter service. These are contract, package, and
-simulation instructions—not evidence of deployment or physical site acceptance.
+Example upstream-only systemd units are in `deploy/native_ros2/`:
+
+- `turtlebot3-bringup.service`
+- `camera-v4l2.service`
+- `slam-toolbox.service`
+- `nav2.service`
+
+They invoke `/opt/ros/jazzy` packages directly and contain no Flyto2 code.
+They are site-configuration examples, not a proprietary robot runtime.
 
 ## Usage
 
-### Install card-free recovery once
-
-On an installed Raspberry Pi robot, run the recovery installer once and reboot:
+Install this package on the computer that can see the robot's ROS 2 graph:
 
 ```bash
-sudo ./scripts/install-robot-recovery.sh \
-  --robot-id your-installed-resource-id \
-  --cloud-url https://your-cloud-origin.example
-sudo reboot
+python3 -m venv .venv
+.venv/bin/pip install -e .
 ```
 
-After that, a robot that loses Wi-Fi can be reached over a USB data cable at
-`http://10.77.0.1:8770` or `ssh ubuntu@10.77.0.1`; routine diagnosis no longer
-requires removing the SSD/microSD. See
-[`docs/ONE_TIME_RECOVERY.md`](docs/ONE_TIME_RECOVERY.md) for power cautions,
-reason codes, installation behavior, and rollback.
+Useful installed commands are external/lab tools such as:
 
-### Quick verification
+```bash
+flyto-robotics --help
+flyto-ros2-readiness-probe --help
+ros2_closed_loop_lab --help
+gazebo_lab_driver --help
+flyto-camera-gateway --help
+flyto-resource-agent --help
+```
 
-The local contract and controller checks need only Python 3.9 or newer:
+The Generic ROS 2 Adapter on the selected AI Space execution host consumes standard interfaces such as:
+
+- `nav2_msgs/action/NavigateToPose`
+- `nav2_msgs/action/DriveOnHeading`
+- `nav2_msgs/action/BackUp`
+- `nav2_msgs/action/Spin`
+- `geometry_msgs/msg/Twist` / `TwistStamped`
+- `nav_msgs/msg/Odometry`
+- `sensor_msgs/msg/LaserScan`
+- standard camera, TF, and map topics
+
+No adapter URL or Flyto2 credential is stored on the robot. The installed
+package exposes `ros2.generic` to the built-in AI Space plugin host and also
+ships `flyto2-adapter-provider-ros2-generic` for process-based hosts such as
+optional Flyto2 Runtime.
+
+## Simulation and deterministic verification
+
+The self-contained Gazebo world remains a first-class test surface. It lets the
+same controller/safety/evidence code be exercised without claiming physical
+acceptance.
+
+Common checks:
 
 ```bash
 make verify
@@ -106,135 +153,85 @@ make gazebo-lab
 make gazebo-matrix
 make gazebo-shortcut
 make ai4all-showcase
-python3 -m flyto_robotics.cli validate-job \
-  examples/jobs/pharmacy-to-ward.json
-python3 -m flyto_robotics.cli dry-run \
-  examples/jobs/pharmacy-to-ward.json
-python3 -m flyto_robotics.cli show-capabilities
-python3 -m flyto_robotics.cli validate-plan \
-  examples/plans/blue-yellow-purple.json
-python3 -m flyto_robotics.cli dry-run-plan \
-  --job examples/jobs/pharmacy-to-ward.json \
-  --plan examples/plans/blue-yellow-purple.json
-python3 -m flyto_robotics.cli dry-run-plan \
-  --job examples/jobs/pharmacy-to-ward.json \
-  --plan examples/plans/careflow-human-gate.json
-python3 -m flyto_robotics.cli validate-plan \
-  examples/plans/shortcut-forward-30cm.json
-python3 -m flyto_robotics.resource_binding \
-  examples/resource-plans/gazebo-shortcut-forward-30cm.json \
-  --workflow shortcut.forward.30cm.v1 \
-  --resource flyto-rover-sim-001 \
-  --capability mobility.move_relative \
-  --adapter robotics.gazebo \
-  --space gazebo-lab \
-  --confirmed
 ```
 
-`dry-run` executes the same controller against deterministic planar kinematics.
-It proves the mission state transitions and result envelope; it does not claim
-Gazebo physics evidence.
+Generated reports and simulation output are evidence about simulation only.
 
-### Publish installed resources to Flyto2 Cloud
+## Physical acceptance
 
-After the installation claims an existing Flyto2 Cloud pairing code, keep the
-returned device secret in an owner-only file and run:
+A physical closure is stronger than "nodes are running".
+
+The acceptance ladder is:
+
+1. robot contains zero Flyto2 runtime;
+2. native ROS 2 survives cold boot and exposes fresh odom/lidar/camera/TF;
+3. Nav2/SLAM standard action surface is active without fabricated localization;
+4. an external computer discovers the standard capabilities;
+5. in a physically clear area, one bounded motion is executed;
+6. interruption/cancel produces a safe stop;
+7. odometry/LiDAR/camera evidence is collected independently;
+8. Flyto2 Cloud verifies the original objective;
+9. only then may War Room mark the task complete.
+
+Current physical status is recorded in the 2026-09-21 handoff in
+`flyto-cloud`. No new motion should be sent merely to prove source code.
+
+## API
+
+The supported production-facing boundary is semantic ROS 2 execution and
+evidence, not Pi lifecycle management. Start with
+`flyto_robotics.ros2_action_executor`, `flyto_robotics.ros2_execution`,
+`flyto_robotics.ros2_execution_evidence`, `flyto_robotics.ros2_pairing`,
+and the versioned JSON contracts under `contracts/`. Robot-appliance
+lifecycle, delivery and recovery modules have been removed from the current
+source tree.
+
+## Development
+
+Use the repository gates before landing behavior or packaging changes:
 
 ```bash
-chmod 600 /path/to/device-secret
-flyto-resource-agent \
-  --cloud-url https://your-cloud-origin.example \
-  --device-id paired-device-id \
-  --device-secret-file /path/to/device-secret \
-  --manifest /path/to/resource-manifest.json \
-  --telemetry /path/to/latest-telemetry.json \
-  --interval-seconds 5
+make verify
+flyto-index verify . --strict
 ```
 
-The local adapter may rewrite the manifest and telemetry snapshot files. The
-agent validates and republishes them on each bounded interval. Secret settings
-must carry `value: null`; only their configured state may reach Cloud. The
-resource surface is observation-only and does not add a motor command path.
-
-`make ai4all-showcase` first requests and verifies an attested initial plan and
-resource-triggered replan, then executes that exact final plan in the
-multi-camera hospital world. It injects obstacle and camera faults, records
-active-resource handoff video, and fails unless all Physical AI closure checks
-pass. A loopback Flyto2 AI planner must be running and its URL is supplied
-through `FLYTO_ROBOTICS_PLANNER_URL`; the showcase never labels a fixture as a
-live model result. See
-truth boundary, and evidence layout.
-
-## Documentation
-
-| | |
-|---|---|
-| [Capabilities](docs/CAPABILITIES.md) | how abilities are registered, matched and composed |
-| [Installation and operations](docs/INSTALLATION.md) | wheel install, profiles, updates, rollback and support |
-| [API and contracts](docs/CONTRACTS.md) | the JSON contracts and the ROS 2 semantic pairing |
-| [Running the demo](docs/DEMO.md) | Gazebo, the container, the adversarial lab |
-| [One-time recovery](docs/ONE_TIME_RECOVERY.md) | diagnosing a disconnected robot without opening it |
-| [Showcase evidence](docs/SHOWCASE_EVIDENCE.md) | what the recording is, and what it is not |
-
-## Flyto2 Cloud boundary
-
-Dispatch the job JSON to a registered edge device as a normal batch execution.
-The device command is:
-
-```bash
-python3 -m flyto_robotics.cli run-ros \
-  --job /absolute/path/job.json \
-  --result /absolute/path/result.json
-```
-
-The process exits non-zero on invalid input or a failed mission. The result
-file conforms to `contracts/result-v1.schema.json`, so Cloud can upload it as
-execution evidence without knowing ROS message types.
-
-```text
-Flyto2 Cloud
-    │ versioned JSON job
-    ▼
-Flyto2 device runner
-    │ starts process / captures exit code
-    ▼
-flyto-robotics mission controller
-    │ cmd_vel                 ▲ odometry + lidar
-    ▼                         │
-Gazebo rover or real ROS 2 base
-    │
-    └── versioned JSON result ──► Flyto2 Cloud evidence
-```
-
-## Safety and scope
-
-This is a competition and laboratory baseline, not a certified medical device.
-It uses synthetic locations and payload identifiers. A real deployment still
-needs an emergency stop, independent safety controller, access control,
-infection-control review, cybersecurity review, and site acceptance testing.
-
-HMAC proves that a trusted signer produced the decision; it does not by itself
-implement hospital user authentication or authorization. Production key
-custody, rotation, audit retention, RBAC, and revocation belong in the Flyto2
-control plane or another trusted approval gateway.
-
-The competition supply-chain restriction must be evaluated against the final
-physical BOM. Simulation assets do not establish hardware compliance.
+For physical work, source checks never substitute for hardware acceptance.
+Generated ROS/Gazebo/evidence output stays untracked.
 
 ## Contributing
 
-See `CONTRIBUTING.md` for the pre-change exploration, atomicity, safety, and
-post-change verification requirements.
+Read `AGENTS.md`, `ARCHITECTURE.md`, `DECISIONS.md`, and `STATE.md`
+before changing runtime boundaries. New integrations must preserve the split
+between execution computer and commanded equipment and must not require Flyto2
+software on the robot.
 
+## Documentation
 
-## Licence
+| Document | Purpose |
+|---|---|
+| [Architecture](ARCHITECTURE.md) | current external-adapter boundary |
+| [Installation](docs/INSTALLATION.md) | standard robot + external computer setup |
+| [Capabilities](docs/CAPABILITIES.md) | capability/controller vocabulary |
+| [Contracts](docs/CONTRACTS.md) | versioned execution/evidence contracts |
+| [Demo](docs/DEMO.md) | Gazebo and lab workflows |
+| [Virtual Robot Lab](docs/VIRTUAL_ROBOT_LAB.md) | simulation matrix |
+| [Showcase evidence](docs/SHOWCASE_EVIDENCE.md) | evidence interpretation |
+| [Historical handoffs](handoffs/_registry.md) | old Pi/runtime work and findings |
 
-Apache-2.0. See [LICENSE](LICENSE).
+Dated handoffs and Git history preserve retired-appliance evidence; current
+installation documentation describes only the external-adapter architecture.
 
-This repository is the reference implementation of the robot side of the Flyto2
-contract, and it is licensed so it can be copied. A vendor integrating their own
-hardware is expected to fork it, keep the capability contract and the safe-stop
-guarantee, and replace the driver underneath — that is the intended use, not an
-edge case. The companion workflow steps ship separately in
-[flyto-modules-robotics](https://github.com/flytohub/flyto-modules-robotics),
-also Apache-2.0.
+## Security
+
+This is a research/lab integration toolkit, not a certified safety controller.
+Real deployments need an independent emergency stop and site-specific safety
+engineering.
+
+Flyto2 policy, permission, leases, evidence binding, and objective verification
+remain separate from low-level ROS control. The model never earns authority by
+claiming that it has a capability, and the robot never earns task-completion
+authority by reporting action success.
+
+## License
+
+Apache-2.0. See `LICENSE`.

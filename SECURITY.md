@@ -2,72 +2,78 @@
 
 ## Reporting a vulnerability
 
-Email **security@flyto2.com**. Please include what you observed, how to
-reproduce it, and what you think the impact is. You will get an
-acknowledgement; if you do not hear back within a few days, send a reminder
-rather than assuming it was received.
+Email **security@flyto2.com**. Include what you observed, how to reproduce it,
+and the expected impact. Do not test against a robot or installation that is not
+yours; physical machines can move.
 
-Please do not open a public issue for something exploitable, and please do not
-test against a robot or an installation that is not yours. Physical machines
-move.
+Do not open a public issue for an exploitable defect.
 
-## What this repository is
+## Current trust boundary
 
-Deterministic mission control for a real robot: a controller that decides
-whether to move, a ROS 2 adapter that talks to the hardware, a job runner that
-claims work from Flyto2 Cloud, and the operator tools around them. A defect
-here can move a machine, so reports about the safety path are the most
-interesting ones we receive.
+This repository contains external-computer robotics adapters, deterministic
+controller/safety utilities, Gazebo labs, ROS 2 readiness/execution code, and
+evidence contracts.
 
-Particularly welcome:
+The production robot is standard ROS 2 equipment. It does not hold a Flyto2
+credential, claim Flyto2 jobs, run a Flyto2 scheduler, expose a Flyto2 delivery
+gateway, or decide whether a Flyto2 task is complete.
 
-- A sequence where the obstacle guard permits motion it should refuse
-- A sensor state that reads as safe when it is unmeasured or stale
-- Anything that lets a job move a robot without a valid paired credential
-- Anything that makes generated evidence describe a run that did not happen
+The authority path is:
 
-## The device credential, stated plainly
+```text
+Flyto2 Cloud
+  -> approved capability / policy / resource binding
+  -> external AI Space computer
+  -> standard ROS 2
+  -> robot
+  -> observations / execution evidence
+  -> independent Cloud verification
+```
 
-The robot holds a device secret so it can claim jobs unattended. **It is stored
-in clear text** at `~/.flyto/runner-credentials.json`, and reporting that on
-its own will be closed as known. Here is the reasoning, so you can aim at what
-is actually load-bearing.
+A model, adapter, simulator, or robot cannot grant itself authority by declaring
+that it has a capability. A ROS/Nav2 action result is execution evidence, not a
+mission verdict.
 
-The lab robot is a Raspberry Pi 4: no TPM, no secure element. It pairs itself
-and must read its own secret at boot with no operator present. Any key it can
-use unattended is a key the SD card also holds, so encrypting the credential
-against a key stored beside it would look stronger and protect nothing. We
-would rather say that than ship the appearance of encryption.
+## High-value reports
 
-What is actually enforced:
+Particularly useful reports include:
 
-| | |
-|---|---|
-| File mode | `0600`, set at creation — the file has never existed at any other permission |
-| Directory mode | `0700`, and an existing looser one is tightened |
-| On read | Refused outright if group or others can read it; the secret is treated as disclosed |
-| On write | Atomic rename with `fsync`, so a power cut cannot truncate it into a lost pairing |
-| Service | `UMask=0077`, `NoNewPrivileges`, `ProtectSystem=full`, `PrivateTmp` |
-| Pairing code | Popped from the environment, never written anywhere |
-| Logs | The device **id** is logged. The secret is not, anywhere |
+- a path that bypasses capability approval, permission, bounds, or execution
+  grants;
+- replay or retry behavior that can duplicate a physical effect;
+- cancellation that reports success without withdrawing/stopping the action;
+- stale/missing odometry, LiDAR, camera, TF, or Nav2 state being accepted as
+  fresh;
+- a stop path that can be overtaken by later motion;
+- evidence that can be rebound to the wrong resource, task, goal, or execution;
+- simulation evidence being accepted as physical evidence without explicit
+  provenance;
+- camera or sensor evidence being treated as calibrated when calibration is
+  absent;
+- any path that lets action success directly complete the user objective.
 
-So the boundary is: another account on the robot, a careless backup, a stray
-`chmod`, or anything walking the filesystem gets nothing. **Physical possession
-of the SD card gets the credential.** That is the honest limit of an unattended
-device without hardware key storage, and it is why a lost robot should be
-unpaired from Cloud rather than trusted to protect itself.
+## Robot-side security rule
 
-On a host that *does* have a TPM, the runner reads
-`$CREDENTIALS_DIRECTORY` when systemd supplies it — a private tmpfs that never
-reaches persistent storage, with the ciphertext at rest sealed to the hardware.
-`deploy/systemd/flyto-job-runner.service` documents the provisioning. Where
-that is available, this process writes no secret to a filesystem at all.
+A clean robot must be reinstallable from upstream ROS 2 / vendor documentation
+without cloning or installing this repository.
+
+Do not put Flyto2 credentials, task state, adapter secrets, Cloud endpoints,
+job queues, or Flyto2-specific daemons on the robot.
+
+Generic site configuration for ROS 2, Nav2, SLAM, camera drivers, DDS/Zenoh, and
+independent hardware E-stop/safety systems remains outside Flyto2 task
+authority.
+
+## Secrets and logs
+
+Examples, tests, logs, evidence, and configuration committed to this repository
+must contain no production credentials or customer data. External adapters must
+not expose raw secrets in evidence or diagnostic output.
 
 ## Scanning
 
-CodeQL runs on every push and pull request to `main`, plus weekly, with the
-`security-extended` query suite. Secret scanning, push protection, non-provider
-patterns, validity checks and Dependabot security updates are on.
+CodeQL runs on pushes and pull requests to `main`, plus scheduled scans.
+Secret scanning, push protection, and dependency security updates are enabled.
 
-A quiet scanner is not the same as an absent risk, and this file exists partly
-to say where the two differ.
+A quiet scanner is not proof of physical safety. Physical acceptance remains a
+separate gate.
