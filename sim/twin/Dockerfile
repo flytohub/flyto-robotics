@@ -19,6 +19,8 @@ RUN apt-get update \
         ros-jazzy-ros-gz-sim \
         ros-jazzy-ros-gz-bridge \
         ros-jazzy-rmw-cyclonedds-cpp \
+        ros-jazzy-image-transport-plugins \
+        python3-opencv \
         mesa-utils \
         libgl1-mesa-dri \
         xvfb \
@@ -32,6 +34,12 @@ RUN apt-get update \
 COPY config/slam_toolbox.yaml /etc/ros/slam_toolbox.yaml
 COPY scripts/ros2-laserscan-stabilizer.py /usr/local/libexec/ros2-laserscan-stabilizer.py
 COPY scripts/entrypoint.sh /usr/local/bin/twin-entrypoint.sh
+# Twin-only pieces: the burger model with the robot's sensors, the world launch,
+# the driver stand-ins, and the robot's own description and parameter dumps.
+COPY models /opt/flyto-twin/models
+COPY launch /opt/flyto-twin/launch
+COPY config/real /opt/flyto-twin/config/real
+COPY scripts/twin_hardware.py /opt/flyto-twin/scripts/twin_hardware.py
 RUN chmod +x /usr/local/libexec/ros2-laserscan-stabilizer.py /usr/local/bin/twin-entrypoint.sh
 
 # Same environment as every robot service unit.

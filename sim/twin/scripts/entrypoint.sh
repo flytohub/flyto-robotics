@@ -28,14 +28,28 @@ wait_for_topic() {  # topic, seconds
 }
 
 # Display for the Gazebo window, served to the browser through noVNC.
+# A container restart leaves the previous display's lock behind, and Xvfb
+# then refuses :1, which takes the Gazebo window down with it.
+rm -f /tmp/.X1-lock /tmp/.X11-unix/X1
 start xvfb Xvfb :1 -screen 0 1600x900x24 -nolisten tcp
 sleep 1
 start openbox openbox
 start x11vnc x11vnc -display :1 -forever -shared -nopw -localhost -rfbport 5900 -quiet
 start novnc websockify --web=/usr/share/novnc/ 6080 localhost:5900
 
-# Bringup: Gazebo world with the burger model instead of the hardware driver.
-start gazebo ros2 launch turtlebot3_gazebo "${TWIN_WORLD_LAUNCH:-turtlebot3_world.launch.py}"
+# Bringup: Gazebo stands in for the hardware, and twin_hardware.py stands in
+# for the robot's driver nodes (turtlebot3_node, diff_drive_controller,
+# lidar_node, /camera/v4l2_camera), loading the parameters dumped from the
+# robot. See README.md "Same as the robot".
+TWIN_HOME=/opt/flyto-twin
+WORLD=${TWIN_WORLD:-/opt/ros/jazzy/share/turtlebot3_gazebo/worlds/turtlebot3_world.world}
+start gazebo ros2 launch "$TWIN_HOME/launch/twin.launch.py" world:="$WORLD" \
+  x_pose:="${TWIN_X:--2.0}" y_pose:="${TWIN_Y:--0.5}" yaw:="${TWIN_YAW:-0.0}"
+start hardware python3 "$TWIN_HOME/scripts/twin_hardware.py" --ros-args \
+  --params-file "$TWIN_HOME/config/real/turtlebot3_node.params.yaml" \
+  --params-file "$TWIN_HOME/config/real/diff_drive_controller.params.yaml" \
+  --params-file "$TWIN_HOME/config/real/lidar_node.params.yaml" \
+  --params-file "$TWIN_HOME/config/real/camera__v4l2_camera.params.yaml"
 wait_for_topic /scan 240 || true
 wait_for_topic /odom 60 || true
 

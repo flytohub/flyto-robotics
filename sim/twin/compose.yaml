@@ -9,6 +9,10 @@ services:
       - "127.0.0.1:19090:9090"
       - "127.0.0.1:6080:6080"
     environment:
-      TWIN_WORLD_LAUNCH: ${TWIN_WORLD_LAUNCH:-turtlebot3_world.launch.py}
+      # A Gazebo world file inside the container; the default is turtlebot3_world.
+      TWIN_WORLD: ${TWIN_WORLD:-/opt/ros/jazzy/share/turtlebot3_gazebo/worlds/turtlebot3_world.world}
+      TWIN_X: ${TWIN_X:--2.0}
+      TWIN_Y: ${TWIN_Y:--0.5}
+      TWIN_YAW: ${TWIN_YAW:-0.0}
     shm_size: "1gb"
     restart: "no"
