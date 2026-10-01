@@ -353,3 +353,54 @@ def test_adapter_has_no_dependency_on_flyto_modules_robotics_gateway():
     assert "flyto_modules_robotics" not in source
     assert "FLYTO_ROBOTICS_GATEWAY_URL" not in source
     assert "/v1/plans" not in source
+
+
+def _with_clock(device):
+    device.backend.interfaces.append(
+        StandardInterface("topic", "/clock", "rosgraph_msgs/msg/Clock")
+    )
+    return device
+
+
+def _advance(device, call_id):
+    return device.invoke(
+        CallRequest(call_id, "motion.advance", {"distance_m": 0.1}, deadline_seconds=5)
+    )
+
+
+def test_hardware_mode_refuses_motion_on_a_simulated_graph(monkeypatch):
+    monkeypatch.delenv("FLYTO_ROS2_DEPLOYMENT_MODE", raising=False)
+    device = _with_clock(adapter())
+
+    result = _advance(device, "hw-on-sim")
+
+    assert result.outcome == OUTCOME_REFUSED
+    assert "simulator" in result.detail
+    assert device.execution_count("hw-on-sim") == 0
+
+
+def test_simulation_mode_refuses_motion_on_a_graph_without_clock(monkeypatch):
+    monkeypatch.setenv("FLYTO_ROS2_DEPLOYMENT_MODE", "simulation")
+    device = adapter()
+
+    result = _advance(device, "sim-on-hw")
+
+    assert result.outcome == OUTCOME_REFUSED
+    assert "physical hardware" in result.detail
+    assert device.execution_count("sim-on-hw") == 0
+
+
+def test_matching_deployment_mode_allows_motion(monkeypatch):
+    monkeypatch.setenv("FLYTO_ROS2_DEPLOYMENT_MODE", "simulation")
+    device = _with_clock(adapter())
+
+    assert _advance(device, "sim-on-sim").outcome == OUTCOME_COMPLETED
+
+
+def test_halt_is_never_blocked_by_a_deployment_mismatch(monkeypatch):
+    monkeypatch.delenv("FLYTO_ROS2_DEPLOYMENT_MODE", raising=False)
+    device = _with_clock(adapter())
+
+    result = device.invoke(CallRequest("halt-on-sim", "motion.halt", {}, deadline_seconds=5))
+
+    assert result.outcome == OUTCOME_COMPLETED
