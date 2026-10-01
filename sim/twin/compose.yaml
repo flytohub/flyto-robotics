@@ -1,0 +1,14 @@
+services:
+  twin:
+    build: .
+    image: flyto-turtlebot3-twin:jazzy
+    container_name: flyto-turtlebot3-twin
+    ports:
+      # Same local endpoint the adapter uses through the robot's SSH tunnel
+      # (ssh -L 19090:127.0.0.1:9090 ubuntu@flyto-robot.local).
+      - "127.0.0.1:19090:9090"
+      - "127.0.0.1:6080:6080"
+    environment:
+      TWIN_WORLD_LAUNCH: ${TWIN_WORLD_LAUNCH:-turtlebot3_world.launch.py}
+    shm_size: "1gb"
+    restart: "no"
