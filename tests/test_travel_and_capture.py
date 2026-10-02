@@ -95,3 +95,38 @@ def test_capture_without_rosbridge_is_refused_not_faked():
     result = device.invoke(CallRequest("photo", "vision.observe", arguments={}))
     assert result.outcome == OUTCOME_REFUSED
     assert "rosbridge" in result.detail
+
+
+class PongRecorder:
+    def __init__(self):
+        self.pongs = 0
+        self.closed = False
+
+    def send(self, _payload):
+        pass
+
+    def pong(self, _data=b""):
+        self.pongs += 1
+
+    def recv(self, timeout=None):
+        import time
+
+        time.sleep(timeout or 0.05)
+        raise TimeoutError
+
+    def close(self):
+        self.closed = True
+
+
+def test_the_rosbridge_socket_sends_its_own_heartbeat(monkeypatch):
+    import time
+
+    import flyto_robotics.generic_ros2_adapter as adapter_module
+
+    monkeypatch.setattr(adapter_module, "KEEPALIVE_SECONDS", 0.05)
+    socket = PongRecorder()
+    backend = RosbridgeROS2Backend(url="ws://127.0.0.1:1", connection_factory=lambda _url: socket)
+    backend.reconnect()
+    time.sleep(0.3)
+    backend.disconnect()
+    assert socket.pongs >= 3

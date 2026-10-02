@@ -104,6 +104,8 @@ SUPERVISED_MAX_YAW_RAD = math.pi / 2
 # Read-only capabilities that return one sensor reading; they never move.
 CAPTURE_CAPABILITIES = frozenset({"vision.observe", "sensing.map"})
 CAPTURE_WAIT_SECONDS = 5.0
+# Well inside rosbridge's websocket_ping_timeout (20 s on the TurtleBot3).
+KEEPALIVE_SECONDS = 5.0
 MAX_PHOTO_BYTES = 2_000_000
 MAX_MAP_CELLS = 4_000_000
 
@@ -1828,7 +1830,34 @@ class RosbridgeROS2Backend:
             daemon=True,
         )
         self._reader.start()
+        threading.Thread(
+            target=self._keepalive_loop,
+            args=(websocket,),
+            name="rosbridge-keepalive",
+            daemon=True,
+        ).start()
         self._subscribe_standard_observations()
+
+    def _keepalive_loop(self, websocket: Any) -> None:
+        """Send an unsolicited pong every few seconds while connected.
+
+        The robot runs rosbridge with websocket_ping_interval == ping_timeout
+        (20 s). Tornado measures the timeout from the last pong it received,
+        so at its first ping it closes any client that has not sent one: every
+        call longer than 20 s lost its socket mid-motion, and with it the
+        cancel and the safe stop. A pong is a valid unsolicited heartbeat
+        (RFC 6455 5.5.3) and keeps that clock fresh.
+        """
+        while True:
+            with self._condition:
+                if not self._connected or websocket is not self._ws:
+                    return
+            try:
+                with self._send_lock:
+                    websocket.pong(b"flyto")
+            except Exception:  # noqa: BLE001 - the reader notices a dead socket
+                return
+            time.sleep(KEEPALIVE_SECONDS)
 
 
 def build(resource_id: str = "") -> GenericROS2Adapter:
