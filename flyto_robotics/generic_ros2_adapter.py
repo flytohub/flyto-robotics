@@ -85,6 +85,57 @@ def _simulation_marker_topic() -> str:
     return os.getenv("FLYTO_ROS2_SIM_MARKER_TOPIC", "/clock").strip()
 SCAN_TYPE = "sensor_msgs/msg/LaserScan"
 
+# What makes a motion safe to start on this robot, set by whoever installed it.
+# LiDAR clearance is the default and the only basis that lets the adapter
+# judge the space itself. A robot without LiDAR declares that a person is
+# present instead: Cloud already holds every actuating capability for an
+# operator's Run (direct_capabilities: actuates -> CONFIRM), so the adapter
+# drops the clearance check, keeps odometry for verification, and bounds each
+# motion so that person can still stop it. Any other value refuses motion.
+SAFETY_BASIS_LIDAR = "lidar_clearance"
+SAFETY_BASIS_OPERATOR = "operator_present"
+SAFETY_BASES = (SAFETY_BASIS_LIDAR, SAFETY_BASIS_OPERATOR)
+OPERATOR_PRESENT_OBSERVATION = "operator:present"
+SUPERVISED_MAX_SPEED_MPS = 0.05
+SUPERVISED_MAX_DISTANCE_M = 0.3
+SUPERVISED_MAX_YAW_RAD = math.pi / 2
+
+
+def _safety_basis() -> str:
+    return os.getenv("FLYTO_ROS2_SAFETY_BASIS", SAFETY_BASIS_LIDAR).strip().lower()
+
+
+def _needs_lidar() -> bool:
+    """Whether observations wait for LiDAR; anything but operator_present does."""
+    return _safety_basis() != SAFETY_BASIS_OPERATOR
+
+
+def _supervised_arguments(
+    capability_id: str, arguments: Mapping[str, float]
+) -> tuple[dict[str, float], str | None]:
+    """Arguments bounded for operator_present, or why the motion is refused."""
+    bounded = dict(arguments)
+    if capability_id == "motion.navigate":
+        return bounded, (
+            "navigation needs LiDAR clearance; this robot's safety basis is "
+            "operator_present"
+        )
+    if capability_id in {"motion.advance", "motion.retreat"}:
+        if bounded.get("distance_m", 0.0) > SUPERVISED_MAX_DISTANCE_M:
+            return bounded, (
+                f"operator_present allows at most {SUPERVISED_MAX_DISTANCE_M:.2f}m "
+                "per motion"
+            )
+        bounded["speed_mps"] = min(
+            bounded.get("speed_mps", SUPERVISED_MAX_SPEED_MPS), SUPERVISED_MAX_SPEED_MPS
+        )
+    turn = abs(bounded.get("yaw_radians", 0.0))
+    if capability_id == "motion.rotate" and turn > SUPERVISED_MAX_YAW_RAD:
+        return bounded, (
+            f"operator_present allows at most {SUPERVISED_MAX_YAW_RAD:.2f}rad per turn"
+        )
+    return bounded, None
+
 DEFAULT_INTERFACES = {
     "motion.navigate": (
         "action",
@@ -234,9 +285,14 @@ class GenericROS2Adapter:
         declarations: list[decl.CapabilityDeclaration] = []
         for capability_id in sorted(available):
             kind, name, interface_type = DEFAULT_INTERFACES[capability_id]
+            basis = _safety_basis()
             observations = (
                 f"{os.getenv('FLYTO_ROS2_ODOM_TOPIC', '/odom')}:{ODOM_TYPE}",
-                f"{os.getenv('FLYTO_ROS2_SCAN_TOPIC', '/scan')}:{SCAN_TYPE}",
+                # Shown when the capability is approved: what this robot's
+                # motion safety rests on.
+                OPERATOR_PRESENT_OBSERVATION
+                if basis == SAFETY_BASIS_OPERATOR
+                else f"{os.getenv('FLYTO_ROS2_SCAN_TOPIC', '/scan')}:{SCAN_TYPE}",
             )
             declarations.append(
                 decl.declare(
@@ -258,9 +314,14 @@ class GenericROS2Adapter:
         mismatch = self._deployment_mismatch()
         if mismatch is not None:
             return mismatch
+        basis = _safety_basis()
+        if basis not in SAFETY_BASES:
+            return f"FLYTO_ROS2_SAFETY_BASIS {basis!r} is not one of {', '.join(SAFETY_BASES)}"
         observation = self.backend.observation()
         if observation.get("pose") is None:
             return "fresh odometry is required before motion"
+        if basis == SAFETY_BASIS_OPERATOR:
+            return None
         range_observation = observation.get("range")
         if not isinstance(range_observation, Mapping):
             return "fresh LiDAR is required before motion"
@@ -325,6 +386,10 @@ class GenericROS2Adapter:
             arguments = _numeric_arguments(request.capability_id, request.arguments)
         except ValueError as error:
             return CallResult(request.call_id, OUTCOME_REFUSED, detail=str(error))
+        if _safety_basis() == SAFETY_BASIS_OPERATOR and request.capability_id != "motion.halt":
+            arguments, bound_error = _supervised_arguments(request.capability_id, arguments)
+            if bound_error is not None:
+                return CallResult(request.call_id, OUTCOME_REFUSED, detail=bound_error)
         preflight_error = self._motion_preflight(request.capability_id)
         if preflight_error is not None:
             return CallResult(
@@ -549,7 +614,7 @@ class RclpyROS2Backend:
         deadline = time.monotonic() + _observation_wait_seconds()
         self._spin(0.25)
         while (
-            self._pose_seen_at is None or self._range_seen_at is None
+            self._pose_seen_at is None or (_needs_lidar() and self._range_seen_at is None)
         ) and time.monotonic() < deadline:
             self._spin(0.1)
         now = time.monotonic()
@@ -1266,7 +1331,7 @@ class RosbridgeROS2Backend:
         with self._condition:
             while (
                 self._connected
-                and (self._pose_seen_at is None or self._range_seen_at is None)
+                and (self._pose_seen_at is None or (_needs_lidar() and self._range_seen_at is None))
                 and time.monotonic() < deadline
             ):
                 self._condition.wait(timeout=deadline - time.monotonic())
