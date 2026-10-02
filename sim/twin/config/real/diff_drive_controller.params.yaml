@@ -1,0 +1,25 @@
+# Parameters dumped from flyto-robot.local with `ros2 param dump /diff_drive_controller`
+# on 2026-10-02. The twin's emulator node loads them unchanged.
+/diff_drive_controller:
+  ros__parameters:
+    namespace: ''
+    odometry:
+      child_frame_id: base_footprint
+      frame_id: odom
+      publish_tf: true
+      use_imu: true
+    qos_overrides:
+      /parameter_events:
+        publisher:
+          depth: 1000
+          durability: volatile
+          history: keep_last
+          reliability: reliable
+      /tf:
+        publisher:
+          depth: 100
+          durability: volatile
+          history: keep_last
+          reliability: reliable
+    start_type_description_service: true
+    use_sim_time: false
