@@ -83,15 +83,15 @@ def test_a_map_is_its_cells_with_size_and_origin():
 
 
 def test_capture_topics_are_declared_when_present():
-    device = adapter({"camera.capture", "map.capture"})
+    device = adapter({"vision.observe", "sensing.map"})
     declared = {item.capability_id for item in device.describe()}
-    assert {"camera.capture", "map.capture"} <= declared
-    assert DEFAULT_INTERFACES["map.capture"][2] == "nav_msgs/msg/OccupancyGrid"
+    assert {"vision.observe", "sensing.map"} <= declared
+    assert DEFAULT_INTERFACES["sensing.map"][2] == "nav_msgs/msg/OccupancyGrid"
 
 
 def test_capture_without_rosbridge_is_refused_not_faked():
-    device = adapter({"camera.capture"})
+    device = adapter({"vision.observe"})
     device.describe()
-    result = device.invoke(CallRequest("photo", "camera.capture", arguments={}))
+    result = device.invoke(CallRequest("photo", "vision.observe", arguments={}))
     assert result.outcome == OUTCOME_REFUSED
     assert "rosbridge" in result.detail

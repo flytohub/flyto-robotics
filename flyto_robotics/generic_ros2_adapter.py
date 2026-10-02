@@ -102,7 +102,7 @@ SUPERVISED_MAX_YAW_RAD = math.pi / 2
 
 
 # Read-only capabilities that return one sensor reading; they never move.
-CAPTURE_CAPABILITIES = frozenset({"camera.capture", "map.capture"})
+CAPTURE_CAPABILITIES = frozenset({"vision.observe", "sensing.map"})
 CAPTURE_WAIT_SECONDS = 5.0
 MAX_PHOTO_BYTES = 2_000_000
 MAX_MAP_CELLS = 4_000_000
@@ -206,12 +206,12 @@ DEFAULT_INTERFACES = {
         os.getenv("FLYTO_ROS2_NAVIGATE_ACTION", "/navigate_to_pose"),
         "nav2_msgs/action/NavigateToPose",
     ),
-    "camera.capture": (
+    "vision.observe": (
         "topic",
         os.getenv("FLYTO_ROS2_CAMERA_COMPRESSED_TOPIC", "/camera/image_raw/compressed"),
         "sensor_msgs/msg/CompressedImage",
     ),
-    "map.capture": (
+    "sensing.map": (
         "topic",
         os.getenv("FLYTO_ROS2_MAP_TOPIC", "/map"),
         "nav_msgs/msg/OccupancyGrid",
@@ -251,8 +251,8 @@ ARGUMENTS: Mapping[str, tuple[decl.DeclaredArgument, ...]] = {
             "distance_m", required=True, minimum=0.1, maximum=3.0, unit="m"
         ),
     ),
-    "camera.capture": (),
-    "map.capture": (),
+    "vision.observe": (),
+    "sensing.map": (),
     "motion.advance": (
         decl.DeclaredArgument(
             "distance_m", required=True, minimum=0.05, maximum=2.0, unit="m"
@@ -1043,7 +1043,7 @@ class RosbridgeROS2Backend:
         self._reader: threading.Thread | None = None
         self._responses: dict[str, dict[str, Any]] = {}
         self._action_results: dict[str, dict[str, Any]] = {}
-        # One-shot reads for camera.capture and map.capture: topic -> waiter.
+        # One-shot reads for vision.observe and sensing.map: topic -> waiter.
         self._capture_waits: dict[str, str] = {}
         self._captured: dict[str, dict[str, Any]] = {}
         self._active_actions: dict[str, str] = {}
@@ -1439,7 +1439,7 @@ class RosbridgeROS2Backend:
                     "reliability": "reliable",
                     # The map is latched; a photo is the next frame.
                     "durability": (
-                        "transient_local" if capability_id == "map.capture" else "volatile"
+                        "transient_local" if capability_id == "sensing.map" else "volatile"
                     ),
                 },
             }
@@ -1459,7 +1459,7 @@ class RosbridgeROS2Backend:
             return CallResult(call_id, OUTCOME_FAILED, detail=f"no {topic} message arrived")
         try:
             payload = (
-                map_capture(message) if capability_id == "map.capture" else photo_capture(message)
+                map_capture(message) if capability_id == "sensing.map" else photo_capture(message)
             )
         except ValueError as error:
             return CallResult(call_id, OUTCOME_FAILED, detail=str(error))

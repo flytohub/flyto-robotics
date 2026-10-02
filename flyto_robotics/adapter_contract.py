@@ -46,15 +46,15 @@ _CAPABILITY_METADATA: Mapping[str, Mapping[str, Any]] = {
         "required_permissions": ("robot.motion",),
         "requires_safe_stop": True,
     },
-    "camera.capture": {
-        "display_name": "Take Photo",
-        "description": "Take one photo with the robot's camera",
+    "vision.observe": {
+        "display_name": "Observe",
+        "description": "See what is in a place, as a picture: one photo from the robot's camera",
         "safety_class": "read_only",
         "required_permissions": (),
         "requires_safe_stop": False,
         "cancellable": False,
     },
-    "map.capture": {
+    "sensing.map": {
         "display_name": "Capture Map",
         "description": "Take the map the robot has built so far",
         "safety_class": "read_only",
