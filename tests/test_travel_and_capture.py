@@ -181,3 +181,74 @@ def test_map_pose_waits_for_the_first_transform(monkeypatch):
     answers = iter([None, None, {"frame": "map", "x": 1.0, "y": 0.0, "yaw": 0.0}])
     device.backend.map_pose = lambda: next(answers)
     assert device.map_pose()["x"] == 1.0
+
+
+class RunawayBackend:
+    """Nav2 that keeps driving: odometry climbs until cancelled."""
+
+    def __init__(self):
+        import threading
+
+        self.x = 0.0
+        self.cancelled = threading.Event()
+        self.stopped = False
+
+    def discover(self):
+        return [StandardInterfaceFor("motion.travel")]
+
+    def observation(self):
+        return {"pose": {"frame": "odom", "x": self.x, "y": 0.0, "yaw": 0.0},
+                "range": {"minimum_range_m": 2.0, "sample_count": 360}, "camera": None,
+                "map_tf_available": True}
+
+    def current_pose(self):
+        return {"frame": "odom", "x": self.x, "y": 0.0, "yaw": 0.0}
+
+    def map_pose(self):
+        return None
+
+    def invoke(self, *, call_id, capability_id, arguments, deadline_seconds):
+        import time
+
+        from flyto_robotics.adapter_contract import CallResult
+
+        deadline = time.monotonic() + 3.0
+        while not self.cancelled.is_set() and time.monotonic() < deadline:
+            self.x += 0.05
+            time.sleep(0.01)
+        return CallResult(call_id, "cancelled" if self.cancelled.is_set() else "completed")
+
+    def cancel(self, call_id):
+        from flyto_robotics.adapter_contract import CallResult
+
+        self.cancelled.set()
+        return CallResult(call_id, "cancelled")
+
+    def safe_stop(self, call_id):
+        from flyto_robotics.adapter_contract import CallResult
+
+        self.stopped = True
+        return CallResult(call_id, "completed")
+
+
+def StandardInterfaceFor(capability_id):
+    from flyto_robotics.generic_ros2_adapter import StandardInterface
+
+    kind, name, interface_type = DEFAULT_INTERFACES[capability_id]
+    return StandardInterface(kind, name, interface_type)
+
+
+def test_a_travel_that_runs_past_the_cap_is_stopped_by_the_adapter(monkeypatch):
+    import flyto_robotics.generic_ros2_adapter as adapter_module
+    from flyto_robotics.adapter_contract import OUTCOME_FAILED
+
+    monkeypatch.setattr(adapter_module, "TRAVEL_WATCH_SECONDS", 0.01)
+    monkeypatch.setattr(adapter_module, "MAP_POSE_WAIT_SECONDS", 0.0)
+    backend = RunawayBackend()
+    device = adapter_module.GenericROS2Adapter(backend=backend, resource_id="robot")
+    device.describe()
+    result = device.invoke(CallRequest("run", "motion.travel", arguments={"distance_m": 1.2}))
+    assert result.outcome == OUTCOME_FAILED
+    assert "stopped by the adapter" in result.detail
+    assert backend.cancelled.is_set() and backend.stopped
+    assert backend.x < 1.2 + 0.2 + 0.2

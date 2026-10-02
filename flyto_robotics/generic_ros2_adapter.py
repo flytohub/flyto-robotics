@@ -105,6 +105,12 @@ SUPERVISED_MAX_YAW_RAD = math.pi / 2
 CAPTURE_CAPABILITIES = frozenset({"vision.observe", "sensing.map"})
 CAPTURE_WAIT_SECONDS = 5.0
 MAP_POSE_WAIT_SECONDS = 3.0
+# A travel is stopped by the adapter itself once odometry shows it this far
+# past the asked distance along its starting heading. On the physical robot a
+# drifting SLAM map made Nav2 drive 2.0 m for 1.2 m asked (measured: five
+# 40 cm tiles) while it reported arriving; odometry matched the tiles.
+TRAVEL_OVERRUN_M = 0.2
+TRAVEL_WATCH_SECONDS = 0.1
 # Well inside rosbridge's websocket_ping_timeout (20 s on the TurtleBot3).
 KEEPALIVE_SECONDS = 5.0
 MAX_PHOTO_BYTES = 2_000_000
@@ -524,32 +530,81 @@ class GenericROS2Adapter:
         if request.capability_id == "motion.halt":
             return self.backend.safe_stop(request.call_id)
         if request.capability_id == "motion.travel":
-            # The goal goes in the map frame when the map is live: Nav2 judges
-            # arrival on the map, and a goal fixed in odometry drifted with
-            # every SLAM correction on the physical robot (it veered and ended
-            # 0.3 m off on 2026-10-02). Odometry is the fallback.
-            in_map = self.map_pose()
-            pose = in_map or (self.backend.observation() or {}).get("pose")
-            if not isinstance(pose, Mapping):
-                return CallResult(
-                    request.call_id,
-                    OUTCOME_REFUSED,
-                    detail="fresh odometry is required before motion",
-                )
-            yaw = float(pose["yaw"])
-            distance = arguments["distance_m"]
-            arguments = {
-                "x": float(pose["x"]) + distance * math.cos(yaw),
-                "y": float(pose["y"]) + distance * math.sin(yaw),
-                "yaw_radians": yaw,
-                "in_map": 1.0 if in_map else 0.0,
-            }
+            return self._watched_travel(request, arguments)
         return self.backend.invoke(
             call_id=request.call_id,
             capability_id=request.capability_id,
             arguments=arguments,
             deadline_seconds=float(request.deadline_seconds),
         )
+
+    def _watched_travel(self, request: CallRequest, arguments: Mapping[str, float]) -> CallResult:
+        """Send a travel, and stop it ourselves if odometry runs past the cap.
+
+        The goal goes in the map frame when the map is live: Nav2 judges
+        arrival on the map. But Nav2 decides where the robot is from the map,
+        and a drifting SLAM map once drove it 2.0 m for 1.2 m asked; the
+        wheels measured right. So the adapter also watches odometry and stops
+        the robot TRAVEL_OVERRUN_M past the asked distance along its heading.
+        """
+        in_map = self.map_pose()
+        pose = in_map or (self.backend.observation() or {}).get("pose")
+        if not isinstance(pose, Mapping):
+            return CallResult(
+                request.call_id,
+                OUTCOME_REFUSED,
+                detail="fresh odometry is required before motion",
+            )
+        yaw = float(pose["yaw"])
+        distance = arguments["distance_m"]
+        goal = {
+            "x": float(pose["x"]) + distance * math.cos(yaw),
+            "y": float(pose["y"]) + distance * math.sin(yaw),
+            "yaw_radians": yaw,
+            "in_map": 1.0 if in_map else 0.0,
+        }
+        current = getattr(self.backend, "current_pose", None)
+        start = current() if callable(current) else None
+        overran: dict[str, float] = {}
+        finished = threading.Event()
+
+        def watch() -> None:
+            while not finished.wait(TRAVEL_WATCH_SECONDS):
+                now = current()
+                if not now:
+                    continue
+                along = (now["x"] - start["x"]) * math.cos(start["yaw"]) + (
+                    now["y"] - start["y"]
+                ) * math.sin(start["yaw"])
+                if along > distance + TRAVEL_OVERRUN_M:
+                    overran["along"] = along
+                    with contextlib.suppress(Exception):
+                        self.backend.cancel(request.call_id)
+                    with contextlib.suppress(Exception):
+                        self.safe_stop()
+                    return
+
+        if start:
+            threading.Thread(target=watch, name="travel-overrun-watch", daemon=True).start()
+        try:
+            result = self.backend.invoke(
+                call_id=request.call_id,
+                capability_id=request.capability_id,
+                arguments=goal,
+                deadline_seconds=float(request.deadline_seconds),
+            )
+        finally:
+            finished.set()
+        if overran:
+            return CallResult(
+                request.call_id,
+                OUTCOME_FAILED,
+                detail=(
+                    f"stopped by the adapter: odometry {overran['along']:.2f} m along the "
+                    f"heading, past {distance:.2f} m asked plus {TRAVEL_OVERRUN_M:.2f} m"
+                ),
+            )
+        return result
 
     def cancel(self, call_id: str) -> CallResult:
         return self.backend.cancel(call_id)
@@ -788,6 +843,11 @@ class RclpyROS2Backend:
                     {"x": rotation.x, "y": rotation.y, "z": rotation.z, "w": rotation.w},
                 ) or self._map_odom
                 self._map_tf_seen_at = time.monotonic()
+
+    def current_pose(self) -> dict[str, Any] | None:
+        """The latest odometry pose, without waiting for a new one."""
+        pose = self._pose
+        return dict(pose) if pose is not None else None
 
     def map_pose(self) -> dict[str, Any] | None:
         """Where the robot is on the map, while the map transform is fresh."""
@@ -1584,6 +1644,11 @@ class RosbridgeROS2Backend:
         if marker and self._topic_types.get(marker) == CLOCK_TYPE:
             found.append(StandardInterface("topic", marker, CLOCK_TYPE))
         return found
+
+    def current_pose(self) -> dict[str, Any] | None:
+        """The latest odometry pose, without waiting for a new one."""
+        pose = self._pose
+        return dict(pose) if pose is not None else None
 
     def map_pose(self) -> dict[str, Any] | None:
         """Where the robot is on the map, while the map transform is fresh."""
