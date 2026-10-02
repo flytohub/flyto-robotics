@@ -39,13 +39,6 @@ _CAPABILITY_METADATA: Mapping[str, Mapping[str, Any]] = {
         "required_permissions": ("robot.motion",),
         "requires_safe_stop": True,
     },
-    "motion.travel": {
-        "display_name": "Travel",
-        "description": "Travel a bounded distance ahead, planning around obstacles on the way",
-        "safety_class": "movement",
-        "required_permissions": ("robot.motion",),
-        "requires_safe_stop": True,
-    },
     "vision.observe": {
         "display_name": "Observe",
         "description": "See what is in a place, as a picture: one photo from the robot's camera",
