@@ -86,7 +86,22 @@
       "required": ["minimum_range_m", "sample_count"],
       "properties": {
         "minimum_range_m": {"type": "number", "minimum": 0, "maximum": 1000},
-        "sample_count": {"type": "integer", "minimum": 1, "maximum": 1000000}
+        "sample_count": {"type": "integer", "minimum": 1, "maximum": 1000000},
+        "sweep": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["angle_min_rad", "angle_increment_rad", "ranges_m"],
+          "properties": {
+            "angle_min_rad": {"type": "number", "minimum": -6.283185307179586, "maximum": 6.283185307179586},
+            "angle_increment_rad": {"type": "number", "minimum": -3.141592653589793, "maximum": 3.141592653589793, "not": {"const": 0}},
+            "ranges_m": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 720,
+              "items": {"type": ["number", "null"], "minimum": 0, "maximum": 1000}
+            }
+          }
+        }
       }
     },
     "camera": {
