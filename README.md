@@ -133,6 +133,22 @@ The Generic ROS 2 Adapter on the selected AI Space execution host consumes stand
 - `sensor_msgs/msg/LaserScan`
 - standard camera, TF, and map topics
 
+### Motion safety basis
+
+Each robot declares what its motions rest on, with `FLYTO_ROS2_SAFETY_BASIS` on
+the execution host:
+
+| Value | Before a motion | Bounds |
+| --- | --- | --- |
+| `lidar_clearance` (default) | LiDAR clearance of at least `FLYTO_ROS2_MIN_CLEARANCE_M` (0.35 m) | the declared argument ranges |
+| `operator_present` | no LiDAR; odometry is still required so Cloud can verify the motion | 0.05 m/s, 0.3 m per advance or retreat, π/2 per turn; navigation refused |
+
+The basis is part of each motion capability's declared observations (`/scan`
+or `operator:present`), so it is shown when the capability is approved and a
+changed basis needs a new approval. `operator_present` relies on Cloud holding
+every actuating capability for an operator's Run. Any other value refuses
+motion.
+
 No adapter URL or Flyto2 credential is stored on the robot. The installed
 package exposes `ros2.generic` to the built-in AI Space plugin host and also
 ships `flyto2-adapter-provider-ros2-generic` for process-based hosts such as
