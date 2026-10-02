@@ -182,7 +182,8 @@ def _pose(value: Any) -> None:
 
 
 def _range(value: Any) -> None:
-    if not isinstance(value, Mapping) or set(value) != {"minimum_range_m", "sample_count"}:
+    required = {"minimum_range_m", "sample_count"}
+    if not isinstance(value, Mapping) or not required <= set(value) <= required | {"sweep"}:
         raise Ros2ObservationError("range must contain minimum_range_m and sample_count")
     _number(value["minimum_range_m"], "range.minimum_range_m", 0.0, 1000.0)
     sample_count = value["sample_count"]
@@ -190,6 +191,28 @@ def _range(value: Any) -> None:
         raise Ros2ObservationError("range.sample_count must be integer")
     if not 1 <= sample_count <= 1_000_000:
         raise Ros2ObservationError("range.sample_count is outside its valid range")
+    if "sweep" in value:
+        _sweep(value["sweep"])
+
+
+def _sweep(value: Any) -> None:
+    """The optional reduced sweep: bin geometry and one nearest return per bin."""
+    if not isinstance(value, Mapping) or set(value) != {
+        "angle_min_rad",
+        "angle_increment_rad",
+        "ranges_m",
+    }:
+        raise Ros2ObservationError("range.sweep fields do not match the contract")
+    _number(value["angle_min_rad"], "range.sweep.angle_min_rad", -2 * math.pi, 2 * math.pi)
+    _number(value["angle_increment_rad"], "range.sweep.angle_increment_rad", -math.pi, math.pi)
+    if value["angle_increment_rad"] == 0:
+        raise Ros2ObservationError("range.sweep.angle_increment_rad must not be zero")
+    ranges = value["ranges_m"]
+    if not isinstance(ranges, list) or not 1 <= len(ranges) <= 720:
+        raise Ros2ObservationError("range.sweep.ranges_m must hold 1 to 720 bins")
+    for item in ranges:
+        if item is not None:
+            _number(item, "range.sweep.ranges_m[]", 0.0, 1000.0)
 
 
 def _camera(value: Any) -> None:

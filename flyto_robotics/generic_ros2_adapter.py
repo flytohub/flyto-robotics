@@ -51,6 +51,7 @@ from .ros2_observation_bundle import (
     build_ros2_observation_bundle as build_observation_bundle,
 )
 from .ros2_observation_bundle import runtime_snapshot
+from .scan_clearance import sweep as scan_sweep
 
 CMD_VEL_TYPES = frozenset(
     {"geometry_msgs/msg/Twist", "geometry_msgs/msg/TwistStamped"}
@@ -418,6 +419,7 @@ class RclpyROS2Backend:
         self._pose_seen_at: float | None = None
         self._minimum_range: float | None = None
         self._range_sample_count = 0
+        self._range_sweep: dict[str, Any] | None = None
         self._range_seen_at: float | None = None
         self._camera: dict[str, Any] | None = None
         self._camera_seen_at: float | None = None
@@ -481,6 +483,11 @@ class RclpyROS2Backend:
         if usable:
             self._minimum_range = min(usable)
             self._range_sample_count = len(usable)
+            self._range_sweep = scan_sweep(
+                list(message.ranges),
+                angle_min=message.angle_min,
+                angle_increment=message.angle_increment,
+            )
             self._range_seen_at = time.monotonic()
 
     def _on_camera(self, message: Any) -> None:
@@ -564,6 +571,7 @@ class RclpyROS2Backend:
                 {
                     "minimum_range_m": self._minimum_range,
                     "sample_count": self._range_sample_count,
+                    **({"sweep": self._range_sweep} if self._range_sweep else {}),
                 }
                 if self._minimum_range is not None and fresh(self._range_seen_at)
                 else None
@@ -864,6 +872,7 @@ class RosbridgeROS2Backend:
         self._pose_seen_at: float | None = None
         self._minimum_range: float | None = None
         self._range_sample_count = 0
+        self._range_sweep: dict[str, Any] | None = None
         self._range_seen_at: float | None = None
         self._camera: dict[str, Any] | None = None
         self._camera_seen_at: float | None = None
@@ -999,6 +1008,11 @@ class RosbridgeROS2Backend:
             return
         self._minimum_range = min(usable)
         self._range_sample_count = len(usable)
+        self._range_sweep = scan_sweep(
+            ranges,
+            angle_min=message.get("angle_min", 0.0),
+            angle_increment=message.get("angle_increment", 0.0),
+        )
         self._range_seen_at = observed
         self._condition.notify_all()
 
@@ -1275,6 +1289,7 @@ class RosbridgeROS2Backend:
                 {
                     "minimum_range_m": self._minimum_range,
                     "sample_count": self._range_sample_count,
+                    **({"sweep": self._range_sweep} if self._range_sweep else {}),
                 }
                 if self._minimum_range is not None and fresh(self._range_seen_at)
                 else None
