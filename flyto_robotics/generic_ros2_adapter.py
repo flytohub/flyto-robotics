@@ -56,6 +56,17 @@ CMD_VEL_TYPES = frozenset(
     {"geometry_msgs/msg/Twist", "geometry_msgs/msg/TwistStamped"}
 )
 ODOM_TYPE = "nav_msgs/msg/Odometry"
+CLOCK_TYPE = "rosgraph_msgs/msg/Clock"
+
+
+def _simulation_marker_topic() -> str:
+    """Topic whose presence means the ROS graph is a simulator.
+
+    A Gazebo graph publishes /clock for use_sim_time; the physical TurtleBot3
+    does not. An empty value disables the cross-check for a robot that
+    legitimately publishes /clock.
+    """
+    return os.getenv("FLYTO_ROS2_SIM_MARKER_TOPIC", "/clock").strip()
 SCAN_TYPE = "sensor_msgs/msg/LaserScan"
 
 DEFAULT_INTERFACES = {
@@ -228,6 +239,9 @@ class GenericROS2Adapter:
     def _motion_preflight(self, capability_id: str) -> str | None:
         if capability_id == "motion.halt":
             return None
+        mismatch = self._deployment_mismatch()
+        if mismatch is not None:
+            return mismatch
         observation = self.backend.observation()
         if observation.get("pose") is None:
             return "fresh odometry is required before motion"
@@ -251,6 +265,33 @@ class GenericROS2Adapter:
             "map_tf_available", False
         ):
             return "fresh map-to-odom transform is required before navigation"
+        return None
+
+    def _deployment_mismatch(self) -> str | None:
+        """Refuse motion when the graph is not the kind of robot configured.
+
+        The physical robot and its simulator expose the same endpoint
+        (ws://127.0.0.1:19090), so the configured deployment mode alone cannot
+        tell them apart. Without this check a command meant for the simulator
+        could drive the real robot.
+        """
+        marker = _simulation_marker_topic()
+        if not marker:
+            return None
+        mode = os.getenv("FLYTO_ROS2_DEPLOYMENT_MODE", "hardware").strip().lower()
+        simulated = any(
+            item.kind == "topic" and item.name == marker for item in self.backend.discover()
+        )
+        if mode == "simulation" and not simulated:
+            return (
+                f"adapter is configured for simulation but the ROS graph has no {marker}; "
+                "it may be physical hardware"
+            )
+        if mode != "simulation" and simulated:
+            return (
+                f"the ROS graph publishes {marker} (a simulator) but the adapter is "
+                "configured for hardware"
+            )
         return None
 
     def invoke(self, request: CallRequest) -> CallResult:
@@ -532,6 +573,9 @@ class RclpyROS2Backend:
             for topic_type in topics.get(name, ()):
                 if topic_type in CMD_VEL_TYPES:
                     found.append(StandardInterface("topic", name, topic_type))
+        marker = _simulation_marker_topic()
+        if marker and CLOCK_TYPE in topics.get(marker, ()):
+            found.append(StandardInterface("topic", marker, CLOCK_TYPE))
         return found
 
     def _spin(self, seconds: float) -> None:
@@ -1178,6 +1222,9 @@ class RosbridgeROS2Backend:
             topic_type = self._topic_types.get(name)
             if topic_type in CMD_VEL_TYPES:
                 found.append(StandardInterface("topic", name, topic_type))
+        marker = _simulation_marker_topic()
+        if marker and self._topic_types.get(marker) == CLOCK_TYPE:
+            found.append(StandardInterface("topic", marker, CLOCK_TYPE))
         return found
 
     def observation(self) -> Mapping[str, Any]:

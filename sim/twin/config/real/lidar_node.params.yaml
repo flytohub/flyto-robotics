@@ -1,0 +1,20 @@
+# Parameters dumped from flyto-robot.local with `ros2 param dump /lidar_node`
+# on 2026-10-02. The twin's emulator node loads them unchanged.
+/lidar_node:
+  ros__parameters:
+    baudrate: 230400
+    frame_id: base_scan
+    port: /dev/tb3_lidar
+    qos_overrides:
+      /parameter_events:
+        publisher:
+          depth: 1000
+          durability: volatile
+          history: keep_last
+          reliability: reliable
+    reverse: false
+    start_type_description_service: true
+    topic_name: scan
+    use_sim_time: false
+    version: 4
+    warmup_time: 5

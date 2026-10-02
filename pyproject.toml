@@ -9,6 +9,9 @@ addopts = "-q"
 [tool.ruff]
 target-version = "py39"
 line-length = 100
+# Copied byte-for-byte from the robot (/usr/local/libexec on flyto-robot.local);
+# the twin must run the same file, so it is not reformatted here.
+extend-exclude = ["sim/twin/scripts/ros2-laserscan-stabilizer.py"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]

@@ -1,0 +1,31 @@
+# Parameters dumped from flyto-robot.local with `ros2 param dump /turtlebot3_node`
+# on 2026-10-02. The twin's emulator node loads them unchanged.
+/turtlebot3_node:
+  ros__parameters:
+    enable_stamped_cmd_vel: true
+    motors:
+      profile_acceleration: 0.0
+      profile_acceleration_constant: 214.577
+    namespace: ''
+    opencr:
+      baud_rate: 1000000
+      id: 200
+      protocol_version: 2.0
+    qos_overrides:
+      /parameter_events:
+        publisher:
+          depth: 1000
+          durability: volatile
+          history: keep_last
+          reliability: reliable
+    sensors:
+      bumper_1: 0
+      bumper_2: 0
+      illumination: 0
+      ir: 0
+      sonar: 0
+    start_type_description_service: true
+    use_sim_time: false
+    wheels:
+      radius: 0.033
+      separation: 0.16
