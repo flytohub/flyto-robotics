@@ -159,6 +159,32 @@ def map_capture(message: Mapping[str, Any]) -> dict[str, Any]:
 PLANNED_MOTIONS = frozenset({"motion.navigate", "motion.travel"})
 
 
+def _compose_map_pose(
+    map_odom: tuple[float, float, float] | None, odom_pose: Mapping[str, Any] | None
+) -> dict[str, Any] | None:
+    """The robot's pose in the map: the map-to-odom transform applied to odometry."""
+    if map_odom is None or not isinstance(odom_pose, Mapping):
+        return None
+    tx, ty, tyaw = map_odom
+    ox, oy, oyaw = float(odom_pose["x"]), float(odom_pose["y"]), float(odom_pose["yaw"])
+    return {
+        "frame": os.getenv("FLYTO_ROS2_MAP_FRAME", "map"),
+        "x": tx + math.cos(tyaw) * ox - math.sin(tyaw) * oy,
+        "y": ty + math.sin(tyaw) * ox + math.cos(tyaw) * oy,
+        "yaw": math.atan2(math.sin(tyaw + oyaw), math.cos(tyaw + oyaw)),
+    }
+
+
+def _transform_tuple(translation: Any, rotation: Any) -> tuple[float, float, float] | None:
+    try:
+        x, y = float(translation["x"]), float(translation["y"])
+        qx, qy, qz, qw = (float(rotation[key]) for key in ("x", "y", "z", "w"))
+    except (KeyError, TypeError, ValueError):
+        return None
+    yaw = math.atan2(2.0 * (qw * qz + qx * qy), 1.0 - 2.0 * (qy * qy + qz * qz))
+    return x, y, yaw
+
+
 def _safety_basis() -> str:
     return os.getenv("FLYTO_ROS2_SAFETY_BASIS", SAFETY_BASIS_LIDAR).strip().lower()
 
@@ -497,7 +523,12 @@ class GenericROS2Adapter:
         if request.capability_id == "motion.halt":
             return self.backend.safe_stop(request.call_id)
         if request.capability_id == "motion.travel":
-            pose = (self.backend.observation() or {}).get("pose")
+            # The goal goes in the map frame when the map is live: Nav2 judges
+            # arrival on the map, and a goal fixed in odometry drifted with
+            # every SLAM correction on the physical robot (it veered and ended
+            # 0.3 m off on 2026-10-02). Odometry is the fallback.
+            in_map = self.map_pose()
+            pose = in_map or (self.backend.observation() or {}).get("pose")
             if not isinstance(pose, Mapping):
                 return CallResult(
                     request.call_id,
@@ -510,6 +541,7 @@ class GenericROS2Adapter:
                 "x": float(pose["x"]) + distance * math.cos(yaw),
                 "y": float(pose["y"]) + distance * math.sin(yaw),
                 "yaw_radians": yaw,
+                "in_map": 1.0 if in_map else 0.0,
             }
         return self.backend.invoke(
             call_id=request.call_id,
@@ -567,6 +599,11 @@ class GenericROS2Adapter:
                 raise
             return bundle({key: value for key, value in reading.items() if key != "sweep"})
 
+    def map_pose(self) -> dict[str, Any] | None:
+        """The robot's pose in the map frame, or None when the map is not live."""
+        method = getattr(self.backend, "map_pose", None)
+        return method() if callable(method) else None
+
     def disconnect(self) -> None:
         method = getattr(self.backend, "disconnect", None)
         if callable(method):
@@ -614,6 +651,7 @@ class RclpyROS2Backend:
         self._camera_seen_at: float | None = None
         self._camera_calibration_snapshot: str | None = None
         self._map_tf_seen_at: float | None = None
+        self._map_odom: tuple[float, float, float] | None = None
         self._publishers: dict[str, Any] = {}
 
         self._node.create_subscription(
@@ -730,11 +768,22 @@ class RclpyROS2Backend:
     def _on_tf(self, message: Any) -> None:
         map_frame = os.getenv("FLYTO_ROS2_MAP_FRAME", "map")
         odom_frame = os.getenv("FLYTO_ROS2_ODOM_FRAME", "odom")
-        if any(
-            item.header.frame_id == map_frame and item.child_frame_id == odom_frame
-            for item in message.transforms
-        ):
-            self._map_tf_seen_at = time.monotonic()
+        for item in message.transforms:
+            if item.header.frame_id == map_frame and item.child_frame_id == odom_frame:
+                translation, rotation = item.transform.translation, item.transform.rotation
+                self._map_odom = _transform_tuple(
+                    {"x": translation.x, "y": translation.y},
+                    {"x": rotation.x, "y": rotation.y, "z": rotation.z, "w": rotation.w},
+                ) or self._map_odom
+                self._map_tf_seen_at = time.monotonic()
+
+    def map_pose(self) -> dict[str, Any] | None:
+        """Where the robot is on the map, while the map transform is fresh."""
+        max_age = max(0.1, float(os.getenv("FLYTO_ROS2_OBSERVATION_MAX_AGE_SECONDS", "5")))
+        seen = self._map_tf_seen_at
+        if seen is None or time.monotonic() - seen > max_age or self._pose is None:
+            return None
+        return _compose_map_pose(self._map_odom, self._pose)
 
     def observation(self) -> Mapping[str, Any]:
         deadline = time.monotonic() + _observation_wait_seconds()
@@ -853,7 +902,7 @@ class RclpyROS2Backend:
             yaw = float(arguments.get("yaw_radians", 0.0))
             goal.pose.header.frame_id = (
                 os.getenv("FLYTO_ROS2_ODOM_FRAME", "odom")
-                if capability_id == "motion.travel"
+                if capability_id == "motion.travel" and not arguments.get("in_map")
                 else os.getenv("FLYTO_ROS2_MAP_FRAME", "map")
             )
             goal.pose.header.stamp = self._node.get_clock().now().to_msg()
@@ -1077,6 +1126,7 @@ class RosbridgeROS2Backend:
         self._camera_seen_at: float | None = None
         self._camera_calibration_snapshot: str | None = None
         self._map_tf_seen_at: float | None = None
+        self._map_odom: tuple[float, float, float] | None = None
         self._topic_types: dict[str, str] = {}
         self.reconnect()
 
@@ -1292,6 +1342,11 @@ class RosbridgeROS2Backend:
                 header.get("frame_id") == map_frame
                 and item.get("child_frame_id") == odom_frame
             ):
+                raw_transform = item.get("transform")
+                transform = raw_transform if isinstance(raw_transform, Mapping) else {}
+                kept = _transform_tuple(transform.get("translation"), transform.get("rotation"))
+                if kept is not None:
+                    self._map_odom = kept
                 self._map_tf_seen_at = observed
                 self._condition.notify_all()
                 return
@@ -1518,6 +1573,14 @@ class RosbridgeROS2Backend:
             found.append(StandardInterface("topic", marker, CLOCK_TYPE))
         return found
 
+    def map_pose(self) -> dict[str, Any] | None:
+        """Where the robot is on the map, while the map transform is fresh."""
+        max_age = max(0.1, float(os.getenv("FLYTO_ROS2_OBSERVATION_MAX_AGE_SECONDS", "5")))
+        seen = self._map_tf_seen_at
+        if seen is None or time.monotonic() - seen > max_age or self._pose is None:
+            return None
+        return _compose_map_pose(self._map_odom, self._pose)
+
     def observation(self) -> Mapping[str, Any]:
         deadline = time.monotonic() + _observation_wait_seconds()
         with self._condition:
@@ -1581,7 +1644,7 @@ class RosbridgeROS2Backend:
             yaw = float(arguments.get("yaw_radians", 0.0))
             frame = (
                 os.getenv("FLYTO_ROS2_ODOM_FRAME", "odom")
-                if capability_id == "motion.travel"
+                if capability_id == "motion.travel" and not arguments.get("in_map")
                 else os.getenv("FLYTO_ROS2_MAP_FRAME", "map")
             )
             return {

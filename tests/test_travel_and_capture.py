@@ -32,6 +32,7 @@ def test_travel_sends_a_planned_goal_the_asked_distance_ahead_in_odom():
     assert arguments["x"] == pytest.approx(1.0)
     assert arguments["y"] == pytest.approx(3.2)
     assert arguments["yaw_radians"] == pytest.approx(math.pi / 2)
+    assert arguments["in_map"] == 0.0
 
 
 def test_travel_needs_the_map_like_navigation():
@@ -130,3 +131,43 @@ def test_the_rosbridge_socket_sends_its_own_heartbeat(monkeypatch):
     time.sleep(0.3)
     backend.disconnect()
     assert socket.pongs >= 3
+
+
+def test_travel_aims_on_the_map_when_the_map_is_live():
+    device = adapter({"motion.travel"})
+    live = {"frame": "map", "x": 5.0, "y": -1.0, "yaw": 0.0}
+    device.backend.map_pose = lambda: live
+    device.describe()
+    device.invoke(CallRequest("travel", "motion.travel", arguments={"distance_m": 1.2}))
+    [(_, _, arguments)] = device.backend.calls
+    assert arguments["x"] == pytest.approx(6.2)
+    assert arguments["y"] == pytest.approx(-1.0)
+    assert arguments["in_map"] == 1.0
+    goal = RosbridgeROS2Backend._action_goal(None, "motion.travel", arguments)
+    assert goal["pose"]["header"]["frame_id"] == "map"
+
+
+def test_the_map_pose_is_the_map_transform_applied_to_odometry():
+    from flyto_robotics.generic_ros2_adapter import _compose_map_pose, _transform_tuple
+
+    quarter = {"x": 0.0, "y": 0.0, "z": math.sin(math.pi / 4), "w": math.cos(math.pi / 4)}
+    turn = _transform_tuple({"x": 1.0, "y": 2.0}, quarter)
+    pose = _compose_map_pose(turn, {"x": 1.0, "y": 0.0, "yaw": 0.0})
+    assert pose["x"] == pytest.approx(1.0)
+    assert pose["y"] == pytest.approx(3.0)
+    assert pose["yaw"] == pytest.approx(math.pi / 2)
+    assert _compose_map_pose(None, {"x": 1.0, "y": 0.0, "yaw": 0.0}) is None
+
+
+def test_rosbridge_keeps_the_map_transform_it_sees():
+    backend = RosbridgeROS2Backend(
+        url="ws://127.0.0.1:1", connection_factory=lambda _url: PongRecorder()
+    )
+    identity = {"x": 0, "y": 0, "z": 0, "w": 1}
+    message = {"transforms": [{
+        "header": {"frame_id": "map"}, "child_frame_id": "odom",
+        "transform": {"translation": {"x": 0.5, "y": 0.0}, "rotation": identity},
+    }]}
+    with backend._condition:
+        backend._update_tf(message, 0.0)
+    assert backend._map_odom == (0.5, 0.0, 0.0)
