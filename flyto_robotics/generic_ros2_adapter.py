@@ -156,7 +156,7 @@ def map_capture(message: Mapping[str, Any]) -> dict[str, Any]:
 
 
 # Motions that need the map, because Nav2 plans them.
-PLANNED_MOTIONS = frozenset({"motion.navigate", "motion.travel"})
+PLANNED_MOTIONS = frozenset({"motion.navigate"})
 
 
 def _safety_basis() -> str:
@@ -200,14 +200,6 @@ DEFAULT_INTERFACES = {
         os.getenv("FLYTO_ROS2_NAVIGATE_ACTION", "/navigate_to_pose"),
         "nav2_msgs/action/NavigateToPose",
     ),
-    # The same Nav2 action as motion.navigate, with a goal the adapter puts a
-    # bounded distance ahead of the robot in the odometry frame; Nav2 plans
-    # the way there, around obstacles.
-    "motion.travel": (
-        "action",
-        os.getenv("FLYTO_ROS2_NAVIGATE_ACTION", "/navigate_to_pose"),
-        "nav2_msgs/action/NavigateToPose",
-    ),
     "vision.observe": (
         "topic",
         os.getenv("FLYTO_ROS2_CAMERA_COMPRESSED_TOPIC", "/camera/image_raw/compressed"),
@@ -246,11 +238,6 @@ ARGUMENTS: Mapping[str, tuple[decl.DeclaredArgument, ...]] = {
         decl.DeclaredArgument("y", required=True, minimum=-1000.0, maximum=1000.0, unit="m"),
         decl.DeclaredArgument(
             "yaw_radians", required=False, minimum=-math.pi, maximum=math.pi, unit="rad"
-        ),
-    ),
-    "motion.travel": (
-        decl.DeclaredArgument(
-            "distance_m", required=True, minimum=0.1, maximum=3.0, unit="m"
         ),
     ),
     "vision.observe": (),
@@ -496,21 +483,6 @@ class GenericROS2Adapter:
             )
         if request.capability_id == "motion.halt":
             return self.backend.safe_stop(request.call_id)
-        if request.capability_id == "motion.travel":
-            pose = (self.backend.observation() or {}).get("pose")
-            if not isinstance(pose, Mapping):
-                return CallResult(
-                    request.call_id,
-                    OUTCOME_REFUSED,
-                    detail="fresh odometry is required before motion",
-                )
-            yaw = float(pose["yaw"])
-            distance = arguments["distance_m"]
-            arguments = {
-                "x": float(pose["x"]) + distance * math.cos(yaw),
-                "y": float(pose["y"]) + distance * math.sin(yaw),
-                "yaw_radians": yaw,
-            }
         return self.backend.invoke(
             call_id=request.call_id,
             capability_id=request.capability_id,
@@ -832,7 +804,6 @@ class RclpyROS2Backend:
 
         return {
             "motion.navigate": NavigateToPose,
-            "motion.travel": NavigateToPose,
             "motion.advance": DriveOnHeading,
             "motion.retreat": BackUp,
             "motion.rotate": Spin,
@@ -851,11 +822,7 @@ class RclpyROS2Backend:
             )
         if capability_id in PLANNED_MOTIONS:
             yaw = float(arguments.get("yaw_radians", 0.0))
-            goal.pose.header.frame_id = (
-                os.getenv("FLYTO_ROS2_ODOM_FRAME", "odom")
-                if capability_id == "motion.travel"
-                else os.getenv("FLYTO_ROS2_MAP_FRAME", "map")
-            )
+            goal.pose.header.frame_id = os.getenv("FLYTO_ROS2_MAP_FRAME", "map")
             goal.pose.header.stamp = self._node.get_clock().now().to_msg()
             goal.pose.pose.position.x = float(arguments["x"])
             goal.pose.pose.position.y = float(arguments["y"])
@@ -1579,11 +1546,7 @@ class RosbridgeROS2Backend:
         )
         if capability_id in PLANNED_MOTIONS:
             yaw = float(arguments.get("yaw_radians", 0.0))
-            frame = (
-                os.getenv("FLYTO_ROS2_ODOM_FRAME", "odom")
-                if capability_id == "motion.travel"
-                else os.getenv("FLYTO_ROS2_MAP_FRAME", "map")
-            )
+            frame = os.getenv("FLYTO_ROS2_MAP_FRAME", "map")
             return {
                 "pose": {
                     "header": {
