@@ -59,6 +59,21 @@ ODOM_TYPE = "nav_msgs/msg/Odometry"
 CLOCK_TYPE = "rosgraph_msgs/msg/Clock"
 
 
+def _observation_wait_seconds() -> float:
+    """How long an observation may wait for its first odometry and LiDAR.
+
+    An execution host builds the adapter for a job and connects just before it
+    is asked to move. Odometry arrives within a few messages, but the first
+    LiDAR revolution can take longer, so a sub-second wait refused every first
+    motion as "fresh LiDAR is required". A ready graph answers well inside this.
+    """
+    try:
+        seconds = float(os.getenv("FLYTO_ROS2_OBSERVATION_WAIT_SECONDS", "3"))
+    except ValueError:
+        seconds = 3.0
+    return min(10.0, max(0.25, seconds))
+
+
 def _simulation_marker_topic() -> str:
     """Topic whose presence means the ROS graph is a simulator.
 
@@ -524,7 +539,12 @@ class RclpyROS2Backend:
             self._map_tf_seen_at = time.monotonic()
 
     def observation(self) -> Mapping[str, Any]:
+        deadline = time.monotonic() + _observation_wait_seconds()
         self._spin(0.25)
+        while (
+            self._pose_seen_at is None or self._range_seen_at is None
+        ) and time.monotonic() < deadline:
+            self._spin(0.1)
         now = time.monotonic()
         max_age = max(
             0.1,
@@ -1228,11 +1248,11 @@ class RosbridgeROS2Backend:
         return found
 
     def observation(self) -> Mapping[str, Any]:
-        deadline = time.monotonic() + 0.5
+        deadline = time.monotonic() + _observation_wait_seconds()
         with self._condition:
             while (
                 self._connected
-                and self._pose_seen_at is None
+                and (self._pose_seen_at is None or self._range_seen_at is None)
                 and time.monotonic() < deadline
             ):
                 self._condition.wait(timeout=deadline - time.monotonic())
