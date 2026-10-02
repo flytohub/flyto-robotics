@@ -1380,7 +1380,10 @@ class RosbridgeROS2Backend:
                 os.getenv("FLYTO_ROS2_CAMERA_TOPIC", "/camera/image_raw"),
                 "sensor_msgs/msg/Image",
                 "best_effort",
-                100,
+                # Kept only as a digest, so once a second is plenty: a raw
+                # 640x480 frame is ~1 MB of JSON, and ten a second starved the
+                # socket a motion's cancel has to travel on.
+                1000,
             ),
             (
                 os.getenv(
