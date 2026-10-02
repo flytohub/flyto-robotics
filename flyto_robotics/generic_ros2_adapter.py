@@ -47,10 +47,10 @@ from .adapter_contract import (
     CallRequest,
     CallResult,
 )
+from .ros2_observation_bundle import Ros2ObservationError, runtime_snapshot
 from .ros2_observation_bundle import (
     build_ros2_observation_bundle as build_observation_bundle,
 )
-from .ros2_observation_bundle import runtime_snapshot
 from .scan_clearance import sweep as scan_sweep
 
 CMD_VEL_TYPES = frozenset(
@@ -430,18 +430,30 @@ class GenericROS2Adapter:
             or os.getenv("FLYTO_ROS2_DEPLOYMENT_MODE", "hardware")
         ).strip().lower()
         source = provider or ("gazebo" if mode == "simulation" else "ros2")
-        return build_observation_bundle(
-            resource_id=self.resource_id,
-            runtime_snapshot=runtime_snapshot(interfaces),
-            deployment_mode=mode,
-            provider=source,
-            phase=phase,
-            execution_id=execution_id,
-            pose=observation.get("pose"),
-            range_observation=observation.get("range"),
-            camera=observation.get("camera"),
-            map_tf_available=bool(observation.get("map_tf_available", False)),
-        )
+
+        def bundle(range_observation):
+            return build_observation_bundle(
+                resource_id=self.resource_id,
+                runtime_snapshot=runtime_snapshot(interfaces),
+                deployment_mode=mode,
+                provider=source,
+                phase=phase,
+                execution_id=execution_id,
+                pose=observation.get("pose"),
+                range_observation=range_observation,
+                camera=observation.get("camera"),
+                map_tf_available=bool(observation.get("map_tf_available", False)),
+            )
+
+        reading = observation.get("range")
+        try:
+            return bundle(reading)
+        except Ros2ObservationError:
+            # The sweep is for a person to look at. One the contract refuses
+            # must not fail the observation a motion check reads.
+            if not isinstance(reading, Mapping) or "sweep" not in reading:
+                raise
+            return bundle({key: value for key, value in reading.items() if key != "sweep"})
 
     def disconnect(self) -> None:
         method = getattr(self.backend, "disconnect", None)
@@ -552,6 +564,8 @@ class RclpyROS2Backend:
                 list(message.ranges),
                 angle_min=message.angle_min,
                 angle_increment=message.angle_increment,
+                range_min=message.range_min,
+                range_max=message.range_max,
             )
             self._range_seen_at = time.monotonic()
 
@@ -1077,6 +1091,8 @@ class RosbridgeROS2Backend:
             ranges,
             angle_min=message.get("angle_min", 0.0),
             angle_increment=message.get("angle_increment", 0.0),
+            range_min=minimum,
+            range_max=maximum,
         )
         self._range_seen_at = observed
         self._condition.notify_all()

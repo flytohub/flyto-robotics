@@ -93,3 +93,32 @@ def test_rosbridge_reports_the_sweep_with_the_range(monkeypatch):
 
     assert observed["minimum_range_m"] == 0.8
     assert observed["sweep"]["ranges_m"] == [0.8, 0.9, 1.0, 1.1]
+
+
+def test_the_sweep_uses_the_scans_own_band():
+    reduced = sweep(
+        [0.05, 0.5, 3.0],
+        angle_min=0.0,
+        angle_increment=0.1,
+        beams=3,
+        range_min=0.12,
+        range_max=2.0,
+    )
+    assert reduced["ranges_m"] == [None, 0.5, None]
+
+
+def test_a_sweep_the_contract_would_refuse_is_not_made():
+    assert sweep([1.0] * 4, angle_min=100.0, angle_increment=0.1, beams=4) is None
+
+
+def test_a_refused_sweep_does_not_fail_the_observation():
+    from tests.test_generic_ros2_adapter import adapter
+
+    device = adapter({"motion.advance"})
+    device.backend.observation_payload["range"] = {
+        "minimum_range_m": 0.8,
+        "sample_count": 400,
+        "sweep": {"angle_min_rad": 0.0, "angle_increment_rad": 0.0, "ranges_m": [0.8]},
+    }
+    bundle = device.observe(phase="preflight")
+    assert bundle["range"] == {"minimum_range_m": 0.8, "sample_count": 400}

@@ -116,6 +116,8 @@ def sweep(
     angle_min: float,
     angle_increment: float,
     beams: int = SWEEP_BEAMS,
+    range_min: float = MIN_VALID_RANGE,
+    range_max: float = MAX_VALID_RANGE,
 ) -> dict | None:
     """One sweep reduced to at most ``beams`` bins, for a person to look at.
 
@@ -134,6 +136,13 @@ def sweep(
         return None
     if not (math.isfinite(start) and math.isfinite(step)) or step == 0.0:
         return None
+    # The scan's own band, as the clearance check reads it, inside the trusted
+    # one: the picture never shows a return the clearance figure ignored.
+    try:
+        low = max(MIN_VALID_RANGE, float(range_min))
+        high = min(MAX_VALID_RANGE, float(range_max))
+    except (TypeError, ValueError):
+        low, high = MIN_VALID_RANGE, MAX_VALID_RANGE
     group = max(1, math.ceil(count / beams))
     reduced: list[float | None] = []
     for first in range(0, count, group):
@@ -143,14 +152,25 @@ def sweep(
                 beam = float(raw)
             except (TypeError, ValueError):
                 continue
-            if not math.isnan(beam) and MIN_VALID_RANGE < beam < MAX_VALID_RANGE:
+            if not math.isnan(beam) and low <= beam <= high:
                 valid.append(beam)
         reduced.append(round(min(valid), 3) if valid else None)
-    if all(item is None for item in reduced):
+    increment = round(step * group, 6)
+    centre = round(start + step * (group - 1) / 2, 6)
+    # Anything the observation contract would refuse is dropped here: the
+    # sweep is for a person to look at and must never fail the observation
+    # the motion check reads.
+    if (
+        all(item is None for item in reduced)
+        or increment == 0
+        or not -math.pi <= increment <= math.pi
+        or not -2 * math.pi <= centre <= 2 * math.pi
+        or len(reduced) > 720
+    ):
         return None
     return {
         # The centre of the first bin, and the spacing between bin centres.
-        "angle_min_rad": round(start + step * (group - 1) / 2, 6),
-        "angle_increment_rad": round(step * group, 6),
+        "angle_min_rad": centre,
+        "angle_increment_rad": increment,
         "ranges_m": reduced,
     }
