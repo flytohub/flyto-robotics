@@ -207,7 +207,10 @@ The same bundle is used for Gazebo and a physical robot:
 
 - `deployment_mode=simulation` or `hardware`;
 - pose in `map` or `odom`;
-- minimum-range evidence and sample count;
+- minimum-range evidence and sample count, plus an optional reduced `sweep`
+  (`angle_min_rad`, `angle_increment_rad`, `ranges_m` with at most 720 bins,
+  each the nearest valid return in its bin or `null` when nothing valid was
+  seen) so a person can see what the robot saw;
 - camera frame digest, dimensions and encoding;
 - explicit camera `calibrated` state plus calibration digest when present;
 - live `map -> odom` availability;
