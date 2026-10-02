@@ -133,6 +133,18 @@ The Generic ROS 2 Adapter on the selected AI Space execution host consumes stand
 - `sensor_msgs/msg/LaserScan`
 - standard camera, TF, and map topics
 
+Besides the motions above it declares, when the graph has them:
+
+| Capability | Interface | What it does |
+| --- | --- | --- |
+| `motion.travel` | `NavigateToPose` | travels `distance_m` (0.1–3 m) ahead with a goal in the odometry frame; Nav2 plans around obstacles. Needs LiDAR clearance and the map transform, like `motion.navigate` |
+| `vision.observe` | `sensor_msgs/msg/CompressedImage` (`FLYTO_ROS2_CAMERA_COMPRESSED_TOPIC`, default `/camera/image_raw/compressed`) | returns one JPEG frame, at most 2 MB |
+| `sensing.map` | `nav_msgs/msg/OccupancyGrid` (`FLYTO_ROS2_MAP_TOPIC`, default `/map`) | returns the latched map's cells, size, resolution and origin |
+
+Captures are read-only, read one message through rosbridge (the rclpy backend
+refuses them), and return it as `evidence.capture`; the execution host keeps
+and shows it.
+
 ### Motion safety basis
 
 Each robot declares what its motions rest on, with `FLYTO_ROS2_SAFETY_BASIS` on

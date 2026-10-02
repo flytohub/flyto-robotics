@@ -101,6 +101,64 @@ SUPERVISED_MAX_DISTANCE_M = 0.3
 SUPERVISED_MAX_YAW_RAD = math.pi / 2
 
 
+# Read-only capabilities that return one sensor reading; they never move.
+CAPTURE_CAPABILITIES = frozenset({"vision.observe", "sensing.map"})
+CAPTURE_WAIT_SECONDS = 5.0
+# Well inside rosbridge's websocket_ping_timeout (20 s on the TurtleBot3).
+KEEPALIVE_SECONDS = 5.0
+MAX_PHOTO_BYTES = 2_000_000
+MAX_MAP_CELLS = 4_000_000
+
+
+def _message_bytes(raw: Any) -> bytes:
+    """A uint8[]/int8[] field as rosbridge sends it: base64 text or a list."""
+    if isinstance(raw, str):
+        return base64.b64decode(raw, validate=False)
+    if isinstance(raw, list):
+        return bytes(int(value) & 0xFF for value in raw)
+    raise ValueError("message data is not bytes")
+
+
+def photo_capture(message: Mapping[str, Any]) -> dict[str, Any]:
+    """A CompressedImage as a JPEG for the host to keep and show."""
+    data = _message_bytes(message.get("data"))
+    if not data.startswith(b"\xff\xd8"):
+        raise ValueError("camera frame is not a JPEG; the compressed topic must publish jpeg")
+    if len(data) > MAX_PHOTO_BYTES:
+        raise ValueError("camera frame is larger than 2 MB")
+    return {
+        "kind": "photo",
+        "media_type": "image/jpeg",
+        "data_base64": base64.b64encode(data).decode("ascii"),
+    }
+
+
+def map_capture(message: Mapping[str, Any]) -> dict[str, Any]:
+    """An OccupancyGrid's cells as bytes: 0-100 occupied, 255 unknown."""
+    info = message.get("info") if isinstance(message.get("info"), Mapping) else {}
+    width, height = int(info.get("width", 0)), int(info.get("height", 0))
+    resolution = float(info.get("resolution", 0.0))
+    if width <= 0 or height <= 0 or resolution <= 0 or width * height > MAX_MAP_CELLS:
+        raise ValueError("map has no usable size")
+    cells = _message_bytes(message.get("data"))
+    if len(cells) != width * height:
+        raise ValueError("map data does not match its size")
+    raw_origin = info.get("origin")
+    origin = raw_origin.get("position", {}) if isinstance(raw_origin, Mapping) else {}
+    return {
+        "kind": "map",
+        "width": width,
+        "height": height,
+        "resolution_m": resolution,
+        "origin": {"x": float(origin.get("x", 0.0)), "y": float(origin.get("y", 0.0))},
+        "cells_base64": base64.b64encode(cells).decode("ascii"),
+    }
+
+
+# Motions that need the map, because Nav2 plans them.
+PLANNED_MOTIONS = frozenset({"motion.navigate", "motion.travel"})
+
+
 def _safety_basis() -> str:
     return os.getenv("FLYTO_ROS2_SAFETY_BASIS", SAFETY_BASIS_LIDAR).strip().lower()
 
@@ -115,7 +173,7 @@ def _supervised_arguments(
 ) -> tuple[dict[str, float], str | None]:
     """Arguments bounded for operator_present, or why the motion is refused."""
     bounded = dict(arguments)
-    if capability_id == "motion.navigate":
+    if capability_id in PLANNED_MOTIONS:
         return bounded, (
             "navigation needs LiDAR clearance; this robot's safety basis is "
             "operator_present"
@@ -141,6 +199,24 @@ DEFAULT_INTERFACES = {
         "action",
         os.getenv("FLYTO_ROS2_NAVIGATE_ACTION", "/navigate_to_pose"),
         "nav2_msgs/action/NavigateToPose",
+    ),
+    # The same Nav2 action as motion.navigate, with a goal the adapter puts a
+    # bounded distance ahead of the robot in the odometry frame; Nav2 plans
+    # the way there, around obstacles.
+    "motion.travel": (
+        "action",
+        os.getenv("FLYTO_ROS2_NAVIGATE_ACTION", "/navigate_to_pose"),
+        "nav2_msgs/action/NavigateToPose",
+    ),
+    "vision.observe": (
+        "topic",
+        os.getenv("FLYTO_ROS2_CAMERA_COMPRESSED_TOPIC", "/camera/image_raw/compressed"),
+        "sensor_msgs/msg/CompressedImage",
+    ),
+    "sensing.map": (
+        "topic",
+        os.getenv("FLYTO_ROS2_MAP_TOPIC", "/map"),
+        "nav_msgs/msg/OccupancyGrid",
     ),
     "motion.advance": (
         "action",
@@ -172,6 +248,13 @@ ARGUMENTS: Mapping[str, tuple[decl.DeclaredArgument, ...]] = {
             "yaw_radians", required=False, minimum=-math.pi, maximum=math.pi, unit="rad"
         ),
     ),
+    "motion.travel": (
+        decl.DeclaredArgument(
+            "distance_m", required=True, minimum=0.1, maximum=3.0, unit="m"
+        ),
+    ),
+    "vision.observe": (),
+    "sensing.map": (),
     "motion.advance": (
         decl.DeclaredArgument(
             "distance_m", required=True, minimum=0.05, maximum=2.0, unit="m"
@@ -338,7 +421,7 @@ class GenericROS2Adapter:
                 f"LiDAR clearance {clearance:.3f}m is below the "
                 f"{required_clearance:.3f}m motion safety minimum"
             )
-        if capability_id == "motion.navigate" and not observation.get(
+        if capability_id in PLANNED_MOTIONS and not observation.get(
             "map_tf_available", False
         ):
             return "fresh map-to-odom transform is required before navigation"
@@ -386,7 +469,21 @@ class GenericROS2Adapter:
             arguments = _numeric_arguments(request.capability_id, request.arguments)
         except ValueError as error:
             return CallResult(request.call_id, OUTCOME_REFUSED, detail=str(error))
-        if _safety_basis() == SAFETY_BASIS_OPERATOR and request.capability_id != "motion.halt":
+        if request.capability_id in CAPTURE_CAPABILITIES:
+            capture = getattr(self.backend, "capture", None)
+            if not callable(capture):
+                return CallResult(
+                    request.call_id,
+                    OUTCOME_REFUSED,
+                    detail=f"{request.capability_id} needs the rosbridge transport",
+                )
+            return capture(
+                call_id=request.call_id,
+                capability_id=request.capability_id,
+                deadline_seconds=float(request.deadline_seconds),
+            )
+        supervised = _safety_basis() == SAFETY_BASIS_OPERATOR
+        if supervised and request.capability_id != "motion.halt":
             arguments, bound_error = _supervised_arguments(request.capability_id, arguments)
             if bound_error is not None:
                 return CallResult(request.call_id, OUTCOME_REFUSED, detail=bound_error)
@@ -399,6 +496,21 @@ class GenericROS2Adapter:
             )
         if request.capability_id == "motion.halt":
             return self.backend.safe_stop(request.call_id)
+        if request.capability_id == "motion.travel":
+            pose = (self.backend.observation() or {}).get("pose")
+            if not isinstance(pose, Mapping):
+                return CallResult(
+                    request.call_id,
+                    OUTCOME_REFUSED,
+                    detail="fresh odometry is required before motion",
+                )
+            yaw = float(pose["yaw"])
+            distance = arguments["distance_m"]
+            arguments = {
+                "x": float(pose["x"]) + distance * math.cos(yaw),
+                "y": float(pose["y"]) + distance * math.sin(yaw),
+                "yaw_radians": yaw,
+            }
         return self.backend.invoke(
             call_id=request.call_id,
             capability_id=request.capability_id,
@@ -678,7 +790,7 @@ class RclpyROS2Backend:
                     found.append(StandardInterface(kind, name, interface_type))
                 continue
             for topic_type in topics.get(name, ()):
-                if topic_type in CMD_VEL_TYPES:
+                if topic_type in CMD_VEL_TYPES or topic_type == interface_type:
                     found.append(StandardInterface("topic", name, topic_type))
         marker = _simulation_marker_topic()
         if marker and CLOCK_TYPE in topics.get(marker, ()):
@@ -720,6 +832,7 @@ class RclpyROS2Backend:
 
         return {
             "motion.navigate": NavigateToPose,
+            "motion.travel": NavigateToPose,
             "motion.advance": DriveOnHeading,
             "motion.retreat": BackUp,
             "motion.rotate": Spin,
@@ -728,7 +841,7 @@ class RclpyROS2Backend:
     def _goal(self, capability_id: str, arguments: Mapping[str, float]):
         action_type = self._action_type(capability_id)
         goal = action_type.Goal()
-        if capability_id != "motion.navigate":
+        if capability_id not in PLANNED_MOTIONS:
             allowance = max(
                 1.0, float(os.getenv("FLYTO_ROS2_ACTION_ALLOWANCE_SECONDS", "30"))
             )
@@ -736,9 +849,13 @@ class RclpyROS2Backend:
             goal.time_allowance.nanosec = int(
                 (allowance - int(allowance)) * 1_000_000_000
             )
-        if capability_id == "motion.navigate":
+        if capability_id in PLANNED_MOTIONS:
             yaw = float(arguments.get("yaw_radians", 0.0))
-            goal.pose.header.frame_id = os.getenv("FLYTO_ROS2_MAP_FRAME", "map")
+            goal.pose.header.frame_id = (
+                os.getenv("FLYTO_ROS2_ODOM_FRAME", "odom")
+                if capability_id == "motion.travel"
+                else os.getenv("FLYTO_ROS2_MAP_FRAME", "map")
+            )
             goal.pose.header.stamp = self._node.get_clock().now().to_msg()
             goal.pose.pose.position.x = float(arguments["x"])
             goal.pose.pose.position.y = float(arguments["y"])
@@ -942,6 +1059,9 @@ class RosbridgeROS2Backend:
         self._reader: threading.Thread | None = None
         self._responses: dict[str, dict[str, Any]] = {}
         self._action_results: dict[str, dict[str, Any]] = {}
+        # One-shot reads for vision.observe and sensing.map: topic -> waiter.
+        self._capture_waits: dict[str, str] = {}
+        self._captured: dict[str, dict[str, Any]] = {}
         self._active_actions: dict[str, str] = {}
         self._results: dict[str, CallResult] = {}
         self._counts: dict[str, int] = {}
@@ -1181,6 +1301,11 @@ class RosbridgeROS2Backend:
             return
         message = dict(raw_message)
         observed = time.monotonic()
+        waiter = self._capture_waits.get(topic)
+        if waiter is not None:
+            with self._condition:
+                self._captured[waiter] = message
+                self._condition.notify_all()
         handlers = {
             os.getenv(
                 "FLYTO_ROS2_ODOM_TOPIC",
@@ -1273,7 +1398,10 @@ class RosbridgeROS2Backend:
                 os.getenv("FLYTO_ROS2_CAMERA_TOPIC", "/camera/image_raw"),
                 "sensor_msgs/msg/Image",
                 "best_effort",
-                100,
+                # Kept only as a digest, so once a second is plenty: a raw
+                # 640x480 frame is ~1 MB of JSON, and ten a second starved the
+                # socket a motion's cancel has to travel on.
+                1000,
             ),
             (
                 os.getenv(
@@ -1310,6 +1438,54 @@ class RosbridgeROS2Backend:
                 }
             )
 
+    def capture(
+        self, *, call_id: str, capability_id: str, deadline_seconds: float
+    ) -> CallResult:
+        """Read one message from a capture topic and return it as evidence."""
+        if not self._connected:
+            return CallResult(call_id, OUTCOME_REFUSED, detail="rosbridge adapter disconnected")
+        _, topic, message_type = DEFAULT_INTERFACES[capability_id]
+        waiter = f"capture-{call_id}"
+        with self._condition:
+            self._capture_waits[topic] = waiter
+        self._send(
+            {
+                "op": "subscribe",
+                "id": waiter,
+                "topic": topic,
+                "type": message_type,
+                "qos": {
+                    "history": "keep_last",
+                    "depth": 1,
+                    "reliability": "reliable",
+                    # The map is latched; a photo is the next frame.
+                    "durability": (
+                        "transient_local" if capability_id == "sensing.map" else "volatile"
+                    ),
+                },
+            }
+        )
+        try:
+            message = self._wait_for(
+                self._captured,
+                waiter,
+                time.monotonic() + min(max(1.0, deadline_seconds), CAPTURE_WAIT_SECONDS),
+            )
+        finally:
+            with self._condition:
+                self._capture_waits.pop(topic, None)
+            with contextlib.suppress(RuntimeError):
+                self._send({"op": "unsubscribe", "id": waiter, "topic": topic})
+        if message is None:
+            return CallResult(call_id, OUTCOME_FAILED, detail=f"no {topic} message arrived")
+        try:
+            payload = (
+                map_capture(message) if capability_id == "sensing.map" else photo_capture(message)
+            )
+        except ValueError as error:
+            return CallResult(call_id, OUTCOME_FAILED, detail=str(error))
+        return CallResult(call_id, OUTCOME_COMPLETED, evidence={"capture": payload})
+
     def discover(self) -> Sequence[StandardInterface]:
         if not self._connected:
             return ()
@@ -1335,7 +1511,7 @@ class RosbridgeROS2Backend:
                     found.append(StandardInterface(kind, name, interface_type))
                 continue
             topic_type = self._topic_types.get(name)
-            if topic_type in CMD_VEL_TYPES:
+            if topic_type in CMD_VEL_TYPES or topic_type == interface_type:
                 found.append(StandardInterface("topic", name, topic_type))
         marker = _simulation_marker_topic()
         if marker and self._topic_types.get(marker) == CLOCK_TYPE:
@@ -1401,12 +1577,17 @@ class RosbridgeROS2Backend:
             1.0,
             float(os.getenv("FLYTO_ROS2_ACTION_ALLOWANCE_SECONDS", "30")),
         )
-        if capability_id == "motion.navigate":
+        if capability_id in PLANNED_MOTIONS:
             yaw = float(arguments.get("yaw_radians", 0.0))
+            frame = (
+                os.getenv("FLYTO_ROS2_ODOM_FRAME", "odom")
+                if capability_id == "motion.travel"
+                else os.getenv("FLYTO_ROS2_MAP_FRAME", "map")
+            )
             return {
                 "pose": {
                     "header": {
-                        "frame_id": os.getenv("FLYTO_ROS2_MAP_FRAME", "map"),
+                        "frame_id": frame,
                     },
                     "pose": {
                         "position": {
@@ -1665,7 +1846,34 @@ class RosbridgeROS2Backend:
             daemon=True,
         )
         self._reader.start()
+        threading.Thread(
+            target=self._keepalive_loop,
+            args=(websocket,),
+            name="rosbridge-keepalive",
+            daemon=True,
+        ).start()
         self._subscribe_standard_observations()
+
+    def _keepalive_loop(self, websocket: Any) -> None:
+        """Send an unsolicited pong every few seconds while connected.
+
+        The robot runs rosbridge with websocket_ping_interval == ping_timeout
+        (20 s). Tornado measures the timeout from the last pong it received,
+        so at its first ping it closes any client that has not sent one: every
+        call longer than 20 s lost its socket mid-motion, and with it the
+        cancel and the safe stop. A pong is a valid unsolicited heartbeat
+        (RFC 6455 5.5.3) and keeps that clock fresh.
+        """
+        while True:
+            with self._condition:
+                if not self._connected or websocket is not self._ws:
+                    return
+            try:
+                with self._send_lock:
+                    websocket.pong(b"flyto")
+            except Exception:  # noqa: BLE001 - the reader notices a dead socket
+                return
+            time.sleep(KEEPALIVE_SECONDS)
 
 
 def build(resource_id: str = "") -> GenericROS2Adapter:
