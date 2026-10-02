@@ -141,7 +141,7 @@ the execution host:
 | Value | Before a motion | Bounds |
 | --- | --- | --- |
 | `lidar_clearance` (default) | LiDAR clearance of at least `FLYTO_ROS2_MIN_CLEARANCE_M` (0.35 m) | the declared argument ranges |
-| `operator_present` | no LiDAR; odometry is still required so Cloud can verify the motion | 0.05 m/s, 0.3 m per advance or retreat, π/2 per turn; navigation refused |
+| `operator_present` | no LiDAR; odometry is still required so Cloud can verify the motion | 0.05 m/s and 0.3 m per advance or retreat; π/2 per turn, at Nav2's own rotation speed (Spin takes no speed); navigation refused |
 
 The basis is part of each motion capability's declared observations (`/scan`
 or `operator:present`), so it is shown when the capability is approved and a
