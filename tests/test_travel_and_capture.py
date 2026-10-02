@@ -171,3 +171,13 @@ def test_rosbridge_keeps_the_map_transform_it_sees():
     with backend._condition:
         backend._update_tf(message, 0.0)
     assert backend._map_odom == (0.5, 0.0, 0.0)
+
+
+def test_map_pose_waits_for_the_first_transform(monkeypatch):
+    import flyto_robotics.generic_ros2_adapter as adapter_module
+
+    monkeypatch.setattr(adapter_module, "MAP_POSE_WAIT_SECONDS", 1.0)
+    device = adapter({"motion.travel"})
+    answers = iter([None, None, {"frame": "map", "x": 1.0, "y": 0.0, "yaw": 0.0}])
+    device.backend.map_pose = lambda: next(answers)
+    assert device.map_pose()["x"] == 1.0

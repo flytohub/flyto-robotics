@@ -104,6 +104,7 @@ SUPERVISED_MAX_YAW_RAD = math.pi / 2
 # Read-only capabilities that return one sensor reading; they never move.
 CAPTURE_CAPABILITIES = frozenset({"vision.observe", "sensing.map"})
 CAPTURE_WAIT_SECONDS = 5.0
+MAP_POSE_WAIT_SECONDS = 3.0
 # Well inside rosbridge's websocket_ping_timeout (20 s on the TurtleBot3).
 KEEPALIVE_SECONDS = 5.0
 MAX_PHOTO_BYTES = 2_000_000
@@ -600,9 +601,20 @@ class GenericROS2Adapter:
             return bundle({key: value for key, value in reading.items() if key != "sweep"})
 
     def map_pose(self) -> dict[str, Any] | None:
-        """The robot's pose in the map frame, or None when the map is not live."""
+        """The robot's pose in the map frame, or None when the map is not live.
+
+        Waits briefly on a fresh connection, whose first map transform may
+        still be on its way.
+        """
         method = getattr(self.backend, "map_pose", None)
-        return method() if callable(method) else None
+        if not callable(method):
+            return None
+        deadline = time.monotonic() + MAP_POSE_WAIT_SECONDS
+        while True:
+            pose = method()
+            if pose is not None or time.monotonic() >= deadline:
+                return pose
+            time.sleep(0.1)
 
     def disconnect(self) -> None:
         method = getattr(self.backend, "disconnect", None)
