@@ -117,7 +117,8 @@ class FakeROS2Backend:
     def execution_count(self, call_id: str):
         return self.counts.get(call_id, 0)
 
-    def observation(self):
+    def observation(self, required=None):
+        self.required = required
         return dict(self.observation_payload)
 
     def disconnect(self):
