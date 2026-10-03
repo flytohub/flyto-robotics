@@ -92,6 +92,16 @@ Interface:
   time on a CPU-only renderer.
 - **Battery** holds 12.0 V (83 %); the robot drains.
 - **`/reset_odometry`** re-zeroes odometry in the twin; the IMU is not reset.
+- **Nav2 timing slack.** Nav2 reads `/etc/ros/twin-burger.yaml`, written at
+  start by `scripts/twin_nav2_params.py` from the robot's `burger.yaml` with
+  two timing keys changed: the collision monitor's scan `source_timeout`
+  0.2 s -> 0.5 s, and bt_navigator's `default_server_timeout` 20 ms -> 200 ms.
+  Gazebo renders the LiDAR on the CPU at a real-time factor near 0.7, so under
+  load a scan reached the collision monitor 0.20-0.21 s old in simulation time
+  and it stopped the base for an "invalid source"; bt_navigator also aborted
+  navigation waiting 20 ms for follow_path to acknowledge. The script refuses
+  any other key (no polygon, speed, footprint or clearance) and caps each
+  value. The adapter's 0.35 m clearance floor is not a Nav2 parameter.
 
 Behaviour, same adapter scripts on both (2026-10-02):
 
@@ -120,6 +130,7 @@ robot.
 | `models/flyto_burger/` | Upstream burger model with the robot's sensor rates, ranges and camera; Gazebo topics under `twin/` |
 | `launch/twin.launch.py` | Gazebo, spawn, `robot_state_publisher` (frame_prefix `''`) |
 | `scripts/twin_hardware.py` | The four driver stand-ins |
+| `scripts/twin_nav2_params.py` | The robot's Nav2 `burger.yaml` plus the twin's timing slack, nothing else |
 | `config/real/` | Captured from the robot: parameters, `robot_description`, interface fingerprint (the comparison baseline) |
 | `tools/fingerprint.py`, `tools/compare_fingerprint.py` | Capture an interface fingerprint (read-only) and compare |
 | `tools/bounded_advance.py` | One bounded advance through the adapter, robot or twin |
