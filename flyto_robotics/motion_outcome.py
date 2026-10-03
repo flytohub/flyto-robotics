@@ -120,6 +120,16 @@ class MotionTrack:
     feedback: dict[str, Any] = field(default_factory=dict)
     # Collision monitor actions (type, polygon) reported while it ran.
     collision_events: list[tuple[int, str]] = field(default_factory=list)
+    # What the collision monitor is doing to the base right now, including
+    # "nothing" (type 0) once a stop clears. The monitor publishes only on a
+    # change, so a track is seeded with the state in force when it began.
+    collision_now: tuple[int, str] | None = None
+
+    def __post_init__(self) -> None:
+        seeded = self.collision_now
+        self.collision_now = None
+        if seeded is not None:
+            self.saw_collision_state(*seeded)
 
     def saw_range(self, minimum_range_m: float | None) -> None:
         if minimum_range_m is None or not math.isfinite(minimum_range_m):
@@ -141,10 +151,12 @@ class MotionTrack:
             kind = int(action_type)
         except (TypeError, ValueError):
             return
+        name = str(polygon_name or "")[:64]
+        self.collision_now = (kind, name)
         if kind == 0:
             return
         if len(self.collision_events) < 32:
-            self.collision_events.append((kind, str(polygon_name or "")[:64]))
+            self.collision_events.append((kind, name))
 
 
 def travel_range(capability_id: str, sweep: Mapping[str, Any] | None) -> float | None:
@@ -198,35 +210,55 @@ def _error_code(result_values: Mapping[str, Any] | None) -> int | None:
     return code or None
 
 
+def _blocks(kind: int, name: str) -> bool:
+    return kind in (COLLISION_STOP, COLLISION_APPROACH) and name != INVALID_SOURCE
+
+
+def _blind(kind: int, name: str) -> bool:
+    return kind != 0 and name == INVALID_SOURCE
+
+
 def _reason(
     *,
     status: int | None,
     error_code: int | None,
     collision_events: list[tuple[int, str]],
+    collision_now: tuple[int, str] | None,
     stop_range: float | None,
     clearance_floor_m: float,
 ) -> str:
+    """Most specific first.
+
+    What holds at the stop (Nav2's collision code, the monitor's state now,
+    the range ahead) beats a specific Nav2 error, which beats an event the
+    monitor raised and then cleared during the run: a slowdown for a box
+    passed earlier must not turn "no path to the goal" into "blocked".
+    """
     if status == STATUS_SUCCEEDED:
         return REASON_COMPLETED
     if status == STATUS_CANCELED:
         return REASON_CANCELLED
-    blocking = [
-        name for kind, name in collision_events
-        if kind in (COLLISION_STOP, COLLISION_APPROACH) and name != INVALID_SOURCE
-    ]
-    if error_code in _COLLISION_CODES or blocking:
+    if error_code in _COLLISION_CODES:
         return REASON_OBSTACLE_BLOCKED
+    if collision_now is not None and _blocks(*collision_now):
+        return REASON_OBSTACLE_BLOCKED
+    if collision_now is not None and _blind(*collision_now):
+        return REASON_SENSOR_STALE
     if stop_range is not None and stop_range < clearance_floor_m:
         return REASON_OBSTACLE_BLOCKED
-    if any(name == INVALID_SOURCE for _, name in collision_events):
-        return REASON_SENSOR_STALE
-    if status is None or error_code in _TIMEOUT_CODES:
-        # No terminal status: this adapter's own deadline ran out first.
-        return REASON_TIMEOUT
     if error_code in _TF_CODES:
         return REASON_LOCALIZATION_ERROR
     if error_code in _NO_PATH_CODES:
         return REASON_NO_PATH
+    # A base the monitor held still makes no progress and runs out of time,
+    # so an earlier stop explains those better than the code does.
+    if any(_blocks(kind, name) for kind, name in collision_events):
+        return REASON_OBSTACLE_BLOCKED
+    if any(_blind(kind, name) for kind, name in collision_events):
+        return REASON_SENSOR_STALE
+    if status is None or error_code in _TIMEOUT_CODES:
+        # No terminal status: this adapter's own deadline ran out first.
+        return REASON_TIMEOUT
     if error_code in _NO_PROGRESS_CODES:
         return REASON_NO_PROGRESS
     if status == STATUS_ABORTED:
@@ -269,6 +301,7 @@ def summarize(
         status=status,
         error_code=error_code,
         collision_events=track.collision_events,
+        collision_now=track.collision_now,
         stop_range=stop_range,
         clearance_floor_m=clearance_floor_m,
     )
@@ -302,6 +335,9 @@ def summarize(
         summary["collision_monitor"] = [
             {"action_type": kind, "polygon": name} for kind, name in track.collision_events
         ]
+    if track.collision_now is not None:
+        kind, name = track.collision_now
+        summary["collision_monitor_at_stop"] = {"action_type": kind, "polygon": name}
     if track.feedback:
         summary["feedback"] = dict(track.feedback)
     if start is not None and end is not None:
