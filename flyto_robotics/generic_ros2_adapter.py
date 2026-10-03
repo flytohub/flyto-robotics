@@ -357,6 +357,9 @@ class _ObservationState:
         self._camera_seen_at: float | None = None
         self._camera_calibration_snapshot: str | None = None
         self._map_tf_seen_at: float | None = None
+        # When this connection started listening: a robot never heard from
+        # since then has been silent for as long as it has been listening.
+        self._listening_since = time.monotonic()
 
     def _store_odometry(
         self,
@@ -384,7 +387,33 @@ class _ObservationState:
             self._range_seen_at = None
             self._camera_seen_at = None
             self._map_tf_seen_at = None
+            self._listening_since = time.monotonic()
             self._condition.notify_all()
+
+    def silent_seconds(self) -> float | None:
+        """Seconds since the robot last sent any subscribed reading.
+
+        A transport can stay up while the robot behind it has gone (an rclpy
+        node keeps spinning when the robot powers off, and a rosbridge may
+        outlive its drivers). A robot publishing odometry is never silent
+        for long, so a host reads a long silence as the equipment being
+        unreachable. None while disconnected.
+        """
+        if not self._connected:
+            return None
+        with self._condition:
+            heard = [
+                seen
+                for seen in (
+                    self._pose_seen_at,
+                    self._range_seen_at,
+                    self._camera_seen_at,
+                    self._map_tf_seen_at,
+                )
+                if seen is not None
+            ]
+            last = max(heard, default=self._listening_since)
+        return max(0.0, time.monotonic() - last)
 
     def _missing(self, required: Iterable[str]) -> list[str]:
         # Stale counts as missing: on a warm connection the next callback is
@@ -633,6 +662,12 @@ class GenericROS2Adapter:
             )
         else:
             observation = self.backend.observation()
+        if observation.get("pose") is None or (
+            basis != SAFETY_BASIS_OPERATOR and observation.get("range") is None
+        ):
+            # Readings did not arrive in time: the drivers may have restarted
+            # behind the transport, so the next call reads the graph afresh.
+            self._invalidate_discovery()
         if observation.get("pose") is None:
             return "fresh odometry is required before motion"
         if basis == SAFETY_BASIS_OPERATOR:
@@ -670,10 +705,20 @@ class GenericROS2Adapter:
         marker = _simulation_marker_topic()
         if not marker:
             return None
+        mismatch = self._deployment_mismatch_in(self.backend.discover(), marker)
+        if mismatch is None:
+            return None
+        # The graph may be cached from before a simulator or driver restart;
+        # refuse only on what the graph says now.
+        self._invalidate_discovery()
+        return self._deployment_mismatch_in(self.backend.discover(), marker)
+
+    @staticmethod
+    def _deployment_mismatch_in(
+        interfaces: Iterable[StandardInterface], marker: str
+    ) -> str | None:
         mode = os.getenv("FLYTO_ROS2_DEPLOYMENT_MODE", "hardware").strip().lower()
-        simulated = any(
-            item.kind == "topic" and item.name == marker for item in self.backend.discover()
-        )
+        simulated = any(item.kind == "topic" and item.name == marker for item in interfaces)
         if mode == "simulation" and not simulated:
             return (
                 f"adapter is configured for simulation but the ROS graph has no {marker}; "
@@ -797,6 +842,14 @@ class GenericROS2Adapter:
             return None
         return method(max_seconds)
 
+    def silent_seconds(self) -> float | None:
+        """Seconds since the robot last sent a reading; None if unknown."""
+        method = getattr(self.backend, "silent_seconds", None)
+        if not callable(method):
+            return None
+        value = method()
+        return None if value is None else float(value)
+
     @property
     def connected(self) -> bool:
         state = getattr(self.backend, "is_connected", None)
@@ -852,7 +905,8 @@ class RclpyROS2Backend(_ObservationState):
         if not rclpy.ok():
             rclpy.init(args=None)
         self._rclpy = rclpy
-        self._node = Node("flyto_external_generic_ros2_adapter")
+        self._node_type = Node
+        self._message_types = (Odometry, LaserScan, Image, CameraInfo, TFMessage)
         self._sensor_qos = qos_profile_sensor_data
         self._executor_type = SingleThreadedExecutor
         self._executor: Any | None = None
@@ -870,38 +924,60 @@ class RclpyROS2Backend(_ObservationState):
         # Kept per capability: a fresh ActionClient has not matched its server
         # yet, and rclpy's wait_for_server then polls in 0.25 s steps.
         self._action_clients: dict[str, Any] = {}
+        self._node: Any | None = None
+        self._create_node()
 
-        self._node.create_subscription(
-            Odometry,
+    def _create_node(self) -> None:
+        """A node with the standard observation subscriptions."""
+        odometry, scan, image, camera_info, tf_message = self._message_types
+        node = self._node_type("flyto_external_generic_ros2_adapter")
+        node.create_subscription(
+            odometry,
             os.getenv("FLYTO_ROS2_ODOM_TOPIC", "/odom"),
             self._guarded(self._on_odometry),
             self._sensor_qos,
         )
-        self._node.create_subscription(
-            LaserScan,
+        node.create_subscription(
+            scan,
             os.getenv("FLYTO_ROS2_SCAN_TOPIC", "/scan"),
             self._guarded(self._on_scan),
             self._sensor_qos,
         )
-        self._node.create_subscription(
-            Image,
+        node.create_subscription(
+            image,
             os.getenv("FLYTO_ROS2_CAMERA_TOPIC", "/camera/image_raw"),
             self._guarded(self._on_camera),
             self._sensor_qos,
         )
-        self._node.create_subscription(
-            CameraInfo,
+        node.create_subscription(
+            camera_info,
             os.getenv("FLYTO_ROS2_CAMERA_INFO_TOPIC", "/camera/camera_info"),
             self._guarded(self._on_camera_info),
             self._sensor_qos,
         )
-        self._node.create_subscription(
-            TFMessage,
+        node.create_subscription(
+            tf_message,
             os.getenv("FLYTO_ROS2_TF_TOPIC", "/tf"),
             self._guarded(self._on_tf),
             10,
         )
+        self._node = node
+        self._graph_ready = False
         self._start_executor()
+
+    def _destroy_node(self) -> None:
+        """Release the node with its subscriptions, publishers and clients.
+
+        Each discovery pass on an execution host builds an adapter and
+        disconnects it; a node left behind kept its subscriptions and DDS
+        participant alive for the life of the process.
+        """
+        node, self._node = self._node, None
+        self._publishers.clear()
+        self._action_clients.clear()
+        if node is not None:
+            with contextlib.suppress(Exception):
+                node.destroy_node()
 
     def _start_executor(self) -> None:
         if self._executor_thread is not None and self._executor_thread.is_alive():
@@ -1099,12 +1175,12 @@ class RclpyROS2Backend(_ObservationState):
     def _read_graph(self) -> list[StandardInterface]:
         # The graph APIs read rmw's own graph cache, which DDS keeps current
         # without the node being spun, so this needs neither a spin nor a cache.
-        topics = {
-            name: tuple(types) for name, types in self._node.get_topic_names_and_types()
-        }
-        actions = {
-            name: tuple(types) for name, types in self._node.get_action_names_and_types()
-        }
+        node = self._node
+        if node is None:
+            # Disconnected: the node and its view of the graph are gone.
+            return []
+        topics = {name: tuple(types) for name, types in node.get_topic_names_and_types()}
+        actions = {name: tuple(types) for name, types in node.get_action_names_and_types()}
         found: list[StandardInterface] = []
         for _capability_id, (kind, name, interface_type) in DEFAULT_INTERFACES.items():
             if kind == "action":
@@ -1325,13 +1401,20 @@ class RclpyROS2Backend(_ObservationState):
     def safe_stop(self, call_id: str) -> CallResult:
         # Zero velocity goes out first, so the stop never waits behind a cancel.
         stopped = self._publish_zero()
-        for active_call in tuple(self._goal_handles):
+        active = tuple(self._goal_handles)
+        for active_call in active:
             future = self._result_futures.get(active_call)
             if future is None or not future.done():
                 self.cancel(active_call)
             # Tried once: a goal whose cancel went unanswered (Nav2 restarted)
             # must not cost every later emergency stop another wait.
             self._forget_goal(active_call)
+        if active:
+            # The action server kept writing cmd_vel until its cancel landed,
+            # over the first zero. A server that stops without a zero of its
+            # own would leave the base on its last command, so the last word
+            # on cmd_vel is this stop's.
+            stopped = self._publish_zero() or stopped
         if not stopped:
             return CallResult(
                 call_id, OUTCOME_FAILED, detail="standard cmd_vel stop unavailable"
@@ -1360,6 +1443,7 @@ class RclpyROS2Backend(_ObservationState):
             self._connected = False
             self._condition.notify_all()
         self._stop_executor()
+        self._destroy_node()
         self._reset_readings()
 
     def reconnect(self) -> None:
@@ -1371,7 +1455,11 @@ class RclpyROS2Backend(_ObservationState):
         with self._condition:
             self._connected = True
             self._condition.notify_all()
-        self._start_executor()
+        if self._node is None:
+            # Disconnected before: the old node was destroyed with it.
+            self._create_node()
+        else:
+            self._start_executor()
         # An executor that died at once has announced the drop already.
         if self.is_connected():
             self._notify_connection(True)
@@ -1402,9 +1490,11 @@ class RosbridgeROS2Backend(_ObservationState):
         self._connected = False
         self._init_observation_state()
         self._keepalive_stop = threading.Event()
-        # The ROS graph as rosapi last reported it. It changes only when the
-        # robot side restarts, which drops this socket, so it is re-read on
-        # reconnect or after a call fails instead of on every observation.
+        # The ROS graph as rosapi last reported it, re-read on reconnect and
+        # whenever what it says may be out of date (a call fails, a capability
+        # or reading is missing, a deployment check would refuse) rather than
+        # on every observation. Nav2 or a driver can restart behind a rosbridge
+        # that stays up, so a refusal is never decided on this copy alone.
         self._interfaces: tuple[StandardInterface, ...] | None = None
         self._send_lock = threading.Lock()
         self._reader: threading.Thread | None = None
@@ -2133,12 +2223,18 @@ class RosbridgeROS2Backend(_ObservationState):
             stopped = self._publish_zero()
         except RuntimeError:
             stopped = False
-        for active_call in tuple(self._active_actions):
+        active = tuple(self._active_actions)
+        for active_call in active:
             with contextlib.suppress(RuntimeError):
                 self.cancel(active_call)
             # Tried once: an unanswered cancel must not cost every later
             # emergency stop another wait.
             self._active_actions.pop(active_call, None)
+        if active:
+            # Until the cancel landed the action server could overwrite the
+            # first zero; the last command on cmd_vel must be this stop's.
+            with contextlib.suppress(RuntimeError):
+                stopped = self._publish_zero() or stopped
         if not stopped:
             return CallResult(
                 call_id,

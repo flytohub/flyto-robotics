@@ -33,17 +33,29 @@ Date: 2026-10-03
   the executor thread is alive.
 - `RosbridgeROS2Backend.discover()` is cached until reconnect, a reader-thread
   drop, an action send failure or a failed goal; `GenericROS2Adapter.invoke`
-  re-reads it once on a capability miss, and `_publish_zero` re-reads when the
-  cache lacks cmd_vel. The keepalive waits on an Event that `disconnect` sets.
+  re-reads it once on a capability miss, `_publish_zero` re-reads when the
+  cache lacks cmd_vel, a deployment mismatch is re-checked on a fresh read
+  before it refuses, and a preflight whose readings did not arrive drops the
+  cache (Nav2 or a driver can restart behind a rosbridge that stays up). The keepalive waits on an Event that `disconnect` sets.
 - Per-call state is bounded for a host-lifetime adapter: results and
   execution counts keep the newest `CALL_HISTORY_LIMIT` (256) call ids; rclpy
   goal handles and result futures are dropped once a result or a confirmed
   cancel is known, and on reconnect; rosbridge active goals are dropped on
   reconnect. `safe_stop` on both backends publishes zero velocity first, then
   tries each still-active goal once and forgets it, so an unanswered cancel
-  (Nav2 restarted) no longer delays every later emergency stop.
+  (Nav2 restarted) no longer delays every later emergency stop. When there
+  were active goals it publishes zero again after the cancels, so the last
+  command on cmd_vel is the stop's even for a motion server that stops
+  without a zero of its own (the pre-change order guaranteed that too).
 - Connection listeners live on the shared state for both backends; the
   rclpy `reconnect()` announces `True` only when its new executor is alive.
+- `RclpyROS2Backend.disconnect()` destroys its node (subscriptions,
+  publishers, action clients); `reconnect()` after a disconnect builds a new
+  one, while a reconnect after an executor death keeps the node.
+- `silent_seconds()` on both backends and on `GenericROS2Adapter`: seconds
+  since the robot last sent any subscribed reading (or since listening began),
+  None while disconnected. A host reads a long silence as the robot being
+  gone even though the transport (an rclpy executor) is still up.
 - Odometry keeps its twist; `wait_until_stationary(max_seconds)` returns after
   3 consecutive still samples (or pose deltas when there is no twist) and
   reports `drifting` at the cap.
@@ -60,14 +72,19 @@ transform, and rosbridge asked rosapi for the graph 8-10 times per motion.
 
 ## Verified
 
-- `make verify` in this worktree: exit 0, ruff clean, `1021 passed`.
-- `tests/test_observation_on_state.py` (33 tests) replaces the adapter's
+- `make verify` in this worktree: exit 0, ruff clean, `1029 passed`.
+- `tests/test_observation_on_state.py` (41 tests) replaces the adapter's
   clock and `time.sleep` and a fake rclpy whose `spin_once` raises. Added
   after review: stale warm readings and reconnect wait for the next callback;
   a new node's discover waits for the first message; a safe stop never waits
   for discovery; a malformed message does not end the executor; a dead
   executor is announced and never announced as back; zero velocity is
   published before cancels and a stale goal is tried once; bounded history.
+  Added after the second review: the stop ends on a zero after the cancel
+  (also when the cancel times out); disconnect destroys the node and a
+  reconnect builds one; silence is measured from the last reading; a cached
+  simulator marker is re-read before refusing; missing preflight readings
+  drop the cached graph.
 - flyto-cloud `tests/unit/local/test_robot_registry_with_ros2_adapter.py`
   drives this adapter's rosbridge backend through the Cloud warm-adapter
   registry (drop, borrow, reconnect) with an in-memory socket.
@@ -83,9 +100,9 @@ transform, and rosbridge asked rosapi for the graph 8-10 times per motion.
 - Needs a flyto-robotics release and a flyto-cloud pin bump, then a Desktop
   release, before the warm adapter is used on a computer.
 - `adapter_provider.discover_resource_manifests` still builds and disconnects
-  its own adapter per discovery pass, and `RclpyROS2Backend.disconnect` does
-  not destroy its node (unchanged from before), so each rclpy discovery pass
-  leaves one idle node behind.
+  its own adapter per discovery pass; the node is now destroyed on
+  disconnect, so a pass no longer leaves one behind, but each pass still pays
+  a node's DDS discovery.
 - Refusal reasons are free text; the Cloud host matches "is not present on
   the ROS 2 graph" and "action server unavailable" to decide on
   rediscovery. A typed reason in `CallResult` would be sturdier.
