@@ -175,6 +175,11 @@ def odometry(x=0.0, *, linear=0.0, angular=0.0):
     )
 
 
+class _FakeTwistStamped:
+    def __init__(self) -> None:
+        self.header = SimpleNamespace(stamp=None, frame_id="")
+
+
 SCAN = SimpleNamespace(
     ranges=[0.8, 0.9, 1.0],
     range_min=0.1,
@@ -243,13 +248,56 @@ def test_rclpy_callbacks_run_on_a_background_executor_until_disconnect(fake_rclp
     backend.disconnect()
 
 
-def test_rclpy_discover_reads_the_graph_without_spinning(fake_rclpy, clock):
-    backend, _condition = rclpy_backend(clock)
+def test_rclpy_discover_on_a_new_node_waits_for_the_first_message(fake_rclpy, clock):
+    # rmw's graph cache is empty on a new node; reading it at once reported no
+    # equipment. The first subscribed message proves discovery reached the
+    # robot, so the read happens on that callback, not after a fixed spin.
+    backend, condition = rclpy_backend(clock)
+    reads_before = backend._node.graph_reads
+    condition.feed = [
+        lambda: backend._on_odometry(odometry()),
+        lambda: pytest.fail("discovery waited past the first message"),
+    ]
 
     found = backend.discover()
 
     assert {item.name for item in found} >= {"/cmd_vel", "/navigate_to_pose"}
+    assert condition.delivered == 1 and condition.timed_out == 0
+    assert backend._node.graph_reads == reads_before + 1
+    assert clock.now - 100.0 == pytest.approx(ODOM_PERIOD)
+
+
+def test_rclpy_discover_reads_the_graph_without_spinning_once_heard(fake_rclpy, clock):
+    backend, condition = rclpy_backend(clock)
+    backend._on_scan(SCAN)
+
+    found = backend.discover()
+
+    assert {item.name for item in found} >= {"/cmd_vel", "/navigate_to_pose"}
+    assert condition.delivered == condition.timed_out == 0
     assert clock.now == 100.0
+
+
+def test_a_safe_stop_never_waits_for_discovery(fake_rclpy, clock, monkeypatch):
+    backend, condition = rclpy_backend(clock)
+    published = []
+    monkeypatch.setitem(
+        sys.modules,
+        "geometry_msgs.msg",
+        types.SimpleNamespace(TwistStamped=_FakeTwistStamped),
+    )
+    backend._node.create_publisher = lambda _type, _topic, _depth: SimpleNamespace(
+        publish=published.append
+    )
+    backend._node.get_clock = lambda: SimpleNamespace(
+        now=lambda: SimpleNamespace(to_msg=lambda: None)
+    )
+
+    result = backend.safe_stop("stop-1")
+
+    assert result.outcome == "completed"
+    assert len(published) == 1
+    assert condition.timed_out == 0 and clock.now == 100.0
 
 
 def test_a_goal_future_is_awaited_by_its_done_callback(fake_rclpy, clock):
@@ -541,6 +589,10 @@ def test_rosbridge_discovery_is_served_from_cache_until_reconnect(no_sleep, monk
     assert queries == {"/rosapi/topics": 1, "/rosapi/action_servers": 1}
 
     backend.reconnect()
+    # The new socket's own readings: the old ones were forgotten on reconnect.
+    with backend._condition:
+        backend._update_odometry(ROSBRIDGE_ODOM, time.monotonic())
+        backend._update_scan(ROSBRIDGE_SCAN, time.monotonic())
     adapter.observe(phase="before", execution_id="call-1")
     assert queries == {"/rosapi/topics": 2, "/rosapi/action_servers": 2}
     backend.disconnect()
@@ -610,3 +662,221 @@ def test_disconnect_wakes_the_keepalive_at_once(no_sleep):
     backend.disconnect()
 
     assert stop.is_set()
+
+
+# --- (e) a warm adapter waits for fresh readings, never passes old ones -----
+
+
+def test_a_warm_backend_idle_past_max_age_waits_for_the_next_callback(
+    fake_rclpy, clock, monkeypatch
+):
+    monkeypatch.setenv("FLYTO_ROS2_OBSERVATION_MAX_AGE_SECONDS", "5")
+    backend, condition = rclpy_backend(clock)
+    backend._on_odometry(odometry(x=0.0))
+    backend._on_scan(SCAN)
+    clock.now += 10.0  # idle between jobs, longer than the max age
+    condition.feed = [
+        lambda: backend._on_odometry(odometry(x=2.0)),
+        lambda: backend._on_scan(SCAN),
+        lambda: pytest.fail("the observation waited past the fresh readings"),
+    ]
+
+    observation = backend.observation()
+
+    # Stale is treated as missing: the wait ends on the next two callbacks
+    # instead of returning pose=None and refusing the motion.
+    assert observation["pose"]["x"] == 2.0
+    assert observation["range"] is not None
+    assert condition.delivered == 2 and condition.timed_out == 0
+
+
+def test_an_rclpy_reconnect_forgets_readings_from_before_the_drop(fake_rclpy, clock):
+    backend, condition = rclpy_backend(clock)
+    backend._on_odometry(odometry(x=0.0))
+    backend._on_scan(SCAN)
+
+    backend.reconnect()
+    condition.feed = [
+        lambda: backend._on_odometry(odometry(x=3.0)),
+        lambda: backend._on_scan(SCAN),
+    ]
+    observation = backend.observation()
+
+    assert observation["pose"]["x"] == 3.0
+    assert condition.delivered == 2 and condition.timed_out == 0
+    backend.disconnect()
+
+
+def test_a_rosbridge_reconnect_forgets_readings_from_the_old_socket(clock):
+    backend = quiet_backend()
+    condition = FeedingCondition(clock)
+    backend._condition = condition
+    with condition:
+        backend._update_odometry(ROSBRIDGE_ODOM, clock.now)
+        backend._update_scan(ROSBRIDGE_SCAN, clock.now)
+
+    backend.reconnect()
+    assert backend.observation(required=())["pose"] is None
+    moved = {
+        **ROSBRIDGE_ODOM,
+        "pose": {"pose": {"position": {"x": 4.0, "y": 0.0}, "orientation": {"w": 1.0}}},
+    }
+    condition.feed = [
+        lambda: backend._update_odometry(moved, clock.now),
+        lambda: backend._update_scan(ROSBRIDGE_SCAN, clock.now),
+    ]
+    observation = backend.observation()
+
+    assert observation["pose"]["x"] == 4.0
+    assert condition.delivered == 2 and condition.timed_out == 0
+    backend.disconnect()
+
+
+# --- (f) a dead executor is reported, a bad message is only dropped ---------
+
+
+def test_a_malformed_message_is_dropped_without_ending_the_executor(fake_rclpy, clock):
+    backend, _condition = rclpy_backend(clock)
+    scan_callback = backend._node.callbacks["/scan"]
+
+    scan_callback(SimpleNamespace(ranges=["not-a-number"], range_min=0.1, range_max=1.0))
+
+    assert backend._executor_thread.is_alive()
+    assert backend.is_connected()
+    backend.disconnect()
+
+
+def test_an_executor_that_dies_is_announced_as_a_dropped_connection(fake_rclpy, clock):
+    backend, _condition = rclpy_backend(clock)
+    adapter = GenericROS2Adapter(backend=backend, resource_id="robot")
+    events: list[bool] = []
+    dropped = threading.Event()
+
+    def listener(connected):
+        events.append(connected)
+        if not connected:
+            dropped.set()
+
+    adapter.add_connection_listener(listener)
+
+    fail = threading.Event()
+
+    class DyingExecutor(FakeExecutor):
+        def spin(self) -> None:
+            fail.wait(2.0)
+            raise RuntimeError("callback raised inside spin")
+
+    backend._executor_type = DyingExecutor
+    backend.reconnect()
+    assert events == [True]
+    fail.set()
+
+    assert dropped.wait(2.0), "a dead executor was not announced"
+    assert adapter.connected is False
+    assert events == [True, False]
+
+    backend._executor_type = FakeExecutor
+    backend.reconnect()
+    assert adapter.connected is True
+    assert events == [True, False, True]
+    backend.disconnect()
+
+
+def test_an_executor_dead_on_arrival_is_never_announced_as_back(fake_rclpy, clock):
+    backend, _condition = rclpy_backend(clock)
+    events: list[bool] = []
+    backend.add_connection_listener(events.append)
+
+    class DeadExecutor(FakeExecutor):
+        def spin(self) -> None:
+            raise RuntimeError("context shut down")
+
+    backend._executor_type = DeadExecutor
+    original = backend._start_executor
+
+    def start_and_let_it_die():
+        original()
+        backend._executor_thread.join(2.0)
+
+    backend._start_executor = start_and_let_it_die
+    backend.reconnect()
+
+    assert events == [False]
+    assert backend.is_connected() is False
+    backend.disconnect()
+
+
+# --- (g) per-call history is bounded and a stop never waits behind it -------
+
+
+class _Handle:
+    def __init__(self, calls: list[str]) -> None:
+        self.calls = calls
+
+    def cancel_goal_async(self):
+        self.calls.append("cancel")
+        # Nav2 restarted: the cancel is answered with nothing cancelling.
+        return SimpleNamespace(
+            done=lambda: True, result=lambda: SimpleNamespace(goals_canceling=())
+        )
+
+
+def test_a_stop_publishes_first_and_tries_a_stale_goal_only_once(fake_rclpy, clock):
+    backend, _condition = rclpy_backend(clock)
+    calls: list[str] = []
+    backend._publish_zero = lambda: calls.append("zero") or True
+    backend._goal_handles["old-call"] = _Handle(calls)
+    backend._result_futures["old-call"] = SimpleNamespace(done=lambda: False)
+
+    assert backend.safe_stop("stop-1").outcome == "completed"
+    assert calls[0] == "zero"
+    assert calls.count("cancel") == 1
+    assert backend._goal_handles == {} and backend._result_futures == {}
+
+    calls.clear()
+    assert backend.safe_stop("stop-2").outcome == "completed"
+    assert calls == ["zero"]
+    backend.disconnect()
+
+
+def test_call_history_is_bounded(fake_rclpy, clock):
+    from flyto_robotics.adapter_contract import CallResult
+
+    backend, _condition = rclpy_backend(clock)
+    for index in range(adapter_module.CALL_HISTORY_LIMIT + 50):
+        backend._keep_result(f"c{index}", CallResult(f"c{index}", "completed"))
+        backend._count_execution(f"c{index}")
+
+    assert len(backend._results) == adapter_module.CALL_HISTORY_LIMIT
+    assert len(backend._counts) == adapter_module.CALL_HISTORY_LIMIT
+    assert "c0" not in backend._results
+    assert backend.execution_count(f"c{adapter_module.CALL_HISTORY_LIMIT + 49}") == 1
+    backend.disconnect()
+
+
+def test_a_rosbridge_stop_publishes_first_and_forgets_the_old_goal(no_sleep):
+    backend = quiet_backend()
+    sent: list[str] = []
+    backend._topic_types = {"/cmd_vel": "geometry_msgs/msg/Twist"}
+    backend._send = lambda payload: sent.append(payload["op"])
+    backend._wait_for = lambda *_args: None  # the cancel goes unanswered
+    backend._active_actions["old-call"] = "/drive_on_heading"
+
+    assert backend.safe_stop("stop-1").outcome == "completed"
+    assert sent.index("publish") < sent.index("cancel_action_goal")
+    assert backend._active_actions == {}
+
+    sent.clear()
+    backend.safe_stop("stop-2")
+    assert "cancel_action_goal" not in sent
+    backend.disconnect()
+
+
+def test_a_rosbridge_reconnect_drops_goal_ids_of_the_old_socket(no_sleep):
+    backend = quiet_backend()
+    backend._active_actions["old-call"] = "/drive_on_heading"
+
+    backend.reconnect()
+
+    assert backend._active_actions == {}
+    backend.disconnect()
