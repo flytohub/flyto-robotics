@@ -439,3 +439,72 @@ def test_discovery_publishes_each_fleet_with_its_pack_only_when_asked():
 def test_discovery_needs_a_configured_dispatcher(monkeypatch):
     monkeypatch.delenv("FLYTO_RMF_API_URL", raising=False)
     assert discover_fleet_manifests(execution_host_id="host") == []
+
+
+# -- hardening: ids, cancel answers, waypoints --------------------------------
+
+
+def test_a_dispatch_with_no_task_id_is_not_reported_done_and_cannot_be_cancelled():
+    sent: list = []
+    device = adapter(
+        dispatch={"state": {"booking": {}, "status": "queued"}}, sent=sent
+    )
+    result = device.invoke(navigate())
+    assert result.outcome == OUTCOME_FAILED
+    cancelled = device.cancel("call-1")
+    assert cancelled.outcome == "refused"
+    assert "/tasks/cancel_task" not in [path for path, _ in sent]
+    assert not any(path.endswith("/state") for path, _ in sent)
+
+
+def test_a_cancel_the_dispatcher_declines_is_not_reported_done():
+    calls: list = []
+
+    def call(path, payload=None, **_):
+        calls.append(path)
+        if path == "/tasks/dispatch_task":
+            return {"state": {"booking": {"id": "rmf-task-1"}, "status": "queued"}}
+        if path == "/tasks/cancel_task":
+            return {"success": False, "errors": ["task is already underway"]}
+        raise AssertionError(path)
+
+    device = OpenRmfAdapter(call=call)
+    assert device.invoke(navigate()).outcome == OUTCOME_COMPLETED
+    cancelled = device.cancel("call-1")
+    assert cancelled.outcome == "refused"
+    assert "already underway" in cancelled.detail
+
+
+def test_a_task_id_is_one_quoted_path_segment():
+    paths: list = []
+
+    def call(path, payload=None, **_):
+        paths.append(path)
+        if path == "/tasks/dispatch_task":
+            return {"state": {"booking": {"id": "../fleets"}, "status": "queued"}}
+        return {"status": "completed"}
+
+    device = OpenRmfAdapter(
+        call=call, fleet="tinyRobot", wait_for_completion=True, sleep=lambda _s: None
+    )
+    assert device.invoke(fleet_call()).outcome == OUTCOME_COMPLETED
+    assert "/tasks/..%2Ffleets/state" in paths
+    assert "/fleets" not in paths
+
+
+@pytest.mark.parametrize(
+    "waypoint",
+    [["ward_3"], {"x": 1}, 7, "", "   ", "w" * 129, "ward\n3", "ward\x853"],
+)
+def test_a_waypoint_that_is_not_a_short_plain_name_is_refused(waypoint):
+    sent: list = []
+    result = adapter(sent=sent).invoke(navigate(waypoint=waypoint))
+    assert result.outcome == "refused"
+    assert "/tasks/dispatch_task" not in [path for path, _ in sent]
+
+
+def test_a_waypoint_is_trimmed_before_it_is_sent():
+    sent: list = []
+    adapter(sent=sent).invoke(navigate(waypoint="  ward_3 "))
+    _path, payload = next(item for item in sent if item[0] == "/tasks/dispatch_task")
+    assert payload["request"]["description"]["places"] == ["ward_3"]
