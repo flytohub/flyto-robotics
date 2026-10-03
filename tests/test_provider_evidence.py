@@ -448,3 +448,24 @@ def test_a_map_that_cannot_be_drawn_returns_no_artifact():
     result = device.invoke(CallRequest("m", "sensing.map", {}, 10.0))
     assert result.outcome == OUTCOME_COMPLETED
     assert "artifacts" not in result.evidence
+
+
+def test_a_thin_map_is_not_upscaled_past_the_pixel_budget(monkeypatch):
+    # 1 x 40,000 cells: the 600 px upscale alone would be 14.4 billion pixels.
+    monkeypatch.setattr(pe, "_jpeg", lambda *_args: None)
+    capture = {
+        "kind": "map",
+        "width": 1,
+        "height": 40_000,
+        "cells_base64": base64.b64encode(bytes(40_000)).decode("ascii"),
+    }
+    _data, media_type, width, height = pe.render_map(capture)
+    assert media_type == pe.MEDIA_PNG
+    assert width * height <= pe.MAP_MAX_PIXELS
+    assert width >= 1 and height == 40_000 * width
+
+
+def test_the_pixel_budget_leaves_an_ordinary_map_as_it_was():
+    shades = bytes(384 * 384)
+    _scaled, width, height = pe._scaled(shades, 384, 384)
+    assert (width, height) == (768, 768)

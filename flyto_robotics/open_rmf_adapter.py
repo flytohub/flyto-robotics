@@ -63,6 +63,7 @@ from __future__ import annotations
 import json
 import os
 import time
+import urllib.parse
 import urllib.request
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from datetime import datetime, timezone
@@ -295,6 +296,12 @@ class OpenRmfAdapter:
         if request.call_id in self._dispatched:
             # Dispatched before and still running (the last wait timed out):
             # wait on that task rather than dispatching another one.
+            if not self._dispatched[request.call_id].get("rmf_task_id"):
+                return CallResult(
+                    request.call_id,
+                    OUTCOME_FAILED,
+                    detail=NO_TASK_ID,
+                )
             return self._settle(request, self._dispatched[request.call_id])
 
         description = self._description(category, request)
@@ -304,7 +311,9 @@ class OpenRmfAdapter:
                 OUTCOME_REFUSED,
                 detail=(
                     f"{category} needs a named waypoint on the shared map and the "
-                    "call supplied none; RMF plans between places, not distances"
+                    "call supplied none it can use (text, at most "
+                    f"{MAX_WAYPOINT_LENGTH} characters, no control characters); "
+                    "RMF plans between places, not distances"
                 ),
             )
 
@@ -341,10 +350,19 @@ class OpenRmfAdapter:
                 detail=f"the dispatcher refused the request: {errors or 'no state returned'}",
             )
 
-        booking = state.get("booking") or {}
-        rmf_id = str(booking.get("id") or "")
+        booking = state.get("booking") if isinstance(state.get("booking"), Mapping) else {}
+        rmf_id = str(booking.get("id") or "").strip()
         self._dispatched[request.call_id] = {"rmf_task_id": rmf_id}
         evidence = _task_evidence(rmf_id, state)
+        if not rmf_id:
+            # Accepted with no id: the task can be neither followed nor
+            # withdrawn, so it is never reported as done (cancel refuses it).
+            return CallResult(
+                request.call_id,
+                OUTCOME_FAILED,
+                evidence=evidence,
+                detail=NO_TASK_ID,
+            )
         if not self._wait:
             return CallResult(request.call_id, OUTCOME_COMPLETED, evidence=evidence)
         return self._settle(request, {"rmf_task_id": rmf_id}, evidence)
@@ -367,7 +385,7 @@ class OpenRmfAdapter:
         deadline = self._clock() + max(0.0, float(request.deadline_seconds))
         while True:
             try:
-                answer = self._call(f"/tasks/{rmf_id}/state")
+                answer = self._call(_state_path(rmf_id))
             except Exception:  # noqa: BLE001 - a missed read is retried until the deadline
                 answer = None
             if isinstance(answer, Mapping):
@@ -416,7 +434,7 @@ class OpenRmfAdapter:
         inventing a waypoint would dispatch a robot somewhere nobody asked for.
         """
         arguments = dict(getattr(request, "arguments", None) or {})
-        waypoint = str(arguments.get("waypoint") or arguments.get("destination") or "")
+        waypoint = _waypoint(arguments)
         if not waypoint:
             return None
         if category == "patrol":
@@ -443,8 +461,16 @@ class OpenRmfAdapter:
                 OUTCOME_REFUSED,
                 detail="this adapter never dispatched that call",
             )
+        if not record.get("rmf_task_id"):
+            # Cancelling "" withdraws nothing; saying it did would tell the
+            # host the fleet task was stopped while it may still be running.
+            return CallResult(
+                call_id,
+                OUTCOME_REFUSED,
+                detail="the dispatcher gave that call no task id; nothing can be withdrawn",
+            )
         try:
-            self._call(
+            answer = self._call(
                 "/tasks/cancel_task",
                 payload={"type": "cancel_task_request", "task_id": record["rmf_task_id"]},
             )
@@ -453,6 +479,19 @@ class OpenRmfAdapter:
                 call_id,
                 OUTCOME_REFUSED,
                 detail=f"the dispatcher could not be reached: {type(error).__name__}",
+            )
+        if isinstance(answer, Mapping) and answer.get("success") is False:
+            # RMF answered and declined. For a fleet task this cancel is the
+            # only stop there is (safe_stop is refused), so it must not read
+            # as done.
+            return CallResult(
+                call_id,
+                OUTCOME_REFUSED,
+                evidence=dict(record),
+                detail=(
+                    "the dispatcher did not cancel the task: "
+                    f"{answer.get('errors') or 'no reason given'}"
+                )[:300],
             )
         return CallResult(call_id, OUTCOME_COMPLETED, evidence=dict(record))
 
@@ -492,10 +531,41 @@ class OpenRmfAdapter:
         record = self._dispatched.get(call_id)
         if record is None:
             return "unknown"
-        answer = self._call(f"/tasks/{record['rmf_task_id']}/state")
+        if not record.get("rmf_task_id"):
+            return "unknown"
+        answer = self._call(_state_path(record["rmf_task_id"]))
         if not isinstance(answer, Mapping):
             return "unknown"
         return str(answer.get("status") or "unknown")
+
+
+MAX_WAYPOINT_LENGTH = 128
+NO_TASK_ID = "the dispatcher returned no task id; the task cannot be followed or cancelled"
+
+
+def _waypoint(arguments: Mapping[str, Any]) -> str:
+    """The named waypoint a call asked for, or "" when it named none usable.
+
+    Checked here as well as by the pack, because a host may call the adapter
+    directly: a non-text value, an overlong name or a control character is
+    refused rather than turned into a place by ``str()``.
+    """
+    raw = arguments.get("waypoint")
+    if raw is None:
+        raw = arguments.get("destination")
+    if not isinstance(raw, str):
+        return ""
+    text = raw.strip()
+    if not text or len(text) > MAX_WAYPOINT_LENGTH:
+        return ""
+    if any(ord(character) < 32 or 127 <= ord(character) < 160 for character in text):
+        return ""
+    return text
+
+
+def _state_path(rmf_id: str) -> str:
+    """The state URL of one task, its id quoted as one path segment."""
+    return f"/tasks/{urllib.parse.quote(str(rmf_id), safe='')}/state"
 
 
 def _task_evidence(
