@@ -17,7 +17,7 @@ import re
 import socket
 import sys
 import threading
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from datetime import datetime, timezone
 from typing import Any
 
@@ -26,6 +26,28 @@ from .generic_ros2_adapter import SILENT_SECONDS, GenericROS2Adapter, build
 
 ADAPTER_ID = "ros2.generic"
 PROVIDER_PROTOCOL = "flyto2.adapter-provider.v1"
+
+# The ``flyto.modules`` entry-point name of the flyto-modules-robotics pack.
+# That pack, not this library, declares the capabilities to Flyto2 through
+# ``@register_module``; a host joins a discovered resource to the pack that
+# drives it by this name.
+MODULE_PACK = "robotics"
+
+# Manifest fields a host must ask for. Released hosts validate the manifest
+# with ``extra="forbid"``, so a field they do not know would make them drop
+# the robot. Each one is emitted only when the host names it in
+# ``manifest_extensions``; without that the manifest keeps its old shape.
+MANIFEST_EXTENSIONS: tuple[str, ...] = ("module_pack",)
+
+
+def _extensions(requested: Iterable[str] | None) -> frozenset[str]:
+    if requested is None or isinstance(requested, (str, bytes)):
+        return frozenset()
+    try:
+        names = {str(item) for item in requested}
+    except TypeError:
+        return frozenset()
+    return frozenset(names) & frozenset(MANIFEST_EXTENSIONS)
 
 
 def _safe_fragment(value: str) -> str:
@@ -47,7 +69,12 @@ def _resource_identity() -> tuple[str, str]:
     return resource_id, resource_name
 
 
-def _manifest(adapter: GenericROS2Adapter, *, resource_name: str) -> dict[str, Any]:
+def _manifest(
+    adapter: GenericROS2Adapter,
+    *,
+    resource_name: str,
+    extensions: Iterable[str] | None = None,
+) -> dict[str, Any]:
     declarations = tuple(adapter.describe())
     contracts: list[dict[str, Any]] = []
     for item in declarations:
@@ -63,7 +90,7 @@ def _manifest(adapter: GenericROS2Adapter, *, resource_name: str) -> dict[str, A
                 "requires_safe_stop": item.requires_safe_stop,
             }
         )
-    return {
+    manifest: dict[str, Any] = {
         "contract": "flyto.resource-manifest.v1",
         "resource_id": adapter.resource_id,
         "resource_type": "robot",
@@ -87,6 +114,9 @@ def _manifest(adapter: GenericROS2Adapter, *, resource_name: str) -> dict[str, A
         "observed_at": datetime.now(timezone.utc).isoformat(),
         "contract_hash": "",
     }
+    if "module_pack" in _extensions(extensions):
+        manifest["module_pack"] = MODULE_PACK
+    return manifest
 
 
 def _discovery_enabled() -> bool:
@@ -99,11 +129,20 @@ def _discovery_enabled() -> bool:
     return transport in {"rclpy", "rosbridge"}
 
 
-def discover_resource_manifests(*, execution_host_id: str) -> list[dict[str, Any]]:
+def discover_resource_manifests(
+    *,
+    execution_host_id: str,
+    manifest_extensions: Iterable[str] | None = None,
+) -> list[dict[str, Any]]:
     """Discover one reachable standard ROS 2 graph without granting authority.
 
     While a presence watch (``watch_resources``) holds a connection to the
     robot, the pass reads the graph over it instead of connecting again.
+
+    ``manifest_extensions`` names optional manifest fields the host accepts
+    (see ``MANIFEST_EXTENSIONS``, also offered as this function's
+    ``manifest_extensions`` attribute). A host that passes nothing receives
+    the manifest shape it was released against.
     """
 
     _ = execution_host_id
@@ -119,7 +158,13 @@ def discover_resource_manifests(*, execution_host_id: str) -> list[dict[str, Any
             watched._invalidate_discovery()
             if not watched.describe():
                 return []
-            return [_manifest(watched, resource_name=resource_name)]
+            return [
+                _manifest(
+                    watched,
+                    resource_name=resource_name,
+                    extensions=manifest_extensions,
+                )
+            ]
         except Exception:
             return []
     adapter: GenericROS2Adapter | None = None
@@ -127,7 +172,13 @@ def discover_resource_manifests(*, execution_host_id: str) -> list[dict[str, Any
         adapter = build(resource_id)
         if not adapter.describe():
             return []
-        return [_manifest(adapter, resource_name=resource_name)]
+        return [
+            _manifest(
+                adapter,
+                resource_name=resource_name,
+                extensions=manifest_extensions,
+            )
+        ]
     except Exception:
         # Discovery is best effort.  An unavailable transport must not become
         # an authoritative "no equipment exists" statement.
@@ -320,6 +371,10 @@ def watch_resources(
 
 
 discover_resource_manifests.watch = watch_resources  # type: ignore[attr-defined]
+# A host that predates these attributes ignores them; one that reads them can
+# join resources to the pack without asking for a manifest field at all.
+discover_resource_manifests.module_pack = MODULE_PACK  # type: ignore[attr-defined]
+discover_resource_manifests.manifest_extensions = MANIFEST_EXTENSIONS  # type: ignore[attr-defined]
 
 
 def build_adapter(resource_id: str) -> GenericROS2Adapter:
@@ -408,7 +463,11 @@ def _serve(adapter_id: str, resource_id: str) -> int:
                         ),
                     )
                 elif op == "describe":
-                    value = _manifest(adapter, resource_name=_resource_identity()[1])
+                    value = _manifest(
+                        adapter,
+                        resource_name=_resource_identity()[1],
+                        extensions=request.get("manifest_extensions"),
+                    )
                 elif op == "execution_count":
                     value = {
                         "count": adapter.execution_count(str(request.get("call_id") or ""))
@@ -447,6 +506,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--execution-host-id", default="")
     parser.add_argument("--adapter-id", default=ADAPTER_ID)
     parser.add_argument("--resource-id", default="")
+    parser.add_argument(
+        "--manifest-extension",
+        action="append",
+        default=[],
+        choices=MANIFEST_EXTENSIONS,
+        help="optional manifest field the host accepts (repeatable)",
+    )
     args = parser.parse_args(argv)
 
     if args.discover:
@@ -455,7 +521,8 @@ def main(argv: list[str] | None = None) -> int:
                 {
                     "protocol": PROVIDER_PROTOCOL,
                     "resources": discover_resource_manifests(
-                        execution_host_id=args.execution_host_id
+                        execution_host_id=args.execution_host_id,
+                        manifest_extensions=args.manifest_extension,
                     ),
                 },
                 separators=(",", ":"),

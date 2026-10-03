@@ -9,6 +9,14 @@ toolkit for Flyto2.
 
 **A robot is standard ROS 2 equipment. It is not a Flyto2 appliance.**
 
+This library is the host-side driver layer next to the equipment. It runs on
+the execution host or on a companion computer beside the robot and drives the
+robot's own native ROS 2 / Nav2 stack. It is never firmware, and nothing from
+Flyto2 is installed on the robot: the lab robots stay stock TurtleBot3. It does
+not declare capabilities to Flyto2 either; the `flyto-modules-robotics` pack
+does that through flyto-core's `@register_module` capability contract. See
+`DECISIONS.md` (2026-10-04).
+
 Production topology:
 
 ```text
@@ -16,10 +24,11 @@ Flyto2 Cloud / War Room
         |
         | goal, policy, approved capability
         v
-AI Space computer
+AI Space execution host or companion computer
 (Mac / laptop / Steam Deck / mini PC)
         |
-        | Generic ROS 2 Adapter
+        | flyto-modules-robotics pack (declares capabilities)
+        | Generic ROS 2 Adapter (this library: drives the robot)
         v
 DDS / Zenoh / rosbridge / standard ROS 2
         |
@@ -56,8 +65,9 @@ user's objective was achieved.
 
 ## Architecture
 
-Equipment adapters are installed on the AI Space execution computer and loaded
-through a host-neutral adapter boundary. The built-in Python AI Space host uses
+Equipment adapters are installed on the AI Space execution host, or on a
+companion computer beside the robot, and loaded through a host-neutral adapter
+boundary. The built-in Python AI Space host uses
 `flyto2.external_adapters` / `flyto2.resource_discoverers` entry points; process
 hosts such as optional Flyto2 Runtime can use the versioned
 `flyto2.adapter-provider.v1` protocol. Adapter identity maps to the provider,
@@ -65,11 +75,19 @@ for example `ros2.generic` maps to `flyto2-adapter-provider-ros2-generic` on the
 process-host path. The adapter owns ROS 2, rosbridge, OpenRMF, camera-stream and
 other transport details; the selected execution host owns assignment-scoped
 authority and lifecycle; Cloud owns resource/capability inventory, approval,
-routing, evidence and verification.
+routing, evidence and verification. Capabilities reach Flyto2 through the
+`flyto-modules-robotics` pack's `@register_module` declarations, not through
+this repository.
 
 Provider discovery is passive. An installed provider may report a
 `flyto.resource-manifest.v1`, but discovery never grants motion or other
-effects. For execution, Runtime binds the exact commanded resource and approved
+effects. A host that passes `manifest_extensions=["module_pack"]` to the
+`ros2.generic` discoverer (or `--manifest-extension module_pack` to
+`flyto2-adapter-provider-ros2-generic --discover`) also receives
+`"module_pack": "robotics"`, the `flyto.modules` entry-point name of the pack
+that drives the resource. The discoverer offers the same name as its
+`module_pack` attribute. Without the request the manifest keeps its released
+shape, because released hosts reject unknown fields. For execution, Runtime binds the exact commanded resource and approved
 capability allowlist to one assignment and exposes that authority only through a
 loopback endpoint to Flyto2 Core. The robot itself remains standard equipment
 with no Flyto2 credential or scheduler.
