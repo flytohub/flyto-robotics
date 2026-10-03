@@ -199,10 +199,12 @@ def test_built_wheel_contains_adapter_lab_code_but_not_pi_runtime(tmp_path: Path
 
     assert scripts == EXTERNAL_CONSOLES
     assert external_adapters == {
-        "ros2.generic": "flyto_robotics.adapter_provider:build_adapter"
+        "ros2.generic": "flyto_robotics.adapter_provider:build_adapter",
+        "open_rmf.fleet": "flyto_robotics.open_rmf_adapter:build_adapter",
     }
     assert resource_discoverers == {
-        "ros2.generic": "flyto_robotics.adapter_provider:discover_resource_manifests"
+        "ros2.generic": "flyto_robotics.adapter_provider:discover_resource_manifests",
+        "open_rmf.fleet": "flyto_robotics.open_rmf_adapter:discover_fleet_manifests",
     }
     assert RETIRED_APPLIANCE_CONSOLES.isdisjoint(scripts)
 

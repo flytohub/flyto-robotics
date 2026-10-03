@@ -40,7 +40,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Protocol
 
 from . import adapter_contract as decl
-from . import motion_outcome
+from . import motion_outcome, provider_evidence
 from .adapter_contract import (
     OUTCOME_CANCELLED,
     OUTCOME_COMPLETED,
@@ -169,6 +169,10 @@ SUPERVISED_MAX_SPEED_MPS = 0.05
 SUPERVISED_MAX_DISTANCE_M = 0.3
 SUPERVISED_MAX_YAW_RAD = math.pi / 2
 
+
+# The longest the adapter waits for odometry to show the robot stopped before
+# it reads the settled pose; the same cap Flyto2 Desktop has always used.
+SETTLE_SECONDS = 1.0
 
 # Read-only capabilities that return one sensor reading; they never move.
 CAPTURE_CAPABILITIES = frozenset({"vision.observe", "sensing.map"})
@@ -663,6 +667,15 @@ class _ObservationState:
                 self._condition.wait(timeout=remaining)
             return self._snapshot()
 
+    def held_observation(self) -> dict[str, Any]:
+        """The readings held now, without waiting for any.
+
+        For evidence read after a motion failed: the host's safe stop comes
+        next and must not first wait out the observation timeout.
+        """
+        with self._condition:
+            return self._snapshot()
+
     def _snapshot(self) -> dict[str, Any]:
         now = time.monotonic()
         max_age = _max_observation_age()
@@ -818,6 +831,30 @@ def _motion_result(
     return CallResult(call_id, outcome, evidence=merged, detail=detail)
 
 
+def _with_artifacts(result: CallResult) -> CallResult:
+    """A capture's result with its picture also as a contract artifact.
+
+    ``capture`` stays for hosts released before artifacts; ``artifacts`` is
+    what ``flyto.capability-contract.v1`` hosts keep. A map that cannot be
+    drawn keeps its cells and returns no artifact, which a contract host
+    reports as a failed capture.
+    """
+    capture = (result.evidence or {}).get("capture")
+    if result.outcome != OUTCOME_COMPLETED or not isinstance(capture, Mapping):
+        return result
+    try:
+        artifacts = provider_evidence.capture_artifacts(capture)
+    except (ValueError, KeyError, TypeError, OSError):
+        logger.warning("could not turn a %s capture into an artifact", capture.get("kind"))
+        return result
+    return CallResult(
+        result.call_id,
+        result.outcome,
+        evidence={**dict(result.evidence), "artifacts": artifacts},
+        detail=result.detail,
+    )
+
+
 class GenericROS2Adapter:
     """Flyto2 capability adapter over a standard ROS 2 graph."""
 
@@ -834,6 +871,10 @@ class GenericROS2Adapter:
             or "ros2-resource"
         )
         self._declared: set[str] = set()
+        # Per call id, bounded like the backend's results: the observation
+        # before a motion, and the result once evidence was added to it.
+        self._before: dict[str, Any] = {}
+        self._provided: dict[str, CallResult] = {}
 
     def _discovered_capabilities(self) -> set[str]:
         interfaces = {(item.kind, item.name, item.type) for item in self.backend.discover()}
@@ -997,10 +1038,12 @@ class GenericROS2Adapter:
                     OUTCOME_REFUSED,
                     detail=f"{request.capability_id} needs the rosbridge transport",
                 )
-            return capture(
-                call_id=request.call_id,
-                capability_id=request.capability_id,
-                deadline_seconds=float(request.deadline_seconds),
+            return _with_artifacts(
+                capture(
+                    call_id=request.call_id,
+                    capability_id=request.capability_id,
+                    deadline_seconds=float(request.deadline_seconds),
+                )
             )
         supervised = _safety_basis() == SAFETY_BASIS_OPERATOR
         if supervised and request.capability_id != "motion.halt":
@@ -1016,11 +1059,99 @@ class GenericROS2Adapter:
             )
         if request.capability_id == "motion.halt":
             return self.backend.safe_stop(request.call_id)
-        return self.backend.invoke(
+        kept = self._provided.get(request.call_id)
+        if kept is not None:
+            # The same call again: its result, not a second motion's evidence.
+            return kept
+        before = self._before.get(request.call_id)
+        if before is None:
+            # A call resumed after a timeout keeps the observation from before
+            # it first moved, not one taken half way.
+            before = self._observe_quietly("before", request.call_id)
+            _remember(self._before, request.call_id, before)
+        result = self.backend.invoke(
             call_id=request.call_id,
             capability_id=request.capability_id,
             arguments=arguments,
             deadline_seconds=float(request.deadline_seconds),
+        )
+        return self._with_motion_evidence(request.capability_id, before, result)
+
+    def _observe_quietly(self, phase: str, call_id: str) -> dict[str, Any] | None:
+        """An observation for evidence; a reading that fails costs the item, not the call."""
+        try:
+            return self.observe(phase=phase, execution_id=call_id)
+        except Exception:  # noqa: BLE001 - evidence is best effort, motion is not
+            logger.warning("could not observe %s for %s", phase, call_id, exc_info=True)
+            return None
+
+    def _with_motion_evidence(
+        self,
+        capability_id: str,
+        before: Mapping[str, Any] | None,
+        result: CallResult,
+    ) -> CallResult:
+        """The motion's result with the evidence this adapter can vouch for.
+
+        Additive: every key the backend reported stays. ``evidence_items``
+        carries the clearance the motion started with and, for a completed
+        motion, the odometry before, after and once settled (only when the
+        robot can say it has settled; otherwise the host observes it, as
+        before). A motion that stopped short also carries
+        ``recovery_context``. Nothing here waits on a failed motion: the
+        host's safe stop comes next.
+        """
+        if result.outcome == OUTCOME_REFUSED:
+            self._before.pop(result.call_id, None)
+            return result
+        evidence = dict(result.evidence or {})
+        items: list[dict[str, Any]] = []
+        clearance = provider_evidence.clearance_item(before, _clearance_floor())
+        if clearance is not None:
+            items.append(clearance)
+        if result.outcome == OUTCOME_COMPLETED:
+            arrival = self._arrival(capability_id, before, result.call_id)
+            if arrival is not None:
+                items.append(arrival)
+        elif result.outcome in {OUTCOME_FAILED, OUTCOME_TIMEOUT}:
+            held = getattr(self.backend, "held_observation", None)
+            reading = held().get("range") if callable(held) else None
+            context = provider_evidence.recovery_context(
+                evidence.get("motion_outcome"),
+                sweep=reading.get("sweep") if isinstance(reading, Mapping) else None,
+            )
+            if context is not None:
+                evidence["recovery_context"] = context
+        if items:
+            evidence["evidence_items"] = items
+        provided = CallResult(
+            result.call_id, result.outcome, evidence=evidence, detail=result.detail
+        )
+        if result.outcome != OUTCOME_TIMEOUT:
+            # A timed-out goal is still running and may be waited on again.
+            self._before.pop(result.call_id, None)
+            _remember(self._provided, result.call_id, provided)
+        return provided
+
+    def _arrival(
+        self, capability_id: str, before: Mapping[str, Any] | None, call_id: str
+    ) -> dict[str, Any] | None:
+        after = self._observe_quietly("after", call_id)
+        if capability_id not in provider_evidence.JUDGED_MOTIONS:
+            return provider_evidence.arrival_item(
+                capability_id, before=before, after=after, settled=None
+            )
+        if before is None or after is None:
+            return None
+        # Settled means the robot said so. One that cannot tell leaves the
+        # settled observation to the host, which waits its own way.
+        if not isinstance(self.wait_until_stationary(SETTLE_SECONDS), Mapping):
+            return None
+        settled = self._observe_quietly("post_stop", call_id)
+        if settled is None:
+            return None
+        return provider_evidence.arrival_item(
+            capability_id, before=before, after=after, settled=settled
         )
 
     def cancel(self, call_id: str) -> CallResult:

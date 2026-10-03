@@ -6,7 +6,7 @@ PACKAGE_NAME = "flyto_robotics"
 
 setup(
     name=PACKAGE_NAME,
-    version="0.1.0",
+    version="0.2.0",
     packages=find_packages(exclude=("tests",)),
     package_data={PACKAGE_NAME: []},
     include_package_data=True,
@@ -56,6 +56,8 @@ setup(
         (f"share/{PACKAGE_NAME}/models/flyto_rover", glob("models/flyto_rover/*")),
     ],
     install_requires=["setuptools", "websockets>=12.0"],
+    # Encodes the occupancy map as JPEG; without it the map is a PNG.
+    extras_require={"capture": ["Pillow>=10"]},
     zip_safe=False,
     maintainer="Flyto2 Robotics",
     maintainer_email="support@flyto2.com",
@@ -64,9 +66,11 @@ setup(
     entry_points={
         "flyto2.external_adapters": [
             "ros2.generic = flyto_robotics.adapter_provider:build_adapter",
+            "open_rmf.fleet = flyto_robotics.open_rmf_adapter:build_adapter",
         ],
         "flyto2.resource_discoverers": [
             "ros2.generic = flyto_robotics.adapter_provider:discover_resource_manifests",
+            "open_rmf.fleet = flyto_robotics.open_rmf_adapter:discover_fleet_manifests",
         ],
         "console_scripts": [
             "flyto2-adapter-provider-ros2-generic = flyto_robotics.adapter_provider:main",
