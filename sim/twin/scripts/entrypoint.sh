@@ -60,9 +60,15 @@ start slam-toolbox ros2 launch slam_toolbox online_async_launch.py \
   autostart:=true use_lifecycle_manager:=false use_sim_time:=true \
   slam_params_file:=/etc/ros/slam_toolbox.yaml
 
-start nav2 ros2 launch nav2_bringup bringup_launch.py \
+# The robot's burger.yaml with the twin's timing slack (see the script):
+# Gazebo delivers scans later in simulation time than the robot's LiDAR.
+NAV2_PARAMS=/etc/ros/twin-burger.yaml
+python3 "$TWIN_HOME/scripts/twin_nav2_params.py" \
+  /opt/ros/jazzy/share/turtlebot3_navigation2/param/burger.yaml "$NAV2_PARAMS" \
+  || { echo "[twin] could not write $NAV2_PARAMS; Nav2 not started" >&2; NAV2_PARAMS=; }
+[ -n "$NAV2_PARAMS" ] && start nav2 ros2 launch nav2_bringup bringup_launch.py \
   slam:=False use_localization:=False use_composition:=False use_respawn:=True \
-  params_file:=/opt/ros/jazzy/share/turtlebot3_navigation2/param/burger.yaml \
+  params_file:="$NAV2_PARAMS" \
   use_sim_time:=True autostart:=True
 
 # The robot binds rosbridge to 127.0.0.1 and is reached through an SSH tunnel.

@@ -40,6 +40,7 @@ COPY models /opt/flyto-twin/models
 COPY launch /opt/flyto-twin/launch
 COPY config/real /opt/flyto-twin/config/real
 COPY scripts/twin_hardware.py /opt/flyto-twin/scripts/twin_hardware.py
+COPY scripts/twin_nav2_params.py /opt/flyto-twin/scripts/twin_nav2_params.py
 RUN chmod +x /usr/local/libexec/ros2-laserscan-stabilizer.py /usr/local/bin/twin-entrypoint.sh
 
 # Same environment as every robot service unit.
