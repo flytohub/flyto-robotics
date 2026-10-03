@@ -51,6 +51,11 @@ STRAIGHT_MOTIONS = frozenset({"motion.advance", "motion.retreat"})
 
 # The narrowest map picture: a 20-cell map drawn one pixel per cell is a dot.
 MAP_MIN_WIDTH_PX = 600
+# The most pixels the upscale may produce. A map is at most 4,000,000 cells, but
+# a thin one (1 x 4,000,000) scaled to 600 px wide would need terabytes; the
+# upscale stops where this budget ends, and a map already past it is drawn
+# one pixel per cell.
+MAP_MAX_PIXELS = 16_000_000
 # Cell shades, the way maps are read: free white, occupied black, unknown grey.
 UNKNOWN_SHADE = 205
 CLEARANCE_SOURCE = "FLYTO_ROS2_MIN_CLEARANCE_M"
@@ -257,6 +262,9 @@ def _map_shades(capture: Mapping[str, Any]) -> tuple[bytes, int, int]:
 def _scaled(shades: bytes, width: int, height: int) -> tuple[bytes, int, int]:
     """Nearest-neighbour upscale so a small map is still a picture."""
     scale = max(1, -(-MAP_MIN_WIDTH_PX // width))
+    cells = width * height
+    while scale > 1 and cells * scale * scale > MAP_MAX_PIXELS:
+        scale -= 1
     if scale == 1:
         return shades, width, height
     rows = []
@@ -336,6 +344,7 @@ __all__ = [
     "ARTIFACT_MAP",
     "ARTIFACT_PHOTO",
     "JUDGED_MOTIONS",
+    "MAP_MAX_PIXELS",
     "MAP_MIN_WIDTH_PX",
     "MEDIA_JPEG",
     "MEDIA_PNG",
