@@ -162,6 +162,36 @@ Captures are read-only, read one message through rosbridge (the rclpy backend
 refuses them), and return it as `evidence.capture`; the execution host keeps
 and shows it.
 
+### Evidence the adapter produces itself
+
+A result keeps every key it always had (`capture`, `odom`, `motion_outcome`)
+and adds what a host used to work out on its own (`flyto_robotics/provider_evidence.py`):
+
+| Key | When | What |
+| --- | --- | --- |
+| `evidence_items` | every motion that ran | `passage.clearance`: the clearance the motion started with against this adapter's own floor (`FLYTO_ROS2_MIN_CLEARANCE_M`, 0.35 m) |
+| | a completed motion | `robot.arrival`: odometry before, after and once settled (advance, retreat, rotate; `usable: false`, the host judges it), or the pose a navigation ended at. Emitted only when odometry says the robot settled; otherwise the host observes it as before |
+| `artifacts` | a completed capture | `[{"kind", "media_type", "data_base64"}]`, the `flyto.capability-contract.v1` artifact transport: the photo as the camera sent it, and the map drawn as a picture (free white, walls black, unknown grey, north up, at least 600 px wide). JPEG with Pillow installed (`pip install flyto-robotics[capture]`), PNG otherwise |
+| `recovery_context` | an advance or retreat that failed or timed out | why it stopped, distance asked / travelled along its heading / remaining, the nearest return at the stop, the floor, and the LiDAR sweep at the stop. The pack's declared `recovery` names it |
+
+The item shapes are the ones Flyto2 Desktop projected until now, so a host that
+passes them through reaches the same verdicts. Nothing waits on a failed
+motion: the host's safe stop comes next.
+
+### OpenRMF through the same contract
+
+`open_rmf.fleet` is a second `flyto2.external_adapters` entry point (and
+`flyto2.resource_discoverers`, active once `FLYTO_RMF_API_URL` is set). The
+commanded resource is a fleet, `fleet:<name>`; the request names that fleet and
+never a robot, so Open-RMF's dispatcher still runs the bid. A call waits, up to
+its deadline, for Open-RMF to report the task `completed` (completed),
+`failed`/`canceled`/`killed` (failed) or still running (timeout; the host's
+cancel withdraws it). A finished `motion.navigate` or `motion.dock` reports a
+`robot.arrival` item naming the fleet's own claim. Open-RMF has no fleet-wide
+stop, so `safe_stop` is refused and the capabilities declare
+`requires_safe_stop: false`: stop a machine on its own path (`motion.halt`).
+The steps are the `fleet` pack in flyto-modules-robotics.
+
 ### Motion safety basis
 
 Each robot declares what its motions rest on, with `FLYTO_ROS2_SAFETY_BASIS` on

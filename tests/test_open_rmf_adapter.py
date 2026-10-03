@@ -8,12 +8,25 @@ damage comes from quietly doing the dispatcher's job.
 
 from __future__ import annotations
 
+import pytest
+
 from flyto_robotics import adapter_contract as decl
-from flyto_robotics.adapter_contract import KNOWN_CAPABILITY_IDS, CallRequest
+from flyto_robotics.adapter_contract import (
+    KNOWN_CAPABILITY_IDS,
+    OUTCOME_COMPLETED,
+    OUTCOME_FAILED,
+    OUTCOME_TIMEOUT,
+    CallRequest,
+)
 from flyto_robotics.open_rmf_adapter import (
+    ADAPTER_ID,
     CAPABILITY_TO_CATEGORY,
+    MODULE_PACK,
     NOT_FLEET_WORK,
     OpenRmfAdapter,
+    build_adapter,
+    discover_fleet_manifests,
+    fleet_name,
 )
 
 
@@ -237,3 +250,192 @@ def test_cancelling_a_dispatched_task_uses_the_id_rmf_gave_it():
     result = device.cancel("call-1")
     assert result.outcome == "completed"
     assert sent[-1][1]["task_id"] == "rmf-task-1"
+
+
+# -- the fleet as a commanded resource (flyto2.external_adapters) -------------
+
+
+class Clock:
+    def __init__(self):
+        self.now = 0.0
+
+    def __call__(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.now += seconds
+
+
+def fleet_adapter(states, *, sent=None, fleets=None):
+    """A dispatcher that reports ``states`` in turn for the dispatched task."""
+    clock = Clock()
+    remaining = list(states)
+
+    def call(path, payload=None, **_):
+        if sent is not None:
+            sent.append((path, payload))
+        if path == "/fleets":
+            return fleets if fleets is not None else [
+                {"name": "tinyRobot", "task_types": ["patrol", "delivery"]},
+                {"name": "deliveryRobot", "task_types": ["delivery"]},
+            ]
+        if path == "/tasks/dispatch_task":
+            return {
+                "state": {
+                    "booking": {"id": "rmf-task-1"},
+                    "status": "queued",
+                    "assigned_to": {"group": "tinyRobot", "name": "tinyRobot2"},
+                }
+            }
+        if path == "/tasks/rmf-task-1/state":
+            status = remaining.pop(0) if len(remaining) > 1 else remaining[0]
+            return {"status": status, "assigned_to": {"group": "tinyRobot", "name": "tinyRobot1"}}
+        if path == "/tasks/cancel_task":
+            return {"success": True}
+        raise AssertionError(f"unexpected path {path}")
+
+    device = OpenRmfAdapter(
+        call=call,
+        fleet="tinyRobot",
+        wait_for_completion=True,
+        poll_seconds=1.0,
+        sleep=clock.sleep,
+        clock=clock,
+    )
+    return device
+
+
+def fleet_call(capability_id="motion.navigate", deadline=30.0, call_id="call-1"):
+    return CallRequest(call_id, capability_id, {"waypoint": "ward_3"}, deadline)
+
+
+def test_the_entry_point_builds_one_fleet_that_waits_for_the_task():
+    device = build_adapter("fleet:tinyRobot")
+    assert device.fleet == "tinyRobot"
+    assert device.resource_id == "fleet:tinyRobot"
+    assert device._wait is True
+    assert ADAPTER_ID == "open_rmf.fleet" and MODULE_PACK == "fleet"
+
+
+@pytest.mark.parametrize("resource_id", ["", "tinyRobot", "fleet:", "robot:tinyRobot2"])
+def test_a_resource_that_is_not_a_fleet_is_refused(resource_id):
+    with pytest.raises(ValueError):
+        fleet_name(resource_id)
+
+
+def test_the_request_keeps_the_task_in_the_fleet_and_still_names_no_robot():
+    sent: list = []
+    fleet_adapter(["completed"], sent=sent).invoke(fleet_call())
+    _path, payload = next(item for item in sent if item[0] == "/tasks/dispatch_task")
+    assert payload["request"]["fleet_name"] == "tinyRobot"
+    assert "robot" not in payload["request"]
+    assert "tinyRobot2" not in str(payload)
+
+
+def test_a_finished_navigation_is_completed_with_the_fleet_s_arrival():
+    device = fleet_adapter(["queued", "underway", "completed"])
+    result = device.invoke(fleet_call())
+    assert result.outcome == OUTCOME_COMPLETED
+    assert result.evidence["rmf_status"] == "completed"
+    # The robot RMF reported at the end, not the one bid at dispatch.
+    assert result.evidence["assigned_robot"] == "tinyRobot1"
+    [arrival] = result.evidence["evidence_items"]
+    assert arrival["kind"] == "robot.arrival" and arrival["usable"] is True
+    assert arrival["reason"]["observed"]["waypoint"] == "ward_3"
+    assert arrival["reason"]["source"] == "open-rmf.task-state"
+
+
+def test_a_load_proves_no_arrival():
+    result = fleet_adapter(["completed"]).invoke(fleet_call("transport.load"))
+    assert result.outcome == OUTCOME_COMPLETED
+    assert "evidence_items" not in result.evidence
+
+
+@pytest.mark.parametrize("status", ["failed", "canceled", "killed"])
+def test_a_task_rmf_ended_badly_is_a_failed_call(status):
+    result = fleet_adapter(["underway", status]).invoke(fleet_call())
+    assert result.outcome == OUTCOME_FAILED
+    assert status in result.detail
+
+
+def test_a_task_still_running_at_the_deadline_times_out_and_is_never_dispatched_twice():
+    sent: list = []
+    device = fleet_adapter(["underway"], sent=sent)
+    first = device.invoke(fleet_call(deadline=3.0))
+    assert first.outcome == OUTCOME_TIMEOUT
+    assert first.evidence["rmf_task_id"] == "rmf-task-1"
+    device.invoke(fleet_call(deadline=3.0))
+    assert [path for path, _ in sent].count("/tasks/dispatch_task") == 1
+    # The host's cancel after a timeout withdraws the task RMF is running.
+    assert device.cancel("call-1").outcome == OUTCOME_COMPLETED
+
+
+def test_a_finished_call_answers_again_with_its_result():
+    sent: list = []
+    device = fleet_adapter(["completed"], sent=sent)
+    first = device.invoke(fleet_call())
+    assert device.invoke(fleet_call()) is first
+    assert [path for path, _ in sent].count("/tasks/dispatch_task") == 1
+
+
+def test_the_fleet_adapter_declares_only_its_own_fleet():
+    declared = fleet_adapter(["completed"]).describe()
+    assert {item.resource_id for item in declared} == {"fleet:tinyRobot"}
+    # A fleet travels to waypoints: it declares that, not a robot's navigate.
+    assert {item.capability_id for item in declared} == {
+        "motion.dock",
+        "motion.navigate_to_waypoint",
+        "transport.load",
+        "transport.unload",
+    }
+
+
+def test_waypoint_navigation_is_a_patrol_and_arrives():
+    sent: list = []
+    result = fleet_adapter(["completed"], sent=sent).invoke(
+        fleet_call("motion.navigate_to_waypoint")
+    )
+    assert result.outcome == OUTCOME_COMPLETED
+    _path, payload = next(item for item in sent if item[0] == "/tasks/dispatch_task")
+    assert payload["request"]["category"] == "patrol"
+    assert payload["request"]["description"] == {"places": ["ward_3"], "rounds": 1}
+    assert result.evidence["evidence_items"][0]["kind"] == "robot.arrival"
+
+
+def test_the_unbound_conformance_build_still_declares_motion_navigate():
+    declared = adapter(fleets=[{"name": "p", "task_types": ["patrol"]}]).describe()
+    assert {item.capability_id for item in declared} == {"motion.navigate", "motion.dock"}
+
+
+def test_deployment_mode_is_physical_unless_said_otherwise(monkeypatch):
+    device = fleet_adapter(["completed"])
+    monkeypatch.delenv("FLYTO_RMF_DEPLOYMENT_MODE", raising=False)
+    assert device.deployment_mode == "physical"
+    monkeypatch.setenv("FLYTO_RMF_DEPLOYMENT_MODE", "simulation")
+    assert device.deployment_mode == "simulation"
+
+
+def test_discovery_publishes_each_fleet_with_its_pack_only_when_asked():
+    reader = OpenRmfAdapter(call=fleet_adapter(["completed"])._call)
+    plain = discover_fleet_manifests(execution_host_id="host", adapter=reader)
+    asked = discover_fleet_manifests(
+        execution_host_id="host", adapter=reader, manifest_extensions=["module_pack"]
+    )
+    assert [item["resource_id"] for item in plain] == ["fleet:deliveryRobot", "fleet:tinyRobot"]
+    assert all("module_pack" not in item for item in plain)
+    assert all(item["module_pack"] == "fleet" for item in asked)
+    tiny = asked[1]
+    assert tiny["adapter"]["adapter_id"] == "open_rmf.fleet"
+    assert tiny["capability_ids"] == [
+        "motion.dock",
+        "motion.navigate_to_waypoint",
+        "transport.load",
+        "transport.unload",
+    ]
+    assert all(item["requires_safe_stop"] is False for item in tiny["capability_contracts"])
+    assert asked[0]["capability_ids"] == ["transport.load", "transport.unload"]
+
+
+def test_discovery_needs_a_configured_dispatcher(monkeypatch):
+    monkeypatch.delenv("FLYTO_RMF_API_URL", raising=False)
+    assert discover_fleet_manifests(execution_host_id="host") == []
