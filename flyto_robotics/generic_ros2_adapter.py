@@ -29,11 +29,13 @@ import base64
 import contextlib
 import hashlib
 import json
+import logging
 import math
 import os
+import queue
 import threading
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Callable, Protocol
 
@@ -52,6 +54,8 @@ from .ros2_observation_bundle import (
     build_ros2_observation_bundle as build_observation_bundle,
 )
 from .scan_clearance import sweep as scan_sweep
+
+logger = logging.getLogger(__name__)
 
 CMD_VEL_TYPES = frozenset(
     {"geometry_msgs/msg/Twist", "geometry_msgs/msg/TwistStamped"}
@@ -73,6 +77,54 @@ def _observation_wait_seconds() -> float:
     except ValueError:
         seconds = 3.0
     return min(10.0, max(0.25, seconds))
+
+
+# What an observation may wait for. Each is set by a subscription callback, so
+# a wait for it ends on that callback rather than at a fixed spin deadline.
+REQUIRE_POSE = "pose"
+REQUIRE_RANGE = "range"
+REQUIRE_MAP_TF = "map_tf"
+
+# A robot is stationary once this many consecutive odometry messages report
+# speeds this close to zero. A TurtleBot3 publishes odometry at about 30 Hz,
+# so a robot that has stopped is recognised in about 0.1 s.
+STILL_SAMPLES = 3
+STILL_LINEAR_MPS = 0.01
+STILL_ANGULAR_RADPS = 0.02
+# Per-call results and execution counts kept for idempotent retries of the
+# same call_id. A warm adapter lives as long as its host, so this is bounded.
+CALL_HISTORY_LIMIT = 256
+# For a driver whose odometry carries no twist: movement between two messages.
+STILL_POSE_DELTA_M = 0.002
+STILL_YAW_DELTA_RAD = 0.01
+# A reading after this long without one means the robot came back (it was
+# powered off, or its drivers restarted). Matches the execution host's
+# silence threshold for "unreachable".
+SILENT_SECONDS = 10.0
+LIFECYCLE_EVENT_TYPE = "lifecycle_msgs/msg/TransitionEvent"
+
+
+def _lifecycle_event_topics() -> tuple[str, ...]:
+    """Lifecycle topics of the servers that host the motion actions.
+
+    Nav2 brings its servers up as lifecycle nodes, after the map loads, and
+    each one publishes a TransitionEvent when it activates. That message is
+    the moment its actions join the graph, so a host is told then rather than
+    finding out on its next discovery pass. Empty disables it.
+    """
+    raw = os.getenv(
+        "FLYTO_ROS2_LIFECYCLE_EVENT_TOPICS",
+        "/bt_navigator/transition_event,/behavior_server/transition_event",
+    )
+    return tuple(item.strip() for item in raw.split(",") if item.strip())
+
+
+def _default_requirements() -> tuple[str, ...]:
+    return (REQUIRE_POSE, REQUIRE_RANGE) if _needs_lidar() else (REQUIRE_POSE,)
+
+
+def _max_observation_age() -> float:
+    return max(0.1, float(os.getenv("FLYTO_ROS2_OBSERVATION_MAX_AGE_SECONDS", "5")))
 
 
 def _simulation_marker_topic() -> str:
@@ -292,7 +344,311 @@ class ROS2Backend(Protocol):
 
     def execution_count(self, call_id: str) -> int: ...
 
-    def observation(self) -> Mapping[str, Any]: ...
+    def observation(self, required: Iterable[str] | None = None) -> Mapping[str, Any]: ...
+
+
+class _ObservationState:
+    """Latest readings shared by both backends, and waits that end on them.
+
+    Subscription callbacks store each reading under ``self._condition`` and
+    notify it. A caller that needs a reading the robot has not sent yet waits
+    on that condition, so it returns on the callback that delivers it, never
+    after a fixed spin or sleep; the observation wait only caps how long.
+    """
+
+    _connected: bool
+    _results: dict[str, CallResult]
+    _counts: dict[str, int]
+
+    def _init_observation_state(self) -> None:
+        self._condition = threading.Condition()
+        # Told when the transport drops or returns, so a host keeping this
+        # connection warm reconnects on the drop rather than on a timer.
+        self._connection_listeners: list[Callable[[bool], None]] = []
+        self._pose: dict[str, float | str] | None = None
+        self._pose_seen_at: float | None = None
+        # (linear x, angular z) from the odometry twist, or None if absent.
+        self._velocity: tuple[float, float] | None = None
+        self._odom_sequence = 0
+        self._minimum_range: float | None = None
+        self._range_sample_count = 0
+        self._range_sweep: dict[str, Any] | None = None
+        self._range_seen_at: float | None = None
+        self._camera: dict[str, Any] | None = None
+        self._camera_seen_at: float | None = None
+        self._camera_calibration_snapshot: str | None = None
+        self._map_tf_seen_at: float | None = None
+        # When this connection started listening: a robot never heard from
+        # since then has been silent for as long as it has been listening.
+        self._listening_since = time.monotonic()
+        # Told what changed on the robot's side of the graph (see
+        # add_graph_listener). Delivered on their own thread, never under
+        # ``self._condition``, so a listener may call back into the backend.
+        self._graph_listeners: list[Callable[[str], None]] = []
+        self._graph_events: queue.SimpleQueue | None = None
+        # Reading kinds heard on this connection, and when the last one came.
+        self._heard_kinds: set[str] = set()
+        self._last_heard_at: float | None = None
+
+    def add_graph_listener(self, listener: Callable[[str], None]) -> None:
+        """Call ``listener(reason)`` when the robot's graph may have changed.
+
+        Fired on state, never on a timer: the first odometry on a connection
+        (the robot's drivers are up), odometry after a silence (the robot came
+        back), the first map transform (localization is up), and a Nav2
+        lifecycle transition (its servers, and their actions, came or went).
+        A host re-reads the graph and republishes the resource then.
+        """
+        with self._condition:
+            self._graph_listeners.append(listener)
+            self._graph_event_queue()
+
+    def _graph_event_queue(self) -> queue.SimpleQueue | None:
+        """The delivery queue, started on demand while anyone is listening."""
+        if self._graph_events is None and self._graph_listeners:
+            self._graph_events = queue.SimpleQueue()
+            threading.Thread(
+                target=self._deliver_graph_events,
+                args=(self._graph_events,),
+                name="ros2-graph-events",
+                daemon=True,
+            ).start()
+        return self._graph_events
+
+    def _stop_graph_events(self) -> None:
+        """End the delivery thread with the connection; the next event restarts it."""
+        with self._condition:
+            events, self._graph_events = self._graph_events, None
+        if events is not None:
+            events.put(None)
+
+    def _deliver_graph_events(self, events: queue.SimpleQueue) -> None:
+        while True:
+            reason = events.get()
+            if reason is None:
+                return
+            for listener in tuple(self._graph_listeners):
+                try:
+                    listener(reason)
+                except Exception:  # noqa: BLE001 - a listener never breaks the transport
+                    continue
+
+    def _graph_changed(self, reason: str) -> None:
+        """Record that the graph may have changed; safe under the condition."""
+        self._forget_graph()
+        events = self._graph_event_queue()
+        if events is not None:
+            events.put(reason)
+
+    def _forget_graph(self) -> None:
+        """Drop a cached view of the graph; a backend with one overrides this."""
+
+    def _heard(self, kind: str, observed: float) -> None:
+        """Note a reading; the first of its kind, or one after silence, is news."""
+        previous = self._last_heard_at
+        self._last_heard_at = observed
+        if kind not in self._heard_kinds:
+            self._heard_kinds.add(kind)
+            self._graph_changed(f"{kind}_appeared")
+        elif previous is not None and observed - previous >= SILENT_SECONDS:
+            self._graph_changed(f"{kind}_returned")
+
+    def _store_odometry(
+        self,
+        pose: dict[str, float | str],
+        velocity: tuple[float, float] | None,
+        observed: float,
+    ) -> None:
+        with self._condition:
+            self._pose = pose
+            self._velocity = velocity
+            self._pose_seen_at = observed
+            self._odom_sequence += 1
+            self._heard("odometry", observed)
+            self._condition.notify_all()
+
+    def _reset_readings(self) -> None:
+        """Forget readings from a connection that has ended.
+
+        A reading from before a drop says nothing about the robot now, so the
+        next observation waits for the new connection's first message instead
+        of passing an old pose or scan off as fresh.
+        """
+        with self._condition:
+            self._pose_seen_at = None
+            self._velocity = None
+            self._range_seen_at = None
+            self._camera_seen_at = None
+            self._map_tf_seen_at = None
+            self._listening_since = time.monotonic()
+            self._heard_kinds.clear()
+            self._last_heard_at = None
+            self._condition.notify_all()
+
+    def silent_seconds(self) -> float | None:
+        """Seconds since the robot last sent any subscribed reading.
+
+        A transport can stay up while the robot behind it has gone (an rclpy
+        node keeps spinning when the robot powers off, and a rosbridge may
+        outlive its drivers). A robot publishing odometry is never silent
+        for long, so a host reads a long silence as the equipment being
+        unreachable. None while disconnected.
+        """
+        if not self._connected:
+            return None
+        with self._condition:
+            heard = [
+                seen
+                for seen in (
+                    self._pose_seen_at,
+                    self._range_seen_at,
+                    self._camera_seen_at,
+                    self._map_tf_seen_at,
+                )
+                if seen is not None
+            ]
+            last = max(heard, default=self._listening_since)
+        return max(0.0, time.monotonic() - last)
+
+    def _missing(self, required: Iterable[str]) -> list[str]:
+        # Stale counts as missing: on a warm connection the next callback is
+        # one message period away, so it is waited for rather than refused.
+        now = time.monotonic()
+        max_age = _max_observation_age()
+        seen = {
+            REQUIRE_POSE: self._pose_seen_at,
+            REQUIRE_RANGE: self._range_seen_at,
+            REQUIRE_MAP_TF: self._map_tf_seen_at,
+        }
+        return [
+            key
+            for key in required
+            if seen.get(key) is None or now - seen[key] > max_age
+        ]
+
+    def is_connected(self) -> bool:
+        return bool(self._connected)
+
+    def add_connection_listener(self, listener: Callable[[bool], None]) -> None:
+        self._connection_listeners.append(listener)
+
+    def _notify_connection(self, connected: bool) -> None:
+        for listener in tuple(self._connection_listeners):
+            try:
+                listener(connected)
+            except Exception:  # noqa: BLE001 - a listener never breaks the transport
+                continue
+
+    def _keep_result(self, call_id: str, result: CallResult) -> CallResult:
+        _remember(self._results, call_id, result)
+        return result
+
+    def _count_execution(self, call_id: str) -> None:
+        _remember(self._counts, call_id, self._counts.get(call_id, 0) + 1)
+
+    def observation(self, required: Iterable[str] | None = None) -> Mapping[str, Any]:
+        """Current readings, waiting only for a required one not fresh yet.
+
+        ``required`` defaults to odometry, plus LiDAR unless the robot's safety
+        basis is operator_present. A warm connection already holds them, so
+        this returns at once.
+        """
+        needed = tuple(_default_requirements() if required is None else required)
+        deadline = time.monotonic() + _observation_wait_seconds()
+        with self._condition:
+            while self._connected and self._missing(needed):
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                self._condition.wait(timeout=remaining)
+            return self._snapshot()
+
+    def _snapshot(self) -> dict[str, Any]:
+        now = time.monotonic()
+        max_age = _max_observation_age()
+
+        def fresh(seen_at: float | None) -> bool:
+            return seen_at is not None and now - seen_at <= max_age
+
+        return {
+            "pose": (
+                dict(self._pose)
+                if self._pose is not None and fresh(self._pose_seen_at)
+                else None
+            ),
+            "range": (
+                {
+                    "minimum_range_m": self._minimum_range,
+                    "sample_count": self._range_sample_count,
+                    **({"sweep": self._range_sweep} if self._range_sweep else {}),
+                }
+                if self._minimum_range is not None and fresh(self._range_seen_at)
+                else None
+            ),
+            "camera": (
+                dict(self._camera)
+                if self._camera is not None and fresh(self._camera_seen_at)
+                else None
+            ),
+            "map_tf_available": fresh(self._map_tf_seen_at),
+        }
+
+    def _still(self, previous: Mapping[str, Any] | None) -> bool:
+        if self._velocity is not None:
+            linear, angular = self._velocity
+            return abs(linear) <= STILL_LINEAR_MPS and abs(angular) <= STILL_ANGULAR_RADPS
+        if previous is None or self._pose is None:
+            return False
+        moved = math.hypot(
+            float(self._pose["x"]) - float(previous["x"]),
+            float(self._pose["y"]) - float(previous["y"]),
+        )
+        turned = abs(
+            math.remainder(float(self._pose["yaw"]) - float(previous["yaw"]), math.tau)
+        )
+        return moved <= STILL_POSE_DELTA_M and turned <= STILL_YAW_DELTA_RAD
+
+    def wait_until_stationary(
+        self, max_seconds: float = 1.0, *, samples: int = STILL_SAMPLES
+    ) -> dict[str, Any]:
+        """Return once ``samples`` consecutive odometry messages show no motion.
+
+        Each odometry callback re-judges the robot, so a robot that has stopped
+        is recognised on the messages that say so. ``max_seconds`` is only the
+        cap: a robot still moving then is reported as drifting, not waited for.
+        """
+        needed = max(1, int(samples))
+        started = time.monotonic()
+        deadline = started + max(0.0, float(max_seconds))
+        still = 0
+        with self._condition:
+            seen = self._odom_sequence
+            previous = dict(self._pose) if self._pose is not None else None
+            while still < needed and self._connected:
+                if self._odom_sequence == seen:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    self._condition.wait(timeout=remaining)
+                    continue
+                seen = self._odom_sequence
+                still = still + 1 if self._still(previous) else 0
+                previous = dict(self._pose) if self._pose is not None else None
+        stationary = still >= needed
+        return {
+            "stationary": stationary,
+            "drifting": not stationary,
+            "still_samples": still,
+            "waited_seconds": round(time.monotonic() - started, 3),
+        }
+
+
+def _remember(store: dict[str, Any], key: str, value: Any) -> None:
+    """Store ``value`` as the newest entry, dropping the oldest past the limit."""
+    store.pop(key, None)
+    store[key] = value
+    while len(store) > CALL_HISTORY_LIMIT:
+        store.pop(next(iter(store)))
 
 
 def _numeric_arguments(capability_id: str, arguments: Mapping[str, Any]) -> dict[str, float]:
@@ -322,6 +678,11 @@ def _numeric_arguments(capability_id: str, arguments: Mapping[str, Any]) -> dict
 
 class GenericROS2Adapter:
     """Flyto2 capability adapter over a standard ROS 2 graph."""
+
+    # One connection may serve every job for this resource: per-call state is
+    # keyed by call_id, and a host keeping it warm skips the connect,
+    # subscribe and first-sample wait a fresh adapter pays on every job.
+    supports_shared_connection = True
 
     def __init__(self, *, backend: ROS2Backend | None = None, resource_id: str = ""):
         self.backend = backend or RclpyROS2Backend()
@@ -387,7 +748,21 @@ class GenericROS2Adapter:
         basis = _safety_basis()
         if basis not in SAFETY_BASES:
             return f"FLYTO_ROS2_SAFETY_BASIS {basis!r} is not one of {', '.join(SAFETY_BASES)}"
-        observation = self.backend.observation()
+        if capability_id in PLANNED_MOTIONS and basis != SAFETY_BASIS_OPERATOR:
+            # Wait for the map->odom transform as well, so a navigate on a
+            # fresh connection is judged once it arrives instead of refused
+            # because LiDAR happened to come first.
+            observation = self.backend.observation(
+                required=(REQUIRE_POSE, REQUIRE_RANGE, REQUIRE_MAP_TF)
+            )
+        else:
+            observation = self.backend.observation()
+        if observation.get("pose") is None or (
+            basis != SAFETY_BASIS_OPERATOR and observation.get("range") is None
+        ):
+            # Readings did not arrive in time: the drivers may have restarted
+            # behind the transport, so the next call reads the graph afresh.
+            self._invalidate_discovery()
         if observation.get("pose") is None:
             return "fresh odometry is required before motion"
         if basis == SAFETY_BASIS_OPERATOR:
@@ -425,10 +800,20 @@ class GenericROS2Adapter:
         marker = _simulation_marker_topic()
         if not marker:
             return None
+        mismatch = self._deployment_mismatch_in(self.backend.discover(), marker)
+        if mismatch is None:
+            return None
+        # The graph may be cached from before a simulator or driver restart;
+        # refuse only on what the graph says now.
+        self._invalidate_discovery()
+        return self._deployment_mismatch_in(self.backend.discover(), marker)
+
+    @staticmethod
+    def _deployment_mismatch_in(
+        interfaces: Iterable[StandardInterface], marker: str
+    ) -> str | None:
         mode = os.getenv("FLYTO_ROS2_DEPLOYMENT_MODE", "hardware").strip().lower()
-        simulated = any(
-            item.kind == "topic" and item.name == marker for item in self.backend.discover()
-        )
+        simulated = any(item.kind == "topic" and item.name == marker for item in interfaces)
         if mode == "simulation" and not simulated:
             return (
                 f"adapter is configured for simulation but the ROS graph has no {marker}; "
@@ -442,7 +827,16 @@ class GenericROS2Adapter:
         return None
 
     def invoke(self, request: CallRequest) -> CallResult:
+        if getattr(self.backend, "_presence_only", False):
+            return CallResult(
+                request.call_id,
+                OUTCOME_REFUSED,
+                detail="a presence connection never commands the robot",
+            )
         if request.capability_id not in self._declared:
+            # A capability the graph did not have before may have appeared
+            # since (Nav2 starts once the map loads), so a miss re-reads it.
+            self._invalidate_discovery()
             self.describe()
         if request.capability_id not in self._declared:
             return CallResult(
@@ -539,6 +933,48 @@ class GenericROS2Adapter:
                 raise
             return bundle({key: value for key, value in reading.items() if key != "sweep"})
 
+    def wait_until_stationary(self, max_seconds: float = 1.0) -> dict[str, Any] | None:
+        """Wait for odometry to show the robot stopped, at most ``max_seconds``.
+
+        None when the backend cannot tell, so a host falls back to its own wait.
+        """
+        method = getattr(self.backend, "wait_until_stationary", None)
+        if not callable(method):
+            return None
+        return method(max_seconds)
+
+    def silent_seconds(self) -> float | None:
+        """Seconds since the robot last sent a reading; None if unknown."""
+        method = getattr(self.backend, "silent_seconds", None)
+        if not callable(method):
+            return None
+        value = method()
+        return None if value is None else float(value)
+
+    @property
+    def connected(self) -> bool:
+        state = getattr(self.backend, "is_connected", None)
+        if callable(state):
+            return bool(state())
+        return bool(getattr(self.backend, "_connected", True))
+
+    def add_connection_listener(self, listener: Callable[[bool], None]) -> None:
+        """Call ``listener(connected)`` whenever the transport drops or returns."""
+        method = getattr(self.backend, "add_connection_listener", None)
+        if callable(method):
+            method(listener)
+
+    def add_graph_listener(self, listener: Callable[[str], None]) -> None:
+        """Call ``listener(reason)`` when the robot's graph may have changed."""
+        method = getattr(self.backend, "add_graph_listener", None)
+        if callable(method):
+            method(listener)
+
+    def _invalidate_discovery(self) -> None:
+        method = getattr(self.backend, "invalidate_discovery", None)
+        if callable(method):
+            method()
+
     def disconnect(self) -> None:
         method = getattr(self.backend, "disconnect", None)
         if callable(method):
@@ -550,13 +986,22 @@ class GenericROS2Adapter:
             method()
 
 
-class RclpyROS2Backend:
-    """rclpy client for standard Nav2 actions and observation topics."""
+class RclpyROS2Backend(_ObservationState):
+    """rclpy client for standard Nav2 actions and observation topics.
 
-    def __init__(self) -> None:
+    A background executor delivers callbacks for the adapter's whole life, so
+    readings, goal acceptance and results arrive as they happen. No caller
+    spins the node: rclpy forbids spinning one node from two threads, and a
+    spin to a fixed deadline costs that deadline whether or not anything came.
+    """
+
+    def __init__(self, *, presence_only: bool = False) -> None:
+        # See RosbridgeROS2Backend: odometry and lifecycle events only.
+        self._presence_only = bool(presence_only)
         try:
             import rclpy
             from nav_msgs.msg import Odometry
+            from rclpy.executors import SingleThreadedExecutor
             from rclpy.node import Node
             from rclpy.qos import qos_profile_sensor_data
             from sensor_msgs.msg import CameraInfo, Image, LaserScan
@@ -569,55 +1014,192 @@ class RclpyROS2Backend:
         if not rclpy.ok():
             rclpy.init(args=None)
         self._rclpy = rclpy
-        self._node = Node("flyto_external_generic_ros2_adapter")
+        self._node_type = Node
+        self._message_types = (Odometry, LaserScan, Image, CameraInfo, TFMessage)
         self._sensor_qos = qos_profile_sensor_data
+        self._executor_type = SingleThreadedExecutor
+        self._executor: Any | None = None
+        self._executor_thread: threading.Thread | None = None
         self._connected = True
+        self._init_observation_state()
+        # rmw fills a new node's graph cache as DDS discovery runs; it is known
+        # to have caught up once the first subscribed message arrives.
+        self._graph_ready = False
         self._goal_handles: dict[str, Any] = {}
         self._result_futures: dict[str, Any] = {}
         self._results: dict[str, CallResult] = {}
         self._counts: dict[str, int] = {}
-        self._pose: dict[str, float] | None = None
-        self._pose_seen_at: float | None = None
-        self._minimum_range: float | None = None
-        self._range_sample_count = 0
-        self._range_sweep: dict[str, Any] | None = None
-        self._range_seen_at: float | None = None
-        self._camera: dict[str, Any] | None = None
-        self._camera_seen_at: float | None = None
-        self._camera_calibration_snapshot: str | None = None
-        self._map_tf_seen_at: float | None = None
         self._publishers: dict[str, Any] = {}
+        # Kept per capability: a fresh ActionClient has not matched its server
+        # yet, and rclpy's wait_for_server then polls in 0.25 s steps.
+        self._action_clients: dict[str, Any] = {}
+        self._node: Any | None = None
+        self._create_node()
 
-        self._node.create_subscription(
-            Odometry,
+    def _create_node(self) -> None:
+        """A node with the standard observation subscriptions."""
+        odometry, scan, image, camera_info, tf_message = self._message_types
+        node = self._node_type(
+            "flyto_external_generic_ros2_presence"
+            if self._presence_only
+            else "flyto_external_generic_ros2_adapter"
+        )
+        node.create_subscription(
+            odometry,
             os.getenv("FLYTO_ROS2_ODOM_TOPIC", "/odom"),
-            self._on_odometry,
+            self._guarded(self._on_odometry),
             self._sensor_qos,
         )
-        self._node.create_subscription(
-            LaserScan,
+        self._subscribe_lifecycle(node)
+        if self._presence_only:
+            self._node = node
+            self._graph_ready = False
+            self._start_executor()
+            return
+        node.create_subscription(
+            scan,
             os.getenv("FLYTO_ROS2_SCAN_TOPIC", "/scan"),
-            self._on_scan,
+            self._guarded(self._on_scan),
             self._sensor_qos,
         )
-        self._node.create_subscription(
-            Image,
+        node.create_subscription(
+            image,
             os.getenv("FLYTO_ROS2_CAMERA_TOPIC", "/camera/image_raw"),
-            self._on_camera,
+            self._guarded(self._on_camera),
             self._sensor_qos,
         )
-        self._node.create_subscription(
-            CameraInfo,
+        node.create_subscription(
+            camera_info,
             os.getenv("FLYTO_ROS2_CAMERA_INFO_TOPIC", "/camera/camera_info"),
-            self._on_camera_info,
+            self._guarded(self._on_camera_info),
             self._sensor_qos,
         )
-        self._node.create_subscription(
-            TFMessage,
+        node.create_subscription(
+            tf_message,
             os.getenv("FLYTO_ROS2_TF_TOPIC", "/tf"),
-            self._on_tf,
+            self._guarded(self._on_tf),
             10,
         )
+        self._node = node
+        self._graph_ready = False
+        self._create_action_clients(node)
+        self._start_executor()
+
+    def _subscribe_lifecycle(self, node: Any) -> None:
+        topics = _lifecycle_event_topics()
+        if not topics:
+            return
+        try:
+            from lifecycle_msgs.msg import TransitionEvent
+        except ImportError:
+            return
+        for topic in topics:
+
+            def changed(_message: Any, topic: str = topic) -> None:
+                with self._condition:
+                    self._graph_changed(f"lifecycle:{topic}")
+
+            node.create_subscription(TransitionEvent, topic, changed, 10)
+
+    def _create_action_clients(self, node: Any) -> None:
+        """Create the motion action clients with the node.
+
+        A client matches its server during DDS discovery, alongside the
+        subscriptions, so by the first goal it is usually ready. Created at
+        the first goal instead, it had not matched yet, and rclpy's
+        wait_for_server then polls for it.
+        """
+        try:
+            from rclpy.action import ActionClient
+        except ImportError:
+            return
+        motions = ("motion.navigate", "motion.advance", "motion.retreat", "motion.rotate")
+        for capability_id in motions:
+            if capability_id in self._action_clients:
+                continue
+            try:
+                self._action_clients[capability_id] = ActionClient(
+                    node,
+                    self._action_type(capability_id),
+                    DEFAULT_INTERFACES[capability_id][1],
+                )
+            except Exception:  # noqa: BLE001 - created on first use instead
+                logger.debug("ROS 2 action client for %s deferred", capability_id, exc_info=True)
+
+    def _destroy_node(self) -> None:
+        """Release the node with its subscriptions, publishers and clients.
+
+        Each discovery pass on an execution host builds an adapter and
+        disconnects it; a node left behind kept its subscriptions and DDS
+        participant alive for the life of the process.
+        """
+        node, self._node = self._node, None
+        self._publishers.clear()
+        self._action_clients.clear()
+        if node is not None:
+            with contextlib.suppress(Exception):
+                node.destroy_node()
+
+    def _start_executor(self) -> None:
+        if self._executor_thread is not None and self._executor_thread.is_alive():
+            return
+        executor = self._executor_type()
+        executor.add_node(self._node)
+        thread = threading.Thread(
+            target=self._spin_executor,
+            args=(executor,),
+            name="ros2-adapter-executor",
+            daemon=True,
+        )
+        self._executor = executor
+        self._executor_thread = thread
+        thread.start()
+
+    def _spin_executor(self, executor: Any) -> None:
+        try:
+            executor.spin()
+        except Exception as error:  # noqa: BLE001 - reported as a dropped connection
+            if executor is self._executor:
+                logger.warning("ROS 2 adapter executor stopped: %s", type(error).__name__)
+        if executor is not self._executor:
+            # Stopped on purpose by disconnect() or reconnect().
+            return
+        # Nothing delivers readings or goal results any more. Say so, so a
+        # host keeping this adapter warm reconnects it now instead of handing
+        # every job an adapter whose readings only go stale.
+        with self._condition:
+            self._connected = False
+            self._condition.notify_all()
+        self._notify_connection(False)
+
+    def is_connected(self) -> bool:
+        thread = self._executor_thread
+        return bool(self._connected) and thread is not None and thread.is_alive()
+
+    def _guarded(self, callback: Callable[[Any], None]) -> Callable[[Any], None]:
+        """One malformed message is dropped; it must not end the executor."""
+
+        def deliver(message: Any) -> None:
+            try:
+                callback(message)
+            except Exception as error:  # noqa: BLE001 - drop the bad message only
+                logger.debug(
+                    "ROS 2 message dropped by %s: %s",
+                    getattr(callback, "__name__", "callback"),
+                    type(error).__name__,
+                )
+
+        return deliver
+
+    def _stop_executor(self) -> None:
+        executor, thread = self._executor, self._executor_thread
+        self._executor = None
+        self._executor_thread = None
+        if executor is not None:
+            with contextlib.suppress(Exception):
+                executor.shutdown()
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=2.0)
 
     def _on_odometry(self, message: Any) -> None:
         orientation = message.pose.pose.orientation
@@ -625,13 +1207,20 @@ class RclpyROS2Backend:
             2.0 * (orientation.w * orientation.z + orientation.x * orientation.y),
             1.0 - 2.0 * (orientation.y * orientation.y + orientation.z * orientation.z),
         )
-        self._pose = {
-            "frame": "odom",
-            "x": float(message.pose.pose.position.x),
-            "y": float(message.pose.pose.position.y),
-            "yaw": float(yaw),
-        }
-        self._pose_seen_at = time.monotonic()
+        twist = getattr(getattr(message, "twist", None), "twist", None)
+        velocity = (
+            (float(twist.linear.x), float(twist.angular.z)) if twist is not None else None
+        )
+        self._store_odometry(
+            {
+                "frame": "odom",
+                "x": float(message.pose.pose.position.x),
+                "y": float(message.pose.pose.position.y),
+                "yaw": float(yaw),
+            },
+            velocity,
+            time.monotonic(),
+        )
 
     def _on_scan(self, message: Any) -> None:
         usable = [
@@ -642,16 +1231,19 @@ class RclpyROS2Backend:
             and float(value) <= float(message.range_max)
         ]
         if usable:
-            self._minimum_range = min(usable)
-            self._range_sample_count = len(usable)
-            self._range_sweep = scan_sweep(
+            sweep = scan_sweep(
                 list(message.ranges),
                 angle_min=message.angle_min,
                 angle_increment=message.angle_increment,
                 range_min=message.range_min,
                 range_max=message.range_max,
             )
-            self._range_seen_at = time.monotonic()
+            with self._condition:
+                self._minimum_range = min(usable)
+                self._range_sample_count = len(usable)
+                self._range_sweep = sweep
+                self._range_seen_at = time.monotonic()
+                self._condition.notify_all()
 
     def _on_camera(self, message: Any) -> None:
         payload = bytes(message.data)
@@ -664,15 +1256,17 @@ class RclpyROS2Backend:
             + b"|"
             + payload
         )
-        self._camera = {
-            "encoding": str(message.encoding),
-            "width": int(message.width),
-            "height": int(message.height),
-            "calibrated": self._camera_calibration_snapshot is not None,
-            "calibration_snapshot": self._camera_calibration_snapshot,
-            "frame_snapshot": hashlib.sha256(frame_seed).hexdigest(),
-        }
-        self._camera_seen_at = time.monotonic()
+        with self._condition:
+            self._camera = {
+                "encoding": str(message.encoding),
+                "width": int(message.width),
+                "height": int(message.height),
+                "calibrated": self._camera_calibration_snapshot is not None,
+                "calibration_snapshot": self._camera_calibration_snapshot,
+                "frame_snapshot": hashlib.sha256(frame_seed).hexdigest(),
+            }
+            self._camera_seen_at = time.monotonic()
+            self._condition.notify_all()
 
     def _on_camera_info(self, message: Any) -> None:
         matrix = tuple(float(value) for value in message.k)
@@ -706,55 +1300,50 @@ class RclpyROS2Backend:
             item.header.frame_id == map_frame and item.child_frame_id == odom_frame
             for item in message.transforms
         ):
-            self._map_tf_seen_at = time.monotonic()
+            observed = time.monotonic()
+            with self._condition:
+                self._map_tf_seen_at = observed
+                self._heard("map_transform", observed)
+                self._condition.notify_all()
 
-    def observation(self) -> Mapping[str, Any]:
+    def _await_graph(self) -> None:
+        """Wait, on a new node only, until DDS discovery has reached the robot.
+
+        rmw's graph cache starts empty and fills as discovery runs, so reading
+        it the moment the node exists reports no equipment at all. The first
+        subscribed message proves a robot participant has been matched; the
+        wait ends on that callback and is capped by the observation wait.
+        """
+        if self._graph_ready:
+            return
         deadline = time.monotonic() + _observation_wait_seconds()
-        self._spin(0.25)
-        while (
-            self._pose_seen_at is None or (_needs_lidar() and self._range_seen_at is None)
-        ) and time.monotonic() < deadline:
-            self._spin(0.1)
-        now = time.monotonic()
-        max_age = max(
-            0.1,
-            float(os.getenv("FLYTO_ROS2_OBSERVATION_MAX_AGE_SECONDS", "5")),
+        with self._condition:
+            while self._connected and not self._heard_from_robot():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return
+                self._condition.wait(timeout=remaining)
+            self._graph_ready = self._heard_from_robot()
+
+    def _heard_from_robot(self) -> bool:
+        return self._odom_sequence > 0 or any(
+            seen is not None
+            for seen in (self._range_seen_at, self._camera_seen_at, self._map_tf_seen_at)
         )
 
-        def fresh(seen_at: float | None) -> bool:
-            return seen_at is not None and now - seen_at <= max_age
-
-        return {
-            "pose": (
-                dict(self._pose)
-                if self._pose is not None and fresh(self._pose_seen_at)
-                else None
-            ),
-            "range": (
-                {
-                    "minimum_range_m": self._minimum_range,
-                    "sample_count": self._range_sample_count,
-                    **({"sweep": self._range_sweep} if self._range_sweep else {}),
-                }
-                if self._minimum_range is not None and fresh(self._range_seen_at)
-                else None
-            ),
-            "camera": (
-                dict(self._camera)
-                if self._camera is not None and fresh(self._camera_seen_at)
-                else None
-            ),
-            "map_tf_available": fresh(self._map_tf_seen_at),
-        }
-
     def discover(self) -> Sequence[StandardInterface]:
-        self._spin(0.15)
-        topics = {
-            name: tuple(types) for name, types in self._node.get_topic_names_and_types()
-        }
-        actions = {
-            name: tuple(types) for name, types in self._node.get_action_names_and_types()
-        }
+        self._await_graph()
+        return self._read_graph()
+
+    def _read_graph(self) -> list[StandardInterface]:
+        # The graph APIs read rmw's own graph cache, which DDS keeps current
+        # without the node being spun, so this needs neither a spin nor a cache.
+        node = self._node
+        if node is None:
+            # Disconnected: the node and its view of the graph are gone.
+            return []
+        topics = {name: tuple(types) for name, types in node.get_topic_names_and_types()}
+        actions = {name: tuple(types) for name, types in node.get_action_names_and_types()}
         found: list[StandardInterface] = []
         for _capability_id, (kind, name, interface_type) in DEFAULT_INTERFACES.items():
             if kind == "action":
@@ -769,18 +1358,13 @@ class RclpyROS2Backend:
             found.append(StandardInterface("topic", marker, CLOCK_TYPE))
         return found
 
-    def _spin(self, seconds: float) -> None:
-        deadline = time.monotonic() + max(0.0, seconds)
-        while time.monotonic() < deadline:
-            self._rclpy.spin_once(
-                self._node, timeout_sec=min(0.05, max(0.0, deadline - time.monotonic()))
-            )
-
-    def _spin_until(self, future: Any, deadline: float) -> bool:
-        while not future.done() and time.monotonic() < deadline:
-            self._rclpy.spin_once(
-                self._node, timeout_sec=min(0.05, max(0.0, deadline - time.monotonic()))
-            )
+    def _wait_future(self, future: Any, deadline: float) -> bool:
+        """Wait for an rclpy future that the background executor completes."""
+        if future.done():
+            return True
+        done = threading.Event()
+        future.add_done_callback(lambda _future: done.set())
+        done.wait(timeout=max(0.0, deadline - time.monotonic()))
         return future.done()
 
     def _evidence(self, capability_id: str) -> dict[str, Any]:
@@ -860,16 +1444,23 @@ class RclpyROS2Backend:
 
         if call_id not in self._goal_handles:
             _, action_name, _ = DEFAULT_INTERFACES[capability_id]
-            client = ActionClient(
-                self._node, self._action_type(capability_id), action_name
-            )
-            if not client.wait_for_server(timeout_sec=min(1.0, deadline_seconds)):
+            client = self._action_clients.get(capability_id)
+            if client is None:
+                client = ActionClient(
+                    self._node, self._action_type(capability_id), action_name
+                )
+                self._action_clients[capability_id] = client
+            # A warm client has matched its server already; rclpy's
+            # wait_for_server polls, so it is only asked when that is not so.
+            if not client.server_is_ready() and not client.wait_for_server(
+                timeout_sec=min(1.0, deadline_seconds)
+            ):
                 return CallResult(
                     call_id, OUTCOME_REFUSED, detail="ROS 2 action server unavailable"
                 )
             started = client.send_goal_async(self._goal(capability_id, arguments))
             accept_deadline = time.monotonic() + min(2.0, deadline_seconds)
-            if not self._spin_until(started, accept_deadline):
+            if not self._wait_future(started, accept_deadline):
                 return CallResult(
                     call_id, OUTCOME_TIMEOUT, detail="goal acceptance timed out"
                 )
@@ -880,12 +1471,12 @@ class RclpyROS2Backend:
                 )
             self._goal_handles[call_id] = handle
             self._result_futures[call_id] = handle.get_result_async()
-            self._counts[call_id] = self._counts.get(call_id, 0) + 1
+            self._count_execution(call_id)
 
         future = self._result_futures[call_id]
         deadline = time.monotonic() + deadline_seconds
 
-        if not self._spin_until(future, deadline):
+        if not self._wait_future(future, deadline):
             return CallResult(
                 call_id,
                 OUTCOME_TIMEOUT,
@@ -904,14 +1495,20 @@ class RclpyROS2Backend:
             result = CallResult(
                 call_id, OUTCOME_FAILED, detail=f"ROS 2 action status {status}"
             )
-        self._results[call_id] = result
-        return result
+        # The goal is over: nothing is left to cancel or wait for.
+        self._forget_goal(call_id)
+        return self._keep_result(call_id, result)
+
+    def _forget_goal(self, call_id: str) -> None:
+        self._goal_handles.pop(call_id, None)
+        self._result_futures.pop(call_id, None)
 
     def _publish_zero(self) -> bool:
         topic = DEFAULT_INTERFACES["motion.halt"][1]
+        # A stop reads the graph as it is; it never waits for discovery.
         types = {
             item.type
-            for item in self.discover()
+            for item in self._read_graph()
             if item.kind == "topic" and item.name == topic
         }
         if len(types) != 1:
@@ -937,8 +1534,8 @@ class RclpyROS2Backend:
             message = Twist()
         else:
             return False
+        # rmw sends the message on publish; nothing has to spin to flush it.
         publisher.publish(message)
-        self._spin(0.1)
         return True
 
     def cancel(self, call_id: str) -> CallResult:
@@ -948,7 +1545,7 @@ class RclpyROS2Backend:
                 call_id, OUTCOME_REFUSED, detail="no active ROS 2 goal"
             )
         future = handle.cancel_goal_async()
-        if not self._spin_until(future, time.monotonic() + 2.0):
+        if not self._wait_future(future, time.monotonic() + 2.0):
             return CallResult(
                 call_id, OUTCOME_FAILED, detail="ROS 2 cancel timed out"
             )
@@ -959,19 +1556,33 @@ class RclpyROS2Backend:
             return CallResult(
                 call_id, OUTCOME_FAILED, detail="ROS 2 cancel/stop was not confirmed"
             )
-        result = CallResult(call_id, OUTCOME_CANCELLED, detail="cancelled")
-        self._results[call_id] = result
-        return result
+        self._forget_goal(call_id)
+        return self._keep_result(
+            call_id, CallResult(call_id, OUTCOME_CANCELLED, detail="cancelled")
+        )
 
     def safe_stop(self, call_id: str) -> CallResult:
-        for active_call in tuple(self._goal_handles):
-            if active_call not in self._results:
+        # Zero velocity goes out first, so the stop never waits behind a cancel.
+        stopped = self._publish_zero()
+        active = tuple(self._goal_handles)
+        for active_call in active:
+            future = self._result_futures.get(active_call)
+            if future is None or not future.done():
                 self.cancel(active_call)
-        if not self._publish_zero():
+            # Tried once: a goal whose cancel went unanswered (Nav2 restarted)
+            # must not cost every later emergency stop another wait.
+            self._forget_goal(active_call)
+        if active:
+            # The action server kept writing cmd_vel until its cancel landed,
+            # over the first zero. A server that stops without a zero of its
+            # own would leave the base on its last command, so the last word
+            # on cmd_vel is this stop's.
+            stopped = self._publish_zero() or stopped
+        if not stopped:
             return CallResult(
                 call_id, OUTCOME_FAILED, detail="standard cmd_vel stop unavailable"
             )
-        self._counts[call_id] = self._counts.get(call_id, 0) + 1
+        self._count_execution(call_id)
         result = CallResult(
             call_id,
             OUTCOME_COMPLETED,
@@ -985,21 +1596,41 @@ class RclpyROS2Backend:
                 "zero_velocity_published": True,
             },
         )
-        self._results[call_id] = result
-        return result
+        return self._keep_result(call_id, result)
 
     def execution_count(self, call_id: str) -> int:
         return self._counts.get(call_id, 0)
 
     def disconnect(self) -> None:
-        self._connected = False
+        with self._condition:
+            self._connected = False
+            self._condition.notify_all()
+        self._stop_executor()
+        self._destroy_node()
+        self._reset_readings()
+        self._stop_graph_events()
 
     def reconnect(self) -> None:
-        self._connected = True
+        self._stop_executor()
+        self._reset_readings()
+        # Goals sent before the drop are no longer followed by this executor.
+        self._goal_handles.clear()
+        self._result_futures.clear()
+        with self._condition:
+            self._connected = True
+            self._condition.notify_all()
+        if self._node is None:
+            # Disconnected before: the old node was destroyed with it.
+            self._create_node()
+        else:
+            self._start_executor()
+        # An executor that died at once has announced the drop already.
+        if self.is_connected():
+            self._notify_connection(True)
 
 
 
-class RosbridgeROS2Backend:
+class RosbridgeROS2Backend(_ObservationState):
     """WebSocket ROS 2 backend for an external AI Space host.
 
     The robot runs only upstream rosbridge/rosapi. The adapter stays on the
@@ -1012,7 +1643,13 @@ class RosbridgeROS2Backend:
         *,
         url: str | None = None,
         connection_factory: Callable[[str], Any] | None = None,
+        presence_only: bool = False,
     ) -> None:
+        # A presence connection only watches whether the robot is there and
+        # what its graph offers (odometry, Nav2 lifecycle events); it never
+        # carries LiDAR, camera or transforms, and never moves the robot.
+        self._presence_only = bool(presence_only)
+        self._lifecycle_topics = frozenset(_lifecycle_event_topics())
         self._url = (
             url
             or os.getenv("FLYTO_ROSBRIDGE_URL", "").strip()
@@ -1021,7 +1658,14 @@ class RosbridgeROS2Backend:
         self._connection_factory = connection_factory or self._connect
         self._ws: Any | None = None
         self._connected = False
-        self._condition = threading.Condition()
+        self._init_observation_state()
+        self._keepalive_stop = threading.Event()
+        # The ROS graph as rosapi last reported it, re-read on reconnect and
+        # whenever what it says may be out of date (a call fails, a capability
+        # or reading is missing, a deployment check would refuse) rather than
+        # on every observation. Nav2 or a driver can restart behind a rosbridge
+        # that stays up, so a refusal is never decided on this copy alone.
+        self._interfaces: tuple[StandardInterface, ...] | None = None
         self._send_lock = threading.Lock()
         self._reader: threading.Thread | None = None
         self._responses: dict[str, dict[str, Any]] = {}
@@ -1033,17 +1677,6 @@ class RosbridgeROS2Backend:
         self._results: dict[str, CallResult] = {}
         self._counts: dict[str, int] = {}
         self._advertised_topics: set[tuple[str, str]] = set()
-
-        self._pose: dict[str, float | str] | None = None
-        self._pose_seen_at: float | None = None
-        self._minimum_range: float | None = None
-        self._range_sample_count = 0
-        self._range_sweep: dict[str, Any] | None = None
-        self._range_seen_at: float | None = None
-        self._camera: dict[str, Any] | None = None
-        self._camera_seen_at: float | None = None
-        self._camera_calibration_snapshot: str | None = None
-        self._map_tf_seen_at: float | None = None
         self._topic_types: dict[str, str] = {}
         self.reconnect()
 
@@ -1080,9 +1713,13 @@ class RosbridgeROS2Backend:
                 continue
             except Exception:
                 with self._condition:
-                    if websocket is self._ws:
+                    dropped = websocket is self._ws
+                    if dropped:
                         self._connected = False
+                        self._interfaces = None
                         self._condition.notify_all()
+                if dropped:
+                    self._notify_connection(False)
                 return
             try:
                 message = json.loads(raw)
@@ -1141,17 +1778,32 @@ class RosbridgeROS2Backend:
             ow = float(orientation.get("w", 1.0))
         except (TypeError, ValueError):
             return
-        self._pose = {
-            "frame": "odom",
-            "x": x,
-            "y": y,
-            "yaw": math.atan2(
-                2.0 * (ow * oz + ox * oy),
-                1.0 - 2.0 * (oy * oy + oz * oz),
-            ),
-        }
-        self._pose_seen_at = observed
-        self._condition.notify_all()
+        self._store_odometry(
+            {
+                "frame": "odom",
+                "x": x,
+                "y": y,
+                "yaw": math.atan2(
+                    2.0 * (ow * oz + ox * oy),
+                    1.0 - 2.0 * (oy * oy + oz * oz),
+                ),
+            },
+            self._twist(message),
+            observed,
+        )
+
+    @staticmethod
+    def _twist(message: Mapping[str, Any]) -> tuple[float, float] | None:
+        outer = message.get("twist")
+        twist = outer.get("twist") if isinstance(outer, Mapping) else None
+        linear = twist.get("linear") if isinstance(twist, Mapping) else None
+        angular = twist.get("angular") if isinstance(twist, Mapping) else None
+        if not isinstance(linear, Mapping) or not isinstance(angular, Mapping):
+            return None
+        try:
+            return float(linear.get("x", 0.0)), float(angular.get("z", 0.0))
+        except (TypeError, ValueError):
+            return None
 
     def _update_scan(self, message: Mapping[str, Any], observed: float) -> None:
         ranges = message.get("ranges")
@@ -1260,11 +1912,19 @@ class RosbridgeROS2Backend:
                 and item.get("child_frame_id") == odom_frame
             ):
                 self._map_tf_seen_at = observed
+                self._heard("map_transform", observed)
                 self._condition.notify_all()
                 return
 
+    def _forget_graph(self) -> None:
+        self._interfaces = None
+
     def _handle_publish(self, topic: str, raw_message: Any) -> None:
         if not isinstance(raw_message, Mapping):
+            return
+        if topic in self._lifecycle_topics:
+            with self._condition:
+                self._graph_changed(f"lifecycle:{topic}")
             return
         message = dict(raw_message)
         observed = time.monotonic()
@@ -1386,6 +2046,16 @@ class RosbridgeROS2Backend:
                 0,
             ),
         )
+        if self._presence_only:
+            # Odometry says the robot is there; a few a second is plenty.
+            subscriptions = ((subscriptions[0][0], subscriptions[0][1], "reliable", 500),)
+        subscriptions = (
+            *subscriptions,
+            *(
+                (topic, LIFECYCLE_EVENT_TYPE, "reliable", 0)
+                for topic in sorted(self._lifecycle_topics)
+            ),
+        )
         for index, (topic, message_type, reliability, throttle_rate) in enumerate(
             subscriptions
         ):
@@ -1453,9 +2123,27 @@ class RosbridgeROS2Backend:
             return CallResult(call_id, OUTCOME_FAILED, detail=str(error))
         return CallResult(call_id, OUTCOME_COMPLETED, evidence={"capture": payload})
 
+    def invalidate_discovery(self) -> None:
+        with self._condition:
+            self._interfaces = None
+
     def discover(self) -> Sequence[StandardInterface]:
         if not self._connected:
             return ()
+        cached = self._interfaces
+        if cached is not None:
+            return cached
+        try:
+            found = self._read_graph()
+        except Exception:
+            self.invalidate_discovery()
+            raise
+        with self._condition:
+            if self._connected:
+                self._interfaces = found
+        return found
+
+    def _read_graph(self) -> tuple[StandardInterface, ...]:
         topics = self._service("/rosapi/topics", {})
         topic_names = topics.get("topics")
         topic_types = topics.get("types")
@@ -1483,48 +2171,7 @@ class RosbridgeROS2Backend:
         marker = _simulation_marker_topic()
         if marker and self._topic_types.get(marker) == CLOCK_TYPE:
             found.append(StandardInterface("topic", marker, CLOCK_TYPE))
-        return found
-
-    def observation(self) -> Mapping[str, Any]:
-        deadline = time.monotonic() + _observation_wait_seconds()
-        with self._condition:
-            while (
-                self._connected
-                and (self._pose_seen_at is None or (_needs_lidar() and self._range_seen_at is None))
-                and time.monotonic() < deadline
-            ):
-                self._condition.wait(timeout=deadline - time.monotonic())
-        now = time.monotonic()
-        max_age = max(
-            0.1,
-            float(os.getenv("FLYTO_ROS2_OBSERVATION_MAX_AGE_SECONDS", "5")),
-        )
-
-        def fresh(seen_at: float | None) -> bool:
-            return seen_at is not None and now - seen_at <= max_age
-
-        return {
-            "pose": (
-                dict(self._pose)
-                if self._pose is not None and fresh(self._pose_seen_at)
-                else None
-            ),
-            "range": (
-                {
-                    "minimum_range_m": self._minimum_range,
-                    "sample_count": self._range_sample_count,
-                    **({"sweep": self._range_sweep} if self._range_sweep else {}),
-                }
-                if self._minimum_range is not None and fresh(self._range_seen_at)
-                else None
-            ),
-            "camera": (
-                dict(self._camera)
-                if self._camera is not None and fresh(self._camera_seen_at)
-                else None
-            ),
-            "map_tf_available": fresh(self._map_tf_seen_at),
-        }
+        return tuple(found)
 
     @staticmethod
     def _duration(seconds: float) -> dict[str, int]:
@@ -1636,9 +2283,10 @@ class RosbridgeROS2Backend:
                     }
                 )
             except RuntimeError as error:
+                self.invalidate_discovery()
                 return CallResult(call_id, OUTCOME_REFUSED, detail=str(error))
             self._active_actions[call_id] = action_name
-            self._counts[call_id] = self._counts.get(call_id, 0) + 1
+            self._count_execution(call_id)
 
         result_message = self._wait_for(
             self._action_results,
@@ -1664,18 +2312,22 @@ class RosbridgeROS2Backend:
         elif status == 5:
             result = CallResult(call_id, OUTCOME_CANCELLED, detail="cancelled")
         else:
+            # An aborted or unknown goal may mean the server went away; the
+            # next discover() asks rosapi again rather than trusting the cache.
+            self.invalidate_discovery()
             result = CallResult(
                 call_id,
                 OUTCOME_FAILED,
                 detail=f"ROS 2 action status {status}",
             )
-        self._results[call_id] = result
-        return result
+        return self._keep_result(call_id, result)
 
     def _publish_zero(self) -> bool:
         topic = DEFAULT_INTERFACES["motion.halt"][1]
         topic_type = self._topic_types.get(topic)
         if topic_type not in CMD_VEL_TYPES:
+            # A stop must not trust a cached graph that lacked cmd_vel.
+            self.invalidate_discovery()
             try:
                 self.discover()
             except RuntimeError:
@@ -1749,20 +2401,35 @@ class RosbridgeROS2Backend:
                 detail="ROS 2 cancel/stop was not confirmed",
             )
         self._active_actions.pop(call_id, None)
-        result = CallResult(call_id, OUTCOME_CANCELLED, detail="cancelled")
-        self._results[call_id] = result
-        return result
+        return self._keep_result(
+            call_id, CallResult(call_id, OUTCOME_CANCELLED, detail="cancelled")
+        )
 
     def safe_stop(self, call_id: str) -> CallResult:
-        for active_call in tuple(self._active_actions):
-            self.cancel(active_call)
-        if not self._publish_zero():
+        # Zero velocity goes out first, so the stop never waits behind a cancel.
+        try:
+            stopped = self._publish_zero()
+        except RuntimeError:
+            stopped = False
+        active = tuple(self._active_actions)
+        for active_call in active:
+            with contextlib.suppress(RuntimeError):
+                self.cancel(active_call)
+            # Tried once: an unanswered cancel must not cost every later
+            # emergency stop another wait.
+            self._active_actions.pop(active_call, None)
+        if active:
+            # Until the cancel landed the action server could overwrite the
+            # first zero; the last command on cmd_vel must be this stop's.
+            with contextlib.suppress(RuntimeError):
+                stopped = self._publish_zero() or stopped
+        if not stopped:
             return CallResult(
                 call_id,
                 OUTCOME_FAILED,
                 detail="standard cmd_vel stop unavailable",
             )
-        self._counts[call_id] = self._counts.get(call_id, 0) + 1
+        self._count_execution(call_id)
         result = CallResult(
             call_id,
             OUTCOME_COMPLETED,
@@ -1777,8 +2444,7 @@ class RosbridgeROS2Backend:
                 "zero_velocity_published": True,
             },
         )
-        self._results[call_id] = result
-        return result
+        return self._keep_result(call_id, result)
 
     def execution_count(self, call_id: str) -> int:
         return self._counts.get(call_id, 0)
@@ -1788,17 +2454,26 @@ class RosbridgeROS2Backend:
             websocket = self._ws
             self._connected = False
             self._ws = None
+            self._interfaces = None
+            self._keepalive_stop.set()
             self._condition.notify_all()
         if websocket is not None:
             with contextlib.suppress(Exception):
                 websocket.close()
+        self._reset_readings()
+        self._stop_graph_events()
 
     def reconnect(self) -> None:
         self.disconnect()
+        # Goal ids belong to the socket that sent them.
+        self._active_actions.clear()
         websocket = self._connection_factory(self._url)
+        keepalive_stop = threading.Event()
         with self._condition:
             self._ws = websocket
             self._connected = True
+            self._interfaces = None
+            self._keepalive_stop = keepalive_stop
             self._responses.clear()
             self._action_results.clear()
             self._advertised_topics.clear()
@@ -1811,13 +2486,14 @@ class RosbridgeROS2Backend:
         self._reader.start()
         threading.Thread(
             target=self._keepalive_loop,
-            args=(websocket,),
+            args=(websocket, keepalive_stop),
             name="rosbridge-keepalive",
             daemon=True,
         ).start()
         self._subscribe_standard_observations()
+        self._notify_connection(True)
 
-    def _keepalive_loop(self, websocket: Any) -> None:
+    def _keepalive_loop(self, websocket: Any, stop: threading.Event) -> None:
         """Send an unsolicited pong every few seconds while connected.
 
         The robot runs rosbridge with websocket_ping_interval == ping_timeout
@@ -1836,16 +2512,22 @@ class RosbridgeROS2Backend:
                     websocket.pong(b"flyto")
             except Exception:  # noqa: BLE001 - the reader notices a dead socket
                 return
-            time.sleep(KEEPALIVE_SECONDS)
+            # Woken at once by disconnect() instead of finishing its interval.
+            if stop.wait(KEEPALIVE_SECONDS):
+                return
 
 
-def build(resource_id: str = "") -> GenericROS2Adapter:
-    """Build the host-side adapter for one commanded ROS 2 resource."""
+def build(resource_id: str = "", *, presence_only: bool = False) -> GenericROS2Adapter:
+    """Build the host-side adapter for one commanded ROS 2 resource.
+
+    ``presence_only`` builds a light connection that only watches whether the
+    robot is there and what its graph offers; it refuses every command.
+    """
     transport = os.getenv("FLYTO_ROS2_TRANSPORT", "rclpy").strip().lower()
     if transport == "rclpy":
-        backend: ROS2Backend = RclpyROS2Backend()
+        backend: ROS2Backend = RclpyROS2Backend(presence_only=presence_only)
     elif transport == "rosbridge":
-        backend = RosbridgeROS2Backend()
+        backend = RosbridgeROS2Backend(presence_only=presence_only)
     else:
         raise RuntimeError(f"unsupported ROS 2 transport: {transport}")
     return GenericROS2Adapter(backend=backend, resource_id=resource_id)
