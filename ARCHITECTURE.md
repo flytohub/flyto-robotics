@@ -5,6 +5,16 @@
 Flyto2 Robotics is the **external physical-execution adapter and verification
 layer**, not software that must be installed inside a robot.
 
+It is the host-side driver layer next to the equipment: it runs on the
+execution host or on a companion computer beside the robot and drives the
+robot's native ROS 2 / Nav2 stack. It is never firmware, and nothing from
+Flyto2 is installed on the robot. It owns the safety invariants at the
+equipment: the 0.35 m clearance floor, refuse-never-clamp, refusal when the
+deployment mode disagrees with the ROS graph, and the safe stop. Capabilities
+are declared to Flyto2 by the `flyto-modules-robotics` pack through
+`@register_module`, not by this repository. See `DECISIONS.md` (2026-10-04),
+which also states what a dropped link to the robot leaves bounded.
+
 ```text
 Intent / Space Task
        |
@@ -18,11 +28,11 @@ Flyto2 Cloud
 - verification
        |
        v
-AI Space computer  <---- execution host
+AI Space computer  <---- execution host (or a companion computer)
        |
-       | approved capability call
+       | approved capability call (module from flyto-modules-robotics)
        v
-Generic ROS 2 Adapter
+Generic ROS 2 Adapter  <---- this library
        |
        | standard ROS 2
        v

@@ -1,5 +1,48 @@
 # Decisions
 
+## 2026-10-04 — Clarification: flyto-robotics is the host-side driver layer
+
+This clarifies the 2026-09-21 and 2026-09-22 entries; it reverses neither.
+
+Clarification: `flyto-robotics` is the driver layer that sits next to the
+equipment, on the execution host or on a companion computer beside the robot.
+It drives the robot's own native ROS 2 / Nav2 stack over standard interfaces
+(rclpy or rosbridge). It is never firmware, and nothing from Flyto2 is
+installed on the robot: the owner confirmed on 2026-10-04 that the robots stay
+stock TurtleBot3.
+
+Clarification: capabilities are declared to Flyto2 by the
+`flyto-modules-robotics` pack through flyto-core's `@register_module`
+capability contract (its `flyto.modules` entry point is `robotics`), not by
+this repository. The resource manifest this library's discoverer reports is
+passive inventory evidence. A host that asks for the `module_pack` manifest
+extension receives `"module_pack": "robotics"` so it can join the resource to
+the pack that drives it; a host that does not ask receives the manifest shape
+it was released against, because released hosts reject unknown fields.
+
+Clarification: this library owns the safety invariants that live at the
+equipment: the 0.35 m LiDAR clearance floor, refuse-never-clamp (an argument
+outside its declared bounds is refused, never reduced to fit; the one
+documented exception is the `operator_present` safety basis, which caps an
+advance or retreat speed at its 0.05 m/s ceiling), refusal when
+the configured deployment mode disagrees with the ROS graph (simulation versus
+physical), and the safe stop on timeout, cancel or failure.
+
+Limit: when the link between this library and the robot drops mid-motion, the
+cancel and the safe stop can no longer reach the robot. The motion in flight
+is then bounded only by the robot's own stack: the goal's declared distance or
+angle and, for advance, retreat and rotate, the Nav2 `time_allowance`
+(`FLYTO_ROS2_ACTION_ALLOWANCE_SECONDS`, default 30 s). `motion.navigate`
+carries no time allowance. While disconnected, every new call is refused.
+Running nothing of ours on the robot means there is no Flyto2 watchdog there
+to close that gap; placing this library on a companion computer wired to the
+robot shortens the link it depends on.
+
+Reason: several documents described the adapter only as running on "the AI
+Space computer", which read as if it could only be the cloud-facing host, and
+the manifest made it look like this repository declared capabilities to
+Flyto2. Neither is the design.
+
 ## 2026-09-22 — Equipment transports are adapter providers, not Cloud or Runtime core
 
 Decision: ROS2, rosbridge, OpenRMF, camera-stream and vendor transport implementations belong in adapter packages such as `flyto-robotics`. Any compatible AI Space execution host may load those providers and bind one assignment's approved resource/capability authority. Flyto2 Runtime is one optional host, not a required layer. Provider discovery is passive evidence; execution authority is a separate allowlisted assignment contract.
