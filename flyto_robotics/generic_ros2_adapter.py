@@ -40,6 +40,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Protocol
 
 from . import adapter_contract as decl
+from . import motion_outcome
 from .adapter_contract import (
     OUTCOME_CANCELLED,
     OUTCOME_COMPLETED,
@@ -121,6 +122,22 @@ def _lifecycle_event_topics() -> tuple[str, ...]:
 
 def _default_requirements() -> tuple[str, ...]:
     return (REQUIRE_POSE, REQUIRE_RANGE) if _needs_lidar() else (REQUIRE_POSE,)
+
+
+def _clearance_floor() -> float:
+    """The LiDAR clearance a motion needs to start; never below 0.1 m."""
+    return max(0.1, float(os.getenv("FLYTO_ROS2_MIN_CLEARANCE_M", "0.35")))
+
+
+def _collision_state_topic() -> str:
+    """Nav2's collision monitor state, read to tell why a motion stopped.
+
+    Empty disables it for a robot without a collision monitor.
+    """
+    return os.getenv("FLYTO_ROS2_COLLISION_STATE_TOPIC", "/collision_monitor_state").strip()
+
+
+COLLISION_STATE_TYPE = "nav2_msgs/msg/CollisionMonitorState"
 
 
 def _max_observation_age() -> float:
@@ -389,6 +406,80 @@ class _ObservationState:
         # Reading kinds heard on this connection, and when the last one came.
         self._heard_kinds: set[str] = set()
         self._last_heard_at: float | None = None
+        # What each motion goal saw while it ran, so its result can say why
+        # it ended (see motion_outcome). Keyed by call_id, bounded like results.
+        self._motion_tracks: dict[str, motion_outcome.MotionTrack] = {}
+
+    def _begin_track(
+        self, call_id: str, capability_id: str, arguments: Mapping[str, Any]
+    ) -> None:
+        with self._condition:
+            snapshot = self._snapshot()
+            track = motion_outcome.MotionTrack(
+                capability_id=capability_id,
+                arguments={
+                    key: float(value)
+                    for key, value in arguments.items()
+                    if isinstance(value, (int, float))
+                },
+                start_pose=snapshot.get("pose"),
+                started_at=time.monotonic(),
+            )
+            reading = snapshot.get("range")
+            if isinstance(reading, Mapping):
+                track.saw_range(reading.get("minimum_range_m"))
+            _remember(self._motion_tracks, call_id, track)
+
+    def _track_range(self, minimum_range_m: float) -> None:
+        """Called under the condition with each LiDAR minimum."""
+        for track in self._motion_tracks.values():
+            track.saw_range(minimum_range_m)
+
+    def _track_collision_state(self, action_type: Any, polygon_name: Any) -> None:
+        with self._condition:
+            for track in self._motion_tracks.values():
+                track.saw_collision_state(action_type, polygon_name)
+
+    def _track_feedback(self, call_id: str, values: Any) -> None:
+        with self._condition:
+            track = self._motion_tracks.get(call_id)
+            if track is not None:
+                track.saw_feedback(values)
+
+    def _motion_summary(
+        self,
+        call_id: str,
+        *,
+        status: int | None,
+        result_values: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        """Why the motion ``call_id`` ended; None if it was never tracked.
+
+        A terminal ``status`` ends the track. None (the adapter's deadline
+        came first) keeps it, as the goal is still running.
+        """
+        with self._condition:
+            track = (
+                self._motion_tracks.get(call_id)
+                if status is None
+                else self._motion_tracks.pop(call_id, None)
+            )
+            if track is None:
+                return None
+            snapshot = self._snapshot()
+        return motion_outcome.summarize(
+            track,
+            status=status,
+            result_values=result_values,
+            end_pose=snapshot.get("pose"),
+            range_observation=snapshot.get("range"),
+            clearance_floor_m=_clearance_floor(),
+            ended_at=time.monotonic(),
+        )
+
+    def _forget_track(self, call_id: str) -> None:
+        with self._condition:
+            self._motion_tracks.pop(call_id, None)
 
     def add_graph_listener(self, listener: Callable[[str], None]) -> None:
         """Call ``listener(reason)`` when the robot's graph may have changed.
@@ -676,6 +767,48 @@ def _numeric_arguments(capability_id: str, arguments: Mapping[str, Any]) -> dict
     return result
 
 
+def _message_fields(message: Any) -> dict[str, Any] | None:
+    """The fields motion_outcome reads from an rclpy feedback or result."""
+    if message is None:
+        return None
+    fields: dict[str, Any] = {}
+    for name in (
+        "error_code",
+        "error_msg",
+        "distance_traveled",
+        "angular_distance_traveled",
+        "distance_remaining",
+        "number_of_recoveries",
+    ):
+        value = getattr(message, name, None)
+        if isinstance(value, (int, float, str)):
+            fields[name] = value
+    return fields
+
+
+def _motion_result(
+    call_id: str,
+    outcome: str,
+    evidence: Mapping[str, Any],
+    summary: Mapping[str, Any] | None,
+    *,
+    fallback: str = "",
+) -> CallResult:
+    """A motion's result carrying why it ended (``evidence.motion_outcome``).
+
+    A motion that did not complete leads its detail with the reason, so an
+    operator reads "obstacle_blocked; travelled 0.12 of 0.30 m" rather than
+    a bare action status. A completed or cancelled one keeps its usual detail.
+    """
+    merged = dict(evidence)
+    if summary is not None:
+        merged["motion_outcome"] = dict(summary)
+    detail = fallback
+    if summary is not None and outcome in {OUTCOME_FAILED, OUTCOME_TIMEOUT}:
+        detail = motion_outcome.describe(summary)
+    return CallResult(call_id, outcome, evidence=merged, detail=detail)
+
+
 class GenericROS2Adapter:
     """Flyto2 capability adapter over a standard ROS 2 graph."""
 
@@ -774,10 +907,7 @@ class GenericROS2Adapter:
             clearance = float(range_observation["minimum_range_m"])
         except (KeyError, TypeError, ValueError):
             return "valid LiDAR clearance is required before motion"
-        required_clearance = max(
-            0.1,
-            float(os.getenv("FLYTO_ROS2_MIN_CLEARANCE_M", "0.35")),
-        )
+        required_clearance = _clearance_floor()
         if clearance < required_clearance:
             return (
                 f"LiDAR clearance {clearance:.3f}m is below the "
@@ -1080,6 +1210,7 @@ class RclpyROS2Backend(_ObservationState):
             self._guarded(self._on_tf),
             10,
         )
+        self._subscribe_collision_state(node)
         self._node = node
         self._graph_ready = False
         self._create_action_clients(node)
@@ -1100,6 +1231,25 @@ class RclpyROS2Backend(_ObservationState):
                     self._graph_changed(f"lifecycle:{topic}")
 
             node.create_subscription(TransitionEvent, topic, changed, 10)
+
+    def _subscribe_collision_state(self, node: Any) -> None:
+        topic = _collision_state_topic()
+        if not topic:
+            return
+        try:
+            from nav2_msgs.msg import CollisionMonitorState
+        except ImportError:
+            return
+        node.create_subscription(
+            CollisionMonitorState,
+            topic,
+            self._guarded(
+                lambda message: self._track_collision_state(
+                    message.action_type, message.polygon_name
+                )
+            ),
+            10,
+        )
 
     def _create_action_clients(self, node: Any) -> None:
         """Create the motion action clients with the node.
@@ -1240,6 +1390,7 @@ class RclpyROS2Backend(_ObservationState):
             )
             with self._condition:
                 self._minimum_range = min(usable)
+                self._track_range(self._minimum_range)
                 self._range_sample_count = len(usable)
                 self._range_sweep = sweep
                 self._range_seen_at = time.monotonic()
@@ -1458,7 +1609,14 @@ class RclpyROS2Backend(_ObservationState):
                 return CallResult(
                     call_id, OUTCOME_REFUSED, detail="ROS 2 action server unavailable"
                 )
-            started = client.send_goal_async(self._goal(capability_id, arguments))
+            started = client.send_goal_async(
+                self._goal(capability_id, arguments),
+                feedback_callback=self._guarded(
+                    lambda message, call_id=call_id: self._track_feedback(
+                        call_id, _message_fields(getattr(message, "feedback", None))
+                    )
+                ),
+            )
             accept_deadline = time.monotonic() + min(2.0, deadline_seconds)
             if not self._wait_future(started, accept_deadline):
                 return CallResult(
@@ -1472,28 +1630,39 @@ class RclpyROS2Backend(_ObservationState):
             self._goal_handles[call_id] = handle
             self._result_futures[call_id] = handle.get_result_async()
             self._count_execution(call_id)
+            self._begin_track(call_id, capability_id, arguments)
 
         future = self._result_futures[call_id]
         deadline = time.monotonic() + deadline_seconds
 
         if not self._wait_future(future, deadline):
-            return CallResult(
+            return _motion_result(
                 call_id,
                 OUTCOME_TIMEOUT,
-                evidence=self._evidence(capability_id),
-                detail="ROS 2 action still running",
+                self._evidence(capability_id),
+                self._motion_summary(call_id, status=None),
+                fallback="ROS 2 action still running",
             )
         response = future.result()
         status = int(getattr(response, "status", 0))
+        summary = self._motion_summary(
+            call_id,
+            status=status,
+            result_values=_message_fields(getattr(response, "result", None)),
+        )
         if status == GoalStatus.STATUS_SUCCEEDED:
-            result = CallResult(
-                call_id, OUTCOME_COMPLETED, evidence=self._evidence(capability_id)
+            result = _motion_result(
+                call_id, OUTCOME_COMPLETED, self._evidence(capability_id), summary
             )
         elif status == GoalStatus.STATUS_CANCELED:
-            result = CallResult(call_id, OUTCOME_CANCELLED, detail="cancelled")
+            result = _motion_result(call_id, OUTCOME_CANCELLED, {}, summary, fallback="cancelled")
         else:
-            result = CallResult(
-                call_id, OUTCOME_FAILED, detail=f"ROS 2 action status {status}"
+            result = _motion_result(
+                call_id,
+                OUTCOME_FAILED,
+                self._evidence(capability_id),
+                summary,
+                fallback=f"ROS 2 action status {status}",
             )
         # The goal is over: nothing is left to cancel or wait for.
         self._forget_goal(call_id)
@@ -1502,6 +1671,7 @@ class RclpyROS2Backend(_ObservationState):
     def _forget_goal(self, call_id: str) -> None:
         self._goal_handles.pop(call_id, None)
         self._result_futures.pop(call_id, None)
+        self._forget_track(call_id)
 
     def _publish_zero(self) -> bool:
         topic = DEFAULT_INTERFACES["motion.halt"][1]
@@ -1747,6 +1917,8 @@ class RosbridgeROS2Backend(_ObservationState):
             elif operation == "action_result":
                 self._action_results[identifier] = message
                 self._condition.notify_all()
+            elif operation == "action_feedback":
+                self._track_feedback(identifier, message.get("values"))
 
     @staticmethod
     def _camera_payload(data: Any) -> bytes:
@@ -1825,6 +1997,7 @@ class RosbridgeROS2Backend(_ObservationState):
         if not usable:
             return
         self._minimum_range = min(usable)
+        self._track_range(self._minimum_range)
         self._range_sample_count = len(usable)
         self._range_sweep = scan_sweep(
             ranges,
@@ -1925,6 +2098,11 @@ class RosbridgeROS2Backend(_ObservationState):
         if topic in self._lifecycle_topics:
             with self._condition:
                 self._graph_changed(f"lifecycle:{topic}")
+            return
+        if topic and topic == _collision_state_topic():
+            self._track_collision_state(
+                raw_message.get("action_type"), raw_message.get("polygon_name")
+            )
             return
         message = dict(raw_message)
         observed = time.monotonic()
@@ -2046,6 +2224,14 @@ class RosbridgeROS2Backend(_ObservationState):
                 0,
             ),
         )
+        collision_topic = _collision_state_topic()
+        if collision_topic:
+            # Published when the monitor changes what it does to the base,
+            # so it costs nothing while the robot drives freely.
+            subscriptions = (
+                *subscriptions,
+                (collision_topic, COLLISION_STATE_TYPE, "reliable", 0),
+            )
         if self._presence_only:
             # Odometry says the robot is there; a few a second is plenty.
             subscriptions = ((subscriptions[0][0], subscriptions[0][1], "reliable", 500),)
@@ -2287,6 +2473,7 @@ class RosbridgeROS2Backend(_ObservationState):
                 return CallResult(call_id, OUTCOME_REFUSED, detail=str(error))
             self._active_actions[call_id] = action_name
             self._count_execution(call_id)
+            self._begin_track(call_id, capability_id, arguments)
 
         result_message = self._wait_for(
             self._action_results,
@@ -2294,31 +2481,38 @@ class RosbridgeROS2Backend(_ObservationState):
             time.monotonic() + deadline_seconds,
         )
         if result_message is None:
-            return CallResult(
+            return _motion_result(
                 call_id,
                 OUTCOME_TIMEOUT,
-                evidence=self._evidence(capability_id),
-                detail="ROS 2 action still running",
+                self._evidence(capability_id),
+                self._motion_summary(call_id, status=None),
+                fallback="ROS 2 action still running",
             )
 
         self._active_actions.pop(call_id, None)
         status = int(result_message.get("status", 0))
+        values = result_message.get("values")
+        summary = self._motion_summary(
+            call_id,
+            status=status,
+            result_values=values if isinstance(values, Mapping) else None,
+        )
         if result_message.get("result") is True and status == 4:
-            result = CallResult(
-                call_id,
-                OUTCOME_COMPLETED,
-                evidence=self._evidence(capability_id),
+            result = _motion_result(
+                call_id, OUTCOME_COMPLETED, self._evidence(capability_id), summary
             )
         elif status == 5:
-            result = CallResult(call_id, OUTCOME_CANCELLED, detail="cancelled")
+            result = _motion_result(call_id, OUTCOME_CANCELLED, {}, summary, fallback="cancelled")
         else:
             # An aborted or unknown goal may mean the server went away; the
             # next discover() asks rosapi again rather than trusting the cache.
             self.invalidate_discovery()
-            result = CallResult(
+            result = _motion_result(
                 call_id,
                 OUTCOME_FAILED,
-                detail=f"ROS 2 action status {status}",
+                self._evidence(capability_id),
+                summary,
+                fallback=f"ROS 2 action status {status}",
             )
         return self._keep_result(call_id, result)
 
@@ -2401,6 +2595,7 @@ class RosbridgeROS2Backend(_ObservationState):
                 detail="ROS 2 cancel/stop was not confirmed",
             )
         self._active_actions.pop(call_id, None)
+        self._forget_track(call_id)
         return self._keep_result(
             call_id, CallResult(call_id, OUTCOME_CANCELLED, detail="cancelled")
         )
@@ -2418,6 +2613,7 @@ class RosbridgeROS2Backend(_ObservationState):
             # Tried once: an unanswered cancel must not cost every later
             # emergency stop another wait.
             self._active_actions.pop(active_call, None)
+            self._forget_track(active_call)
         if active:
             # Until the cancel landed the action server could overwrite the
             # first zero; the last command on cmd_vel must be this stop's.
