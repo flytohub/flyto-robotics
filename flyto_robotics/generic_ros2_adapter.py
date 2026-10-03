@@ -409,6 +409,9 @@ class _ObservationState:
         # What each motion goal saw while it ran, so its result can say why
         # it ended (see motion_outcome). Keyed by call_id, bounded like results.
         self._motion_tracks: dict[str, motion_outcome.MotionTrack] = {}
+        # The collision monitor's latest (action type, polygon); it publishes
+        # only on a change, so a new motion starts from this one.
+        self._collision_state: tuple[int, str] | None = None
 
     def _begin_track(
         self, call_id: str, capability_id: str, arguments: Mapping[str, Any]
@@ -424,6 +427,7 @@ class _ObservationState:
                 },
                 start_pose=snapshot.get("pose"),
                 started_at=time.monotonic(),
+                collision_now=self._collision_state,
             )
             reading = snapshot.get("range")
             if isinstance(reading, Mapping):
@@ -436,7 +440,12 @@ class _ObservationState:
             track.saw_range(minimum_range_m)
 
     def _track_collision_state(self, action_type: Any, polygon_name: Any) -> None:
+        try:
+            kind = int(action_type)
+        except (TypeError, ValueError):
+            return
         with self._condition:
+            self._collision_state = (kind, str(polygon_name or "")[:64])
             for track in self._motion_tracks.values():
                 track.saw_collision_state(action_type, polygon_name)
 
@@ -2419,7 +2428,13 @@ class RosbridgeROS2Backend(_ObservationState):
             "time_allowance": self._duration(allowance),
         }
 
-    def _evidence(self, capability_id: str) -> dict[str, Any]:
+    def _evidence(self, capability_id: str, *, wait: bool = True) -> dict[str, Any]:
+        """What the robot reported with a motion's result.
+
+        ``wait=False`` reads what is held now: a motion that failed or ran out
+        of time is followed by the host's safe stop, which must not first wait
+        out the observation timeout for a LiDAR that went quiet.
+        """
         kind, name, interface_type = DEFAULT_INTERFACES[capability_id]
         evidence: dict[str, Any] = {
             "adapter": "generic_ros2",
@@ -2430,7 +2445,11 @@ class RosbridgeROS2Backend(_ObservationState):
                 "type": interface_type,
             },
         }
-        observation = self.observation()
+        if wait:
+            observation = self.observation()
+        else:
+            with self._condition:
+                observation = self._snapshot()
         if observation.get("pose") is not None:
             evidence["odom"] = dict(observation["pose"])
         range_observation = observation.get("range")
@@ -2484,7 +2503,7 @@ class RosbridgeROS2Backend(_ObservationState):
             return _motion_result(
                 call_id,
                 OUTCOME_TIMEOUT,
-                self._evidence(capability_id),
+                self._evidence(capability_id, wait=False),
                 self._motion_summary(call_id, status=None),
                 fallback="ROS 2 action still running",
             )
@@ -2510,7 +2529,7 @@ class RosbridgeROS2Backend(_ObservationState):
             result = _motion_result(
                 call_id,
                 OUTCOME_FAILED,
-                self._evidence(capability_id),
+                self._evidence(capability_id, wait=False),
                 summary,
                 fallback=f"ROS 2 action status {status}",
             )

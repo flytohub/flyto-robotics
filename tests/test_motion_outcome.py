@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 import queue
+import time
 
 import pytest
 
@@ -102,6 +103,51 @@ def test_collision_monitor_polygon_stop_is_an_obstacle_but_invalid_source_is_sta
     summary = summarize(blind, status=6, values={"error_code": 721})
     assert summary["reason"] == mo.REASON_SENSOR_STALE
     assert summary["collision_monitor"] == [{"action_type": 1, "polygon": "invalid source"}]
+
+
+def test_a_cleared_slowdown_does_not_hide_a_specific_nav2_error():
+    # The monitor approached a box early on the route and cleared; the goal
+    # then failed because the planner had no path. That is not "blocked".
+    passed = track("motion.navigate", x=3.0, y=0.0)
+    passed.saw_collision_state(mo.COLLISION_APPROACH, "approach")
+    passed.saw_collision_state(0, "")
+    summary = summarize(passed, status=6, values={"error_code": 208})
+    assert summary["reason"] == mo.REASON_NO_PATH
+    assert summary["collision_monitor_at_stop"] == {"action_type": 0, "polygon": ""}
+    # A stop that cleared still explains a base that then ran out of time.
+    held = track()
+    held.saw_collision_state(mo.COLLISION_STOP, "stop")
+    held.saw_collision_state(0, "")
+    assert summarize(held, status=6, values={"error_code": 721})["reason"] == (
+        mo.REASON_OBSTACLE_BLOCKED
+    )
+
+
+def test_a_stop_in_force_when_the_goal_was_sent_is_seen():
+    # The monitor publishes only on a change: a stop raised before the goal
+    # was sent produces no message during it, so the track starts from it.
+    seeded = mo.MotionTrack(
+        "motion.navigate", {"x": 1.0}, {"x": 0.0, "y": 0.0, "yaw": 0.0}, 0.0,
+        collision_now=(mo.COLLISION_STOP, mo.INVALID_SOURCE),
+    )
+    summary = summarize(seeded, status=6, values={"error_code": 105})
+    assert summary["reason"] == mo.REASON_SENSOR_STALE
+    clear = mo.MotionTrack(
+        "motion.navigate", {"x": 1.0}, None, 0.0, collision_now=(0, "")
+    )
+    assert clear.collision_events == []
+
+
+def test_the_backend_seeds_a_new_motion_with_the_monitor_state(monkeypatch):
+    backend, _socket = backend_with(lambda _id: [], monkeypatch)
+    backend._handle_message({
+        "op": "publish", "topic": "/collision_monitor_state",
+        "msg": {"action_type": 1, "polygon_name": "stop"},
+    })
+    backend._begin_track("call-1", "motion.advance", {"distance_m": 0.3})
+    summary = backend._motion_summary("call-1", status=6)
+    assert summary["reason"] == mo.REASON_OBSTACLE_BLOCKED
+    assert summary["collision_monitor"] == [{"action_type": 1, "polygon": "stop"}]
 
 
 @pytest.mark.parametrize(
@@ -290,3 +336,26 @@ def test_rosbridge_deadline_reports_timeout_and_keeps_tracking(monkeypatch):
     assert backend.safe_stop("stop-1").outcome == OUTCOME_COMPLETED
     assert backend._motion_tracks == {}
     backend.disconnect()
+
+
+def test_a_failed_motion_returns_without_waiting_for_quiet_sensors(monkeypatch):
+    # The host's safe stop follows a failed motion; it must not first wait
+    # out the observation timeout for a LiDAR that stopped publishing.
+    def aborted(call_id):
+        return [{"op": "action_result", "id": call_id, "status": 6, "result": False,
+                 "values": {"error_code": 0}}]
+
+    backend, _socket = backend_with(aborted, monkeypatch)
+    monkeypatch.setenv("FLYTO_ROS2_OBSERVATION_WAIT_SECONDS", "3")
+    monkeypatch.setenv("FLYTO_ROS2_OBSERVATION_MAX_AGE_SECONDS", "0.1")
+    time.sleep(0.2)
+    started = time.monotonic()
+    result = backend.invoke(
+        call_id="adv-quiet", capability_id="motion.advance",
+        arguments={"distance_m": 0.3}, deadline_seconds=3.0,
+    )
+    elapsed = time.monotonic() - started
+    backend.disconnect()
+    assert result.outcome == OUTCOME_FAILED
+    assert result.evidence["motion_outcome"]["reason"] == mo.REASON_ABORTED_BY_SERVER
+    assert elapsed < 1.5
