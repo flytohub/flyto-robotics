@@ -85,6 +85,15 @@ _CAPABILITY_METADATA: Mapping[str, Mapping[str, Any]] = {
         "cancellable": False,
         "revision": 1,
     },
+    "motion.navigate_to_waypoint": {
+        "display_name": "Navigate to Waypoint",
+        "description": "Travel to a named waypoint on a shared map; the fleet picks the robot",
+        "safety_class": "movement",
+        "required_permissions": ("robot.motion",),
+        "requires_safe_stop": True,
+        "cancellable": True,
+        "revision": 1,
+    },
     "motion.dock": {
         "display_name": "Dock",
         "description": "Travel to an approved docking waypoint",

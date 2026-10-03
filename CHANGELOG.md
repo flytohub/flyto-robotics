@@ -4,6 +4,13 @@ All notable project changes are recorded here.
 
 ## Unreleased
 
+## 0.2.0 - 2026-10-04
+
+- Results carry the evidence the adapter can vouch for, additively: `evidence_items` (`passage.clearance` against the adapter's own 0.35 m floor; `robot.arrival` with odometry before, after and once settled, in the exact shape Desktop projected), `artifacts` (photo JPEG, occupancy map drawn as JPEG with Pillow or PNG without, in the `flyto.capability-contract.v1` transport) beside the legacy `capture`, and `recovery_context` on a failed or timed-out advance/retreat (reason, travelled vs requested along the heading, ranges, sweep at the stop).
+- The adapter keeps the observation from before a motion per call id and returns the same enriched result for a repeated call id.
+- `open_rmf.fleet` external adapter and resource discoverer entry points: a `fleet:<name>` resource, requests pinned to that fleet (never a robot), calls that wait for Open-RMF's terminal task state up to the deadline, no second dispatch for a repeated call id, `robot.arrival` for a finished navigate/dock, `deployment_mode` from `FLYTO_RMF_DEPLOYMENT_MODE`.
+- Optional `capture` extra (`Pillow>=10`).
+
 - A motion's reason now follows the collision monitor's state at the stop (seeded from the state in force at send), so a cleared slowdown no longer hides a specific Nav2 error; failed and timed-out rosbridge motions return without waiting for quiet sensors, so the host safe stop is not delayed.
 - Every Generic ROS 2 motion result carries `evidence.motion_outcome` with a machine-readable `reason` (`obstacle_blocked`, `sensor_stale`, `timeout`, ...), start/final pose, distance travelled vs requested and the nearest LiDAR return at the stop; failed motions lead their detail with it.
 - Ship Generic ROS2/rosbridge, OpenRMF and vision-stream integrations as external adapter providers usable by the built-in AI Space host or optional process hosts such as Flyto2 Runtime, instead of Cloud-bundled transport implementations.
