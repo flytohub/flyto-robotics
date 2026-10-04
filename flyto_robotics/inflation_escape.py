@@ -1,0 +1,554 @@
+"""Whether a navigation starts inside an obstacle's inflation, and the way out.
+
+Nav2's costmap inflates every obstacle by ``inflation_radius``. A robot whose
+centre starts closer to an obstacle than that radius plus its own radius sits
+in the cost gradient around it, and the stock controller can fail to make any
+progress from there: it reports "Failed to make progress", the behaviour
+server cycles spin/wait/backup, and the goal is aborted minutes later.
+
+This module decides that from facts and computes a way out, with no ROS
+import so every step is unit-testable:
+
+- :func:`read_costmap_geometry` reads the inflation radius and the robot's
+  radius (or footprint) from the costmaps' own parameters, through a reader
+  the transport supplies, and falls back to Nav2's documented defaults.
+- :func:`plan_escape` reads one LiDAR sweep in the robot frame (x forward,
+  y left, bearings counter-clockwise from straight ahead) and returns an
+  :class:`EscapeDecision`: not pinned, pinned with an escape (a straight
+  back-off and one lateral waypoint), or pinned with no safe escape.
+
+Every straight segment the escape drives keeps at least the clearance floor
+from every LiDAR return, and a sector the scan cannot see is never treated as
+room. The floor is the caller's (0.35 m by default); nothing here lowers it.
+The LiDAR is taken to sit at the robot's centre, facing forward.
+"""
+
+from __future__ import annotations
+
+import ast
+import math
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from dataclasses import dataclass, field
+from typing import Any
+
+#: Nav2's documented costmap defaults, used when a parameter cannot be read.
+DEFAULT_INFLATION_RADIUS_M = 0.55
+DEFAULT_ROBOT_RADIUS_M = 0.1
+#: A radius outside this band is a misread, not a robot.
+MAX_PLAUSIBLE_RADIUS_M = 5.0
+
+#: Sector half-width either side of its centre. Four sectors partition the sweep.
+SECTOR_HALF_WIDTH_RAD = math.radians(45.0)
+SECTOR_CENTRES_RAD: Mapping[str, float] = {
+    "front": 0.0,
+    "left": math.pi / 2,
+    "rear": math.pi,
+    "right": -math.pi / 2,
+}
+#: A sector with fewer readable bins than this fraction is unreadable: a
+#: missing return may be open space or a covered sensor, and it is not room.
+MIN_READABLE_FRACTION = 0.5
+#: Neighbouring returns further apart than this belong to different objects.
+CLUSTER_JUMP_M = 0.15
+
+DECISION_CLEAR = "clear"
+DECISION_ESCAPE = "escape"
+REASON_NO_ESCAPE_ROOM = "no_escape_room"
+
+ParameterReader = Callable[[str, str], "Mapping[str, Any] | None"]
+
+
+# -- costmap parameters ------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class CostmapGeometry:
+    """The two radii that decide whether a start is inside inflation."""
+
+    inflation_radius_m: float
+    robot_radius_m: float
+    source: str = "fallback"
+    notes: tuple[str, ...] = ()
+
+    @property
+    def pinned_threshold_m(self) -> float:
+        return self.inflation_radius_m + self.robot_radius_m
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "inflation_radius_m": round(self.inflation_radius_m, 4),
+            "robot_radius_m": round(self.robot_radius_m, 4),
+            "source": self.source,
+            **({"notes": list(self.notes)} if self.notes else {}),
+        }
+
+
+FALLBACK_GEOMETRY = CostmapGeometry(DEFAULT_INFLATION_RADIUS_M, DEFAULT_ROBOT_RADIUS_M)
+
+
+def _plausible(value: float | None) -> bool:
+    return value is not None and math.isfinite(value) and 0.0 < value <= MAX_PLAUSIBLE_RADIUS_M
+
+
+def parameter_number(value: Mapping[str, Any] | None) -> float | None:
+    """A ``rcl_interfaces/ParameterValue`` that holds an integer or a double."""
+    if not isinstance(value, Mapping):
+        return None
+    kind = value.get("type")
+    names = {2: "integer_value", 3: "double_value"}
+    raw = value.get(names[kind]) if kind in names else None
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        return None
+    return float(raw)
+
+
+def parameter_text(value: Mapping[str, Any] | None) -> str | None:
+    if not isinstance(value, Mapping) or value.get("type") != 4:
+        return None
+    raw = value.get("string_value")
+    return raw if isinstance(raw, str) else None
+
+
+def parameter_bool(value: Mapping[str, Any] | None) -> bool | None:
+    if not isinstance(value, Mapping) or value.get("type") != 1:
+        return None
+    raw = value.get("bool_value")
+    return raw if isinstance(raw, bool) else None
+
+
+def parameter_strings(value: Mapping[str, Any] | None) -> tuple[str, ...]:
+    if not isinstance(value, Mapping) or value.get("type") != 9:
+        return ()
+    raw = value.get("string_array_value")
+    if not isinstance(raw, (list, tuple)):
+        return ()
+    return tuple(item for item in raw if isinstance(item, str) and item)
+
+
+def parse_footprint(text: str | None) -> tuple[tuple[float, float], ...] | None:
+    """A Nav2 ``footprint`` string (``"[[x, y], ...]"``) as points; None if empty or bad."""
+    if not text or not text.strip():
+        return None
+    try:
+        parsed = ast.literal_eval(text.strip())
+    except (ValueError, SyntaxError, MemoryError, RecursionError):
+        return None
+    if not isinstance(parsed, (list, tuple)) or len(parsed) < 3:
+        return None
+    points: list[tuple[float, float]] = []
+    for point in parsed:
+        if not isinstance(point, (list, tuple)) or len(point) != 2:
+            return None
+        x, y = point
+        if any(isinstance(v, bool) or not isinstance(v, (int, float)) for v in (x, y)):
+            return None
+        if not (math.isfinite(x) and math.isfinite(y)):
+            return None
+        points.append((float(x), float(y)))
+    return tuple(points)
+
+
+def footprint_radius(points: Sequence[tuple[float, float]]) -> float:
+    """The circumscribed radius: the conservative radius for a polygon footprint."""
+    return max(math.hypot(x, y) for x, y in points)
+
+
+def read_costmap_geometry(
+    reader: ParameterReader | None, nodes: Iterable[str]
+) -> CostmapGeometry:
+    """Inflation and robot radius from the live costmaps, else Nav2's defaults.
+
+    ``reader(node, name)`` returns the parameter's ``ParameterValue`` as a
+    mapping, None when the node does not have it, and raises when the node
+    cannot be asked. Every costmap is read and the largest radius of each kind
+    is kept: the robot is pinned if any costmap it plans on says so. A
+    polygon footprint takes precedence over ``robot_radius``, as in Nav2.
+    """
+    if reader is None:
+        return CostmapGeometry(
+            DEFAULT_INFLATION_RADIUS_M,
+            DEFAULT_ROBOT_RADIUS_M,
+            notes=("no parameter reader on this transport",),
+        )
+    inflations: list[float] = []
+    radii: list[float] = []
+    notes: list[str] = []
+    for node in nodes:
+        try:
+            for plugin in parameter_strings(reader(node, "plugins")):
+                kind = parameter_text(reader(node, f"{plugin}.plugin")) or ""
+                if not kind.endswith("InflationLayer"):
+                    continue
+                if parameter_bool(reader(node, f"{plugin}.enabled")) is False:
+                    continue
+                value = parameter_number(reader(node, f"{plugin}.inflation_radius"))
+                if _plausible(value):
+                    inflations.append(float(value))  # type: ignore[arg-type]
+            footprint = parse_footprint(parameter_text(reader(node, "footprint")))
+            if footprint is not None and _plausible(footprint_radius(footprint)):
+                radii.append(footprint_radius(footprint))
+            else:
+                value = parameter_number(reader(node, "robot_radius"))
+                if _plausible(value):
+                    radii.append(float(value))  # type: ignore[arg-type]
+        except Exception as error:  # noqa: BLE001 - one unreadable node falls back
+            notes.append(f"{node}: {type(error).__name__}")
+    if not inflations:
+        notes.append(f"inflation_radius fallback {DEFAULT_INFLATION_RADIUS_M}")
+    if not radii:
+        notes.append(f"robot_radius fallback {DEFAULT_ROBOT_RADIUS_M}")
+    source = (
+        "parameters" if inflations and radii else "partial" if inflations or radii else "fallback"
+    )
+    return CostmapGeometry(
+        max(inflations) if inflations else DEFAULT_INFLATION_RADIUS_M,
+        max(radii) if radii else DEFAULT_ROBOT_RADIUS_M,
+        source=source,
+        notes=tuple(notes),
+    )
+
+
+# -- scan geometry -----------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Beam:
+    """One sweep bin: its bearing in the robot frame and its range, or None."""
+
+    bearing: float
+    range_m: float | None
+
+    def point(self) -> tuple[float, float] | None:
+        if self.range_m is None:
+            return None
+        return (self.range_m * math.cos(self.bearing), self.range_m * math.sin(self.bearing))
+
+
+def sweep_beams(sweep: Mapping[str, Any] | None) -> tuple[Beam, ...]:
+    """The observation's reduced sweep as beams; empty when it has no geometry."""
+    if not isinstance(sweep, Mapping):
+        return ()
+    try:
+        start = float(sweep["angle_min_rad"])
+        step = float(sweep["angle_increment_rad"])
+        ranges = list(sweep["ranges_m"])
+    except (KeyError, TypeError, ValueError):
+        return ()
+    if not (math.isfinite(start) and math.isfinite(step)) or step == 0.0:
+        return ()
+    beams: list[Beam] = []
+    for index, raw in enumerate(ranges):
+        bearing = math.remainder(start + step * index, math.tau)
+        value: float | None = None
+        if isinstance(raw, (int, float)) and not isinstance(raw, bool):
+            value = float(raw) if math.isfinite(raw) and raw > 0.0 else None
+        beams.append(Beam(bearing, value))
+    return tuple(beams)
+
+
+def _in_sector(beam: Beam, centre: float, half_width: float) -> bool:
+    return abs(math.remainder(beam.bearing - centre, math.tau)) <= half_width + 1e-9
+
+
+def sector_minimum(
+    beams: Sequence[Beam],
+    centre: float,
+    half_width: float = SECTOR_HALF_WIDTH_RAD,
+) -> float | None:
+    """Nearest return in a sector, or None when the sector is unreadable."""
+    inside = [beam for beam in beams if _in_sector(beam, centre, half_width)]
+    readable = [beam.range_m for beam in inside if beam.range_m is not None]
+    if not inside or len(readable) < MIN_READABLE_FRACTION * len(inside):
+        return None
+    return min(readable)  # type: ignore[type-var]
+
+
+def sector_minima(beams: Sequence[Beam]) -> dict[str, float | None]:
+    return {name: sector_minimum(beams, centre) for name, centre in SECTOR_CENTRES_RAD.items()}
+
+
+def obstacle_cluster(beams: Sequence[Beam]) -> tuple[Beam, ...]:
+    """The object nearest straight ahead: contiguous returns around it.
+
+    Starts at the nearest return in the front sector and grows in both
+    directions while neighbouring returns stay within ``CLUSTER_JUMP_M`` of
+    each other and remain ahead of the robot (|bearing| < 90 degrees).
+    """
+    count = len(beams)
+    front = [
+        index
+        for index, beam in enumerate(beams)
+        if beam.range_m is not None and _in_sector(beam, 0.0, SECTOR_HALF_WIDTH_RAD)
+    ]
+    if not front:
+        return ()
+    seed = min(front, key=lambda index: beams[index].range_m)  # type: ignore[arg-type,return-value]
+    members = {seed}
+    for direction in (1, -1):
+        previous = beams[seed]
+        index = seed
+        for _ in range(count - 1):
+            index = (index + direction) % count
+            beam = beams[index]
+            if (
+                index in members
+                or beam.range_m is None
+                or abs(beam.bearing) >= math.pi / 2
+                or abs(beam.range_m - previous.range_m) > CLUSTER_JUMP_M  # type: ignore[operator]
+            ):
+                break
+            members.add(index)
+            previous = beam
+    return tuple(beams[index] for index in sorted(members))
+
+
+def segment_clearance(
+    beams: Sequence[Beam], start: tuple[float, float], end: tuple[float, float]
+) -> float | None:
+    """Smallest distance from any LiDAR return to the segment start-end."""
+    ax, ay = start
+    bx, by = end
+    dx, dy = bx - ax, by - ay
+    length_sq = dx * dx + dy * dy
+    best: float | None = None
+    for beam in beams:
+        point = beam.point()
+        if point is None:
+            continue
+        px, py = point
+        t = 0.0
+        if length_sq > 0.0:
+            t = max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / length_sq))
+        distance = math.hypot(px - (ax + t * dx), py - (ay + t * dy))
+        best = distance if best is None else min(best, distance)
+    return best
+
+
+def backoff_distance(
+    nearest_front_m: float, threshold_m: float, max_backoff_m: float
+) -> float:
+    """How far to back off so the front return is at the pinned threshold."""
+    return max(0.0, min(max_backoff_m, threshold_m - nearest_front_m))
+
+
+def allowed_backoff(
+    wanted_m: float, rear_clearance_m: float | None, floor_m: float
+) -> float:
+    """The back-off the rear allows: rear clearance after it stays >= floor."""
+    if rear_clearance_m is None or wanted_m <= 0.0:
+        return 0.0
+    return max(0.0, min(wanted_m, rear_clearance_m - floor_m))
+
+
+def choose_sides(left_m: float | None, right_m: float | None) -> tuple[str, str]:
+    """Both sides, the one with more free space first (an unreadable side has none)."""
+    left = -1.0 if left_m is None else left_m
+    right = -1.0 if right_m is None else right_m
+    return ("left", "right") if left >= right else ("right", "left")
+
+
+def _lateral_positions(cluster: Sequence[Beam]) -> list[float]:
+    return [
+        beam.range_m * math.sin(beam.bearing) for beam in cluster if beam.range_m is not None
+    ]
+
+
+def lateral_offset(
+    cluster: Sequence[Beam], side: str, robot_radius_m: float, margin_m: float
+) -> float:
+    """Signed y (left positive) that clears the obstacle's extent on ``side``.
+
+    For each obstacle return at (range, bearing) its lateral position is
+    ``range * sin(bearing)``; the waypoint sits beyond the outermost one by
+    the robot's radius plus the margin.
+    """
+    lateral = _lateral_positions(cluster)
+    if not lateral:
+        return 0.0
+    if side == "left":
+        return max(0.0, max(lateral)) + robot_radius_m + margin_m
+    return min(0.0, min(lateral)) - robot_radius_m - margin_m
+
+
+# -- the decision ------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class EscapeDecision:
+    """Whether the start is pinned, and if so how to leave or why it cannot."""
+
+    pinned: bool
+    feasible: bool
+    reason: str
+    threshold_m: float
+    floor_m: float
+    clearances: Mapping[str, float | None]
+    geometry: CostmapGeometry
+    backoff_m: float = 0.0
+    backoff_limited_by: str | None = None
+    side: str | None = None
+    lateral_offset_m: float = 0.0
+    obstacle: Mapping[str, Any] | None = None
+    sides_tried: tuple[Mapping[str, Any], ...] = field(default_factory=tuple)
+
+    @property
+    def waypoint_robot(self) -> tuple[float, float]:
+        """The lateral waypoint in the start's robot frame (x forward, y left)."""
+        return (-self.backoff_m, self.lateral_offset_m)
+
+    def to_dict(self) -> dict[str, Any]:
+        def metres(value: float | None) -> float | None:
+            return None if value is None else round(value, 3)
+
+        data: dict[str, Any] = {
+            "pinned": self.pinned,
+            "decision": self.reason,
+            "pinned_threshold_m": metres(self.threshold_m),
+            "clearance_floor_m": metres(self.floor_m),
+            "clearances_m": {key: metres(value) for key, value in self.clearances.items()},
+            "costmap": self.geometry.to_dict(),
+        }
+        if self.pinned:
+            data["backoff_m"] = metres(self.backoff_m)
+            if self.backoff_limited_by:
+                data["backoff_limited_by"] = self.backoff_limited_by
+            if self.obstacle is not None:
+                data["obstacle"] = dict(self.obstacle)
+            if self.sides_tried:
+                data["sides_tried"] = [dict(item) for item in self.sides_tried]
+        if self.feasible and self.pinned:
+            x, y = self.waypoint_robot
+            data["side"] = self.side
+            data["lateral_offset_m"] = metres(self.lateral_offset_m)
+            data["waypoint_robot_frame"] = {"x": metres(x), "y": metres(y)}
+        return data
+
+    def describe(self) -> str:
+        """One line for an operator, led by the named reason."""
+        c = self.clearances
+
+        def show(name: str) -> str:
+            value = c.get(name)
+            return "unreadable" if value is None else f"{value:.2f} m"
+
+        head = (
+            f"front {show('front')} < {self.threshold_m:.2f} m "
+            f"(inflation {self.geometry.inflation_radius_m:.2f} + "
+            f"robot {self.geometry.robot_radius_m:.2f})"
+        )
+        rest = (
+            f"rear {show('rear')}, left {show('left')}, right {show('right')}; "
+            f"floor {self.floor_m:.2f} m"
+        )
+        return f"{self.reason}: {head}; {rest}"
+
+
+def plan_escape(
+    sweep: Mapping[str, Any] | None,
+    geometry: CostmapGeometry,
+    *,
+    floor_m: float,
+    max_backoff_m: float,
+    margin_m: float,
+    max_lateral_m: float,
+) -> EscapeDecision | None:
+    """Decide from one sweep; None when the sweep has no usable geometry."""
+    beams = sweep_beams(sweep)
+    if not beams:
+        return None
+    clearances = sector_minima(beams)
+    threshold = geometry.pinned_threshold_m
+    front = clearances["front"]
+    base = {
+        "threshold_m": threshold,
+        "floor_m": floor_m,
+        "clearances": clearances,
+        "geometry": geometry,
+    }
+    if front is None or front >= threshold:
+        # Nothing ahead inside inflation (an unreadable front is the
+        # preflight's to refuse, not something an escape can judge).
+        return EscapeDecision(pinned=False, feasible=True, reason=DECISION_CLEAR, **base)
+
+    wanted = backoff_distance(front, threshold, max(0.0, max_backoff_m))
+    backoff = allowed_backoff(wanted, clearances["rear"], floor_m)
+    limited_by = None
+    if backoff < wanted:
+        limited_by = "rear_unreadable" if clearances["rear"] is None else "rear_clearance"
+    if backoff > 0.0:
+        swept = segment_clearance(beams, (0.0, 0.0), (-backoff, 0.0))
+        if swept is None or swept < floor_m:
+            backoff, limited_by = 0.0, "backoff_path"
+
+    cluster = obstacle_cluster(beams)
+    lateral = _lateral_positions(cluster)
+    obstacle = {
+        "returns": len(cluster),
+        "bearing_min_rad": round(min(beam.bearing for beam in cluster), 4),
+        "bearing_max_rad": round(max(beam.bearing for beam in cluster), 4),
+        "lateral_min_m": round(min(lateral), 3),
+        "lateral_max_m": round(max(lateral), 3),
+    }
+    tried: list[dict[str, Any]] = []
+    start = (-backoff, 0.0)
+    for side in choose_sides(clearances["left"], clearances["right"]):
+        offset = lateral_offset(cluster, side, geometry.robot_radius_m, margin_m)
+        attempt: dict[str, Any] = {"side": side, "lateral_offset_m": round(offset, 3)}
+        side_room = clearances[side]
+        swept = segment_clearance(beams, start, (-backoff, offset))
+        attempt["path_clearance_m"] = None if swept is None else round(swept, 3)
+        if side_room is None:
+            attempt["refused"] = "side_unreadable"
+        elif abs(offset) > max_lateral_m:
+            attempt["refused"] = "beyond_max_lateral"
+        elif swept is None or swept < floor_m:
+            attempt["refused"] = "path_below_floor"
+        tried.append(attempt)
+        if "refused" not in attempt:
+            return EscapeDecision(
+                pinned=True,
+                feasible=True,
+                reason=DECISION_ESCAPE,
+                backoff_m=backoff,
+                backoff_limited_by=limited_by,
+                side=side,
+                lateral_offset_m=offset,
+                obstacle=obstacle,
+                sides_tried=tuple(tried),
+                **base,
+            )
+    return EscapeDecision(
+        pinned=True,
+        feasible=False,
+        reason=REASON_NO_ESCAPE_ROOM,
+        backoff_m=backoff,
+        backoff_limited_by=limited_by,
+        obstacle=obstacle,
+        sides_tried=tuple(tried),
+        **base,
+    )
+
+
+def to_map(
+    start_map_pose: Mapping[str, Any], robot_xy: tuple[float, float]
+) -> tuple[float, float]:
+    """A point in the start's robot frame, in the map frame."""
+    x0 = float(start_map_pose["x"])
+    y0 = float(start_map_pose["y"])
+    yaw = float(start_map_pose["yaw"])
+    rx, ry = robot_xy
+    return (
+        x0 + math.cos(yaw) * rx - math.sin(yaw) * ry,
+        y0 + math.sin(yaw) * rx + math.cos(yaw) * ry,
+    )
+
+
+def waypoint_pose(
+    start_map_pose: Mapping[str, Any],
+    decision: EscapeDecision,
+    goal_xy: tuple[float, float],
+) -> dict[str, float]:
+    """The lateral waypoint in the map frame, heading toward the final goal."""
+    x, y = to_map(start_map_pose, decision.waypoint_robot)
+    yaw = math.atan2(goal_xy[1] - y, goal_xy[0] - x)
+    return {"x": round(x, 4), "y": round(y, 4), "yaw_radians": round(yaw, 4)}

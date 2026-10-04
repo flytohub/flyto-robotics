@@ -183,6 +183,29 @@ heading included. Every navigate result carries `evidence.navigation_target`
 `evidence.resolved_arguments` (`x`, `y`, `yaw_radians`), the arguments its
 arrival evidence is judged against.
 
+### Leaving an obstacle's inflation before navigating
+
+A robot that starts closer to an obstacle than Nav2's `inflation_radius` plus
+its own radius sits in the costmap's cost gradient, and the stock controller
+can fail to make progress from there ("Failed to make progress", recoveries,
+an abort minutes later). Before sending a navigate goal the adapter decides
+this from facts (`flyto_robotics/inflation_escape.py`): the nearest return in
+the LiDAR's front sector against both radii, read from the costmaps' own
+parameters. A pinned start backs off (only as far as the rear keeps the
+clearance floor), passes one lateral waypoint on the side with more room, then
+goes to the original goal, which stays the final pose. If no escape keeps the
+floor the call is refused at once with `reason_code: no_escape_room` and the
+measured clearances. The floor itself is never lowered.
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `FLYTO_ROS2_INFLATION_ESCAPE` | `on` | `off` sends every goal unchanged |
+| `FLYTO_ROS2_COSTMAP_NODES` | `/local_costmap/local_costmap,/global_costmap/global_costmap` | costmaps whose `plugins`, inflation layer and `robot_radius`/`footprint` are read; the largest radius of each kind is used |
+| `FLYTO_ROS2_ESCAPE_MAX_BACKOFF_M` | `0.30` | longest back-off |
+| `FLYTO_ROS2_ESCAPE_MARGIN_M` | `0.10` | clearance past the obstacle's edge beyond the robot radius |
+| `FLYTO_ROS2_ESCAPE_MAX_LATERAL_M` | `1.0` | widest lateral offset before the escape is refused |
+| `FLYTO_ROS2_NAVIGATE_THROUGH_ACTION` | `/navigate_through_poses` | used when present; otherwise the legs are sequential `NavigateToPose` goals |
+
 Captures are read-only, read one message through rosbridge (the rclpy backend
 refuses them), and return it as `evidence.capture`; the execution host keeps
 and shows it.

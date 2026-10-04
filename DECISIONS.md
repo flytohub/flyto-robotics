@@ -1,5 +1,23 @@
 # Decisions
 
+## 2026-10-04 — A navigation that starts inside inflation escapes first, or is refused at once
+
+On the twin, a navigate sent from 0.40 m in front of a box (stock TurtleBot3
+Nav2 parameters: inflation 0.50 m, robot radius 0.10 m) never moved the robot;
+Nav2 recovered and aborted after about 170 s. The robot runs the same stock
+parameters, so tuning Nav2 was not an option. The adapter now decides from
+the LiDAR sweep and the costmaps' live parameters whether the start is inside
+inflation, and if so drives a computed way out (back-off, one lateral
+waypoint) before the original goal, or refuses with `no_escape_room` when no
+straight segment of that escape keeps the 0.35 m floor from every return.
+
+The pinned test uses the front sector only (plus or minus 45 degrees): side
+returns at the same distance would call every narrow corridor pinned. The
+geometry is pure (`inflation_escape.py`) and the ROS-facing part is a thin
+layer in the adapter. Rejected: retuning the twin's or the robot's Nav2
+parameters; lowering the floor; retrying the same goal; leaving Nav2 to time
+out.
+
 ## 2026-10-04 — Named places live on the execution host; the adapter resolves them
 
 Places are kept beside the adapter, on the computer that drives the robot: the

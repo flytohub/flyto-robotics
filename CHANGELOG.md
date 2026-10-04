@@ -2,6 +2,13 @@
 
 All notable project changes are recorded here.
 
+## 0.4.0 - 2026-10-04
+
+- `motion.navigate` checks, before sending a goal, whether the robot starts inside an obstacle's costmap inflation (`flyto_robotics/inflation_escape.py`): the nearest LiDAR return in the front sector against `inflation_radius + robot_radius`, both read from the live costmaps' parameters (`/local_costmap/local_costmap`, `/global_costmap/global_costmap` via the standard `get_parameters` service; footprint taken as its circumscribed radius; Nav2's defaults 0.55 m / 0.1 m when unreadable, reported as `costmap.source`).
+- A pinned start escapes first: a straight back-off (Nav2 `BackUp`, 0.05 m/s) by `clamp(threshold - front, 0, FLYTO_ROS2_ESCAPE_MAX_BACKOFF_M)`, only as far as the rear sector keeps the 0.35 m floor; then one lateral waypoint on the side with more LiDAR room, offset past the obstacle's extent (`range * sin(bearing)`) by the robot radius plus `FLYTO_ROS2_ESCAPE_MARGIN_M`, then the original goal. One `NavigateThroughPoses` goal when the graph has it, else sequential `NavigateToPose` goals. The original goal stays the final pose under the call's own id, so arrival is still judged against the real target. Every straight escape segment keeps the floor from every LiDAR return; an unreadable sector is never room.
+- No safe escape (no side clears the floor, or the obstacle is wider than `FLYTO_ROS2_ESCAPE_MAX_LATERAL_M`): refused before any motion with `reason_code: no_escape_room`, a detail led by it, and the measured clearances, instead of Nav2 thrashing for minutes.
+- Every navigate result carries `evidence.navigation_escape` (decision, clearances, costmap geometry, back-off, side, waypoint, legs) when a LiDAR sweep was available. `FLYTO_ROS2_INFLATION_ESCAPE=off` disables the check. A cancel during an escape leg withdraws that leg and stops the rest.
+
 ## 0.3.0 - 2026-10-04
 
 - Named places, kept on the execution host (`flyto_robotics/places.py`, `flyto.robot-places.v1`): one JSON file per robot per map (`FLYTO_ROS2_PLACES_FILE`, or `places/<resource>/<FLYTO_ROS2_MAP_ID>.json` under `FLYTO_ROBOTICS_DATA_DIR` / the XDG data dir), entries `{name, frame: "map", x, y, yaw}`, free-text names unique per map ignoring case, atomic writes, and a file that cannot be read exactly as written refused (never overwritten).

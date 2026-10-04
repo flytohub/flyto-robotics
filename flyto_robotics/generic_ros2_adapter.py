@@ -40,8 +40,8 @@ from dataclasses import dataclass
 from typing import Any, Callable, Protocol
 
 from . import adapter_contract as decl
+from . import inflation_escape, motion_outcome, places, provider_evidence
 from . import map_frame as map_frame_module
-from . import motion_outcome, places, provider_evidence
 from .adapter_contract import (
     OUTCOME_CANCELLED,
     OUTCOME_COMPLETED,
@@ -305,6 +305,85 @@ DEFAULT_INTERFACES = {
         "geometry_msgs/msg/Twist|geometry_msgs/msg/TwistStamped",
     ),
 }
+
+# Interfaces the adapter uses on its own behalf, never declared as capabilities:
+# an escape from an obstacle's inflation sends its waypoint and the original
+# goal as one NavigateThroughPoses goal when the graph has it.
+NAVIGATE_THROUGH = "motion.navigate_through_poses"
+ESCAPE_INTERFACES = {
+    NAVIGATE_THROUGH: (
+        "action",
+        os.getenv("FLYTO_ROS2_NAVIGATE_THROUGH_ACTION", "/navigate_through_poses"),
+        "nav2_msgs/action/NavigateThroughPoses",
+    ),
+}
+GET_PARAMETERS_TYPE = "rcl_interfaces/srv/GetParameters"
+
+
+def _interface(capability_id: str) -> tuple[str, str, str]:
+    """A declared capability's interface, or one the adapter uses itself."""
+    return DEFAULT_INTERFACES.get(capability_id) or ESCAPE_INTERFACES[capability_id]
+
+
+def _env_metres(name: str, default: float, *, low: float, high: float) -> float:
+    try:
+        value = float(os.getenv(name, str(default)))
+    except ValueError:
+        return default
+    if not math.isfinite(value):
+        return default
+    return min(high, max(low, value))
+
+
+def _costmap_nodes() -> tuple[str, ...]:
+    """Costmap nodes whose parameters say how far obstacles are inflated."""
+    raw = os.getenv(
+        "FLYTO_ROS2_COSTMAP_NODES",
+        "/local_costmap/local_costmap,/global_costmap/global_costmap",
+    )
+    return tuple(item.strip() for item in raw.split(",") if item.strip())
+
+
+def _escape_enabled() -> bool:
+    return os.getenv("FLYTO_ROS2_INFLATION_ESCAPE", "on").strip().lower() not in {
+        "0",
+        "off",
+        "false",
+        "no",
+    }
+
+
+# How an escape backs off: slowly, since it starts close to an obstacle.
+ESCAPE_BACKOFF_SPEED_MPS = 0.05
+
+
+def _goal_pose(frame: str, x: float, y: float, yaw: float) -> dict[str, Any]:
+    """A geometry_msgs/PoseStamped as rosbridge sends it."""
+    return {
+        "header": {"frame_id": frame},
+        "pose": {
+            "position": {"x": float(x), "y": float(y), "z": 0.0},
+            "orientation": {
+                "x": 0.0,
+                "y": 0.0,
+                "z": math.sin(yaw / 2.0),
+                "w": math.cos(yaw / 2.0),
+            },
+        },
+    }
+
+
+def _route_poses(arguments: Mapping[str, Any]) -> list[tuple[float, float, float]]:
+    """A NavigateThroughPoses call's poses: its waypoints, then the goal."""
+    poses = [
+        (float(item["x"]), float(item["y"]), float(item.get("yaw_radians", 0.0)))
+        for item in arguments.get("waypoints", ())
+    ]
+    poses.append(
+        (float(arguments["x"]), float(arguments["y"]), float(arguments.get("yaw_radians", 0.0)))
+    )
+    return poses
+
 
 # Named places, kept on this host (``places.py``), not on the robot.
 PLACES_LIST = "places.list"
@@ -993,6 +1072,13 @@ class GenericROS2Adapter:
         self._before: dict[str, Any] = {}
         self._provided: dict[str, CallResult] = {}
         self._targets: dict[str, places.Place] = {}
+        # Per call id: the escape decided before a navigation first moved (a
+        # resumed call keeps it rather than re-deciding half way out), and the
+        # escape leg running now, so a cancel of the call reaches it.
+        self._escapes: dict[str, inflation_escape.EscapeDecision] = {}
+        self._escape_legs: dict[str, str] = {}
+        self._escape_starts: dict[str, dict[str, Any]] = {}
+        self._cancelled_escapes: dict[str, bool] = {}
 
     @property
     def places_store(self) -> places.PlacesStore:
@@ -1211,26 +1297,201 @@ class GenericROS2Adapter:
         if kept is not None:
             # The same call again: its result, not a second motion's evidence.
             return kept
+        escape: inflation_escape.EscapeDecision | None = None
+        if request.capability_id == "motion.navigate" and not supervised:
+            escape = self._escape_decision(request.call_id)
+            if escape is not None and escape.pinned and not escape.feasible:
+                # Nav2 would thrash in the inflation for minutes; say why now.
+                return CallResult(
+                    request.call_id,
+                    OUTCOME_REFUSED,
+                    evidence={
+                        "navigation_escape": escape.to_dict(),
+                        "reason_code": inflation_escape.REASON_NO_ESCAPE_ROOM,
+                        **_target_evidence(arguments, place),
+                    },
+                    detail=escape.describe(),
+                )
         before = self._before.get(request.call_id)
         if before is None:
             # A call resumed after a timeout keeps the observation from before
             # it first moved, not one taken half way.
             before = self._observe_quietly("before", request.call_id)
             _remember(self._before, request.call_id, before)
-        result = self.backend.invoke(
-            call_id=request.call_id,
-            capability_id=request.capability_id,
-            arguments=arguments,
-            deadline_seconds=float(request.deadline_seconds),
-        )
+        if escape is not None and escape.pinned:
+            result = self._navigate_with_escape(
+                request.call_id, arguments, escape, float(request.deadline_seconds)
+            )
+        else:
+            result = self.backend.invoke(
+                call_id=request.call_id,
+                capability_id=request.capability_id,
+                arguments=arguments,
+                deadline_seconds=float(request.deadline_seconds),
+            )
         if request.capability_id == "motion.navigate":
+            extra = _target_evidence(arguments, place)
+            if escape is not None:
+                extra["navigation_escape"] = {
+                    **escape.to_dict(),
+                    **dict((result.evidence or {}).get("navigation_escape") or {}),
+                }
             result = CallResult(
                 result.call_id,
                 result.outcome,
-                evidence={**dict(result.evidence or {}), **_target_evidence(arguments, place)},
+                evidence={**dict(result.evidence or {}), **extra},
                 detail=result.detail,
             )
         return self._with_motion_evidence(request.capability_id, before, result)
+
+    # -- leaving an obstacle's inflation before navigating -------------------------
+
+    def _escape_decision(self, call_id: str) -> inflation_escape.EscapeDecision | None:
+        """Whether this navigation starts inside inflation, decided once per call.
+
+        None when the check is switched off or the observation carries no
+        LiDAR sweep to judge it by; the navigation then goes to Nav2 as sent.
+        """
+        kept = self._escapes.get(call_id)
+        if kept is not None:
+            return kept
+        if not _escape_enabled():
+            return None
+        observation = self.backend.observation(
+            required=(REQUIRE_POSE, REQUIRE_RANGE, REQUIRE_MAP_TF)
+        )
+        reading = observation.get("range")
+        sweep = reading.get("sweep") if isinstance(reading, Mapping) else None
+        if not isinstance(sweep, Mapping) or not isinstance(observation.get("map_pose"), Mapping):
+            return None
+        reader = getattr(self.backend, "get_parameter", None)
+        geometry = inflation_escape.read_costmap_geometry(
+            reader if callable(reader) else None, _costmap_nodes()
+        )
+        can_back_off = "motion.retreat" in self._declared
+        decision = inflation_escape.plan_escape(
+            sweep,
+            geometry,
+            floor_m=_clearance_floor(),
+            max_backoff_m=(
+                _env_metres("FLYTO_ROS2_ESCAPE_MAX_BACKOFF_M", 0.30, low=0.0, high=1.0)
+                if can_back_off
+                else 0.0
+            ),
+            margin_m=_env_metres("FLYTO_ROS2_ESCAPE_MARGIN_M", 0.10, low=0.0, high=1.0),
+            max_lateral_m=_env_metres("FLYTO_ROS2_ESCAPE_MAX_LATERAL_M", 1.0, low=0.1, high=3.0),
+        )
+        if decision is None:
+            return None
+        if decision.pinned:
+            logger.info("navigation %s starts pinned: %s", call_id, decision.describe())
+        _remember(self._escapes, call_id, decision)
+        # Kept with the decision: the escape's waypoint is placed from this pose.
+        _remember(self._escape_starts, call_id, dict(observation["map_pose"]))
+        return decision
+
+    def _escape_leg(
+        self,
+        call_id: str,
+        leg_id: str,
+        capability_id: str,
+        arguments: Mapping[str, Any],
+        deadline: float,
+    ) -> CallResult:
+        if call_id in self._cancelled_escapes:
+            return CallResult(leg_id, OUTCOME_CANCELLED, detail="cancelled")
+        self._escape_legs[call_id] = leg_id
+        try:
+            return self.backend.invoke(
+                call_id=leg_id,
+                capability_id=capability_id,
+                arguments=arguments,
+                deadline_seconds=max(0.0, deadline - time.monotonic()),
+            )
+        finally:
+            self._escape_legs.pop(call_id, None)
+
+    def _navigate_with_escape(
+        self,
+        call_id: str,
+        target: Mapping[str, Any],
+        decision: inflation_escape.EscapeDecision,
+        deadline_seconds: float,
+    ) -> CallResult:
+        """Back off, pass the lateral waypoint, then go to the original goal.
+
+        The original goal stays the final pose under this call's own id, so
+        its result, and the arrival judged on ``map_pose`` against the target,
+        are the real target's. An escape leg that does not complete ends the
+        call with that leg's outcome and says which leg it was.
+        """
+        deadline = time.monotonic() + deadline_seconds
+        start = self._escape_starts.get(call_id) or {}
+        waypoint = inflation_escape.waypoint_pose(
+            start, decision, (float(target["x"]), float(target["y"]))
+        )
+        legs: list[dict[str, Any]] = []
+
+        def ended(leg: str, result: CallResult) -> CallResult:
+            legs.append({"leg": leg, "outcome": result.outcome})
+            outcome = result.outcome if result.outcome != OUTCOME_REFUSED else OUTCOME_FAILED
+            return CallResult(
+                call_id,
+                outcome,
+                evidence={
+                    **dict(result.evidence or {}),
+                    "navigation_escape": {"waypoint_map": waypoint, "legs": legs},
+                },
+                detail=f"inflation escape {leg} {result.outcome}: {result.detail}".strip(),
+            )
+
+        if decision.backoff_m > 0.0:
+            result = self._escape_leg(
+                call_id,
+                f"{call_id}:escape-backoff",
+                "motion.retreat",
+                {"distance_m": decision.backoff_m, "speed_mps": ESCAPE_BACKOFF_SPEED_MPS},
+                deadline,
+            )
+            if result.outcome != OUTCOME_COMPLETED:
+                return ended("backoff", result)
+            legs.append({"leg": "backoff", "outcome": result.outcome})
+        through = getattr(self.backend, "action_available", None)
+        if callable(through) and through(NAVIGATE_THROUGH):
+            if call_id in self._cancelled_escapes:
+                return ended("route", CallResult(call_id, OUTCOME_CANCELLED, detail="cancelled"))
+            result = self.backend.invoke(
+                call_id=call_id,
+                capability_id=NAVIGATE_THROUGH,
+                arguments={**dict(target), "waypoints": [waypoint]},
+                deadline_seconds=max(0.0, deadline - time.monotonic()),
+            )
+            legs.append({"leg": "through_poses", "outcome": result.outcome})
+        else:
+            result = self._escape_leg(
+                call_id, f"{call_id}:escape-waypoint", "motion.navigate", waypoint, deadline
+            )
+            if result.outcome != OUTCOME_COMPLETED:
+                return ended("waypoint", result)
+            legs.append({"leg": "waypoint", "outcome": result.outcome})
+            if call_id in self._cancelled_escapes:
+                return ended("goal", CallResult(call_id, OUTCOME_CANCELLED, detail="cancelled"))
+            result = self.backend.invoke(
+                call_id=call_id,
+                capability_id="motion.navigate",
+                arguments=target,
+                deadline_seconds=max(0.0, deadline - time.monotonic()),
+            )
+            legs.append({"leg": "goal", "outcome": result.outcome})
+        return CallResult(
+            result.call_id,
+            result.outcome,
+            evidence={
+                **dict(result.evidence or {}),
+                "navigation_escape": {"waypoint_map": waypoint, "legs": legs},
+            },
+            detail=result.detail,
+        )
 
     # -- named places (host-side, never on the robot) ---------------------------
 
@@ -1386,6 +1647,16 @@ class GenericROS2Adapter:
         )
 
     def cancel(self, call_id: str) -> CallResult:
+        leg = self._escape_legs.get(call_id)
+        if call_id in self._escapes:
+            # Between legs nothing is active; this stops the next one starting.
+            _remember(self._cancelled_escapes, call_id, True)
+        if leg is not None:
+            withdrawn = self.backend.cancel(leg)
+            if withdrawn.outcome == OUTCOME_CANCELLED:
+                return CallResult(
+                    call_id, OUTCOME_CANCELLED, detail="cancelled during inflation escape"
+                )
         return self.backend.cancel(call_id)
 
     def safe_stop(self) -> CallResult:
@@ -1898,7 +2169,7 @@ class RclpyROS2Backend(_ObservationState):
         return future.done()
 
     def _evidence(self, capability_id: str) -> dict[str, Any]:
-        kind, name, interface_type = DEFAULT_INTERFACES[capability_id]
+        kind, name, interface_type = _interface(capability_id)
         evidence: dict[str, Any] = {
             "adapter": "generic_ros2",
             "standard_interface": {
@@ -1920,6 +2191,10 @@ class RclpyROS2Backend(_ObservationState):
     def _action_type(self, capability_id: str):
         from nav2_msgs.action import BackUp, DriveOnHeading, NavigateToPose, Spin
 
+        if capability_id == NAVIGATE_THROUGH:
+            from nav2_msgs.action import NavigateThroughPoses
+
+            return NavigateThroughPoses
         return {
             "motion.navigate": NavigateToPose,
             "motion.advance": DriveOnHeading,
@@ -1927,9 +2202,65 @@ class RclpyROS2Backend(_ObservationState):
             "motion.rotate": Spin,
         }[capability_id]
 
+    def action_available(self, capability_id: str) -> bool:
+        """Whether the graph offers an action the adapter uses on its own behalf."""
+        node = self._node
+        if node is None:
+            return False
+        _, name, interface_type = _interface(capability_id)
+        actions = {name: tuple(types) for name, types in node.get_action_names_and_types()}
+        return interface_type in actions.get(name, ())
+
+    def get_parameter(self, node_name: str, name: str) -> Mapping[str, Any] | None:
+        """One parameter of another node as a ParameterValue mapping, or None."""
+        from rcl_interfaces.srv import GetParameters
+
+        node = self._node
+        if node is None:
+            raise RuntimeError("ROS 2 adapter disconnected")
+        client = node.create_client(GetParameters, f"{node_name.rstrip('/')}/get_parameters")
+        try:
+            if not client.wait_for_service(timeout_sec=1.0):
+                raise RuntimeError(f"{node_name} parameters unavailable")
+            request = GetParameters.Request()
+            request.names = [name]
+            future = client.call_async(request)
+            if not self._wait_future(future, time.monotonic() + 1.0):
+                raise RuntimeError(f"{node_name} parameters timed out")
+            values = list(getattr(future.result(), "values", ()) or ())
+        finally:
+            with contextlib.suppress(Exception):
+                node.destroy_client(client)
+        if not values:
+            return None
+        value = values[0]
+        return {
+            "type": int(value.type),
+            "bool_value": bool(value.bool_value),
+            "integer_value": int(value.integer_value),
+            "double_value": float(value.double_value),
+            "string_value": str(value.string_value),
+            "string_array_value": list(value.string_array_value),
+        }
+
     def _goal(self, capability_id: str, arguments: Mapping[str, float]):
         action_type = self._action_type(capability_id)
         goal = action_type.Goal()
+        if capability_id == NAVIGATE_THROUGH:
+            from geometry_msgs.msg import PoseStamped
+
+            frame = os.getenv("FLYTO_ROS2_MAP_FRAME", "map")
+            stamp = self._node.get_clock().now().to_msg()
+            for x, y, yaw in _route_poses(arguments):
+                pose = PoseStamped()
+                pose.header.frame_id = frame
+                pose.header.stamp = stamp
+                pose.pose.position.x = x
+                pose.pose.position.y = y
+                pose.pose.orientation.z = math.sin(yaw / 2.0)
+                pose.pose.orientation.w = math.cos(yaw / 2.0)
+                goal.poses.append(pose)
+            return goal
         if capability_id not in PLANNED_MOTIONS:
             allowance = max(
                 1.0, float(os.getenv("FLYTO_ROS2_ACTION_ALLOWANCE_SECONDS", "30"))
@@ -1977,7 +2308,7 @@ class RclpyROS2Backend(_ObservationState):
         from rclpy.action import ActionClient
 
         if call_id not in self._goal_handles:
-            _, action_name, _ = DEFAULT_INTERFACES[capability_id]
+            _, action_name, _ = _interface(capability_id)
             client = self._action_clients.get(capability_id)
             if client is None:
                 client = ActionClient(
@@ -2219,6 +2550,7 @@ class RosbridgeROS2Backend(_ObservationState):
         # on every observation. Nav2 or a driver can restart behind a rosbridge
         # that stays up, so a refusal is never decided on this copy alone.
         self._interfaces: tuple[StandardInterface, ...] | None = None
+        self._action_names: frozenset[str] = frozenset()
         self._send_lock = threading.Lock()
         self._reader: threading.Thread | None = None
         self._responses: dict[str, dict[str, Any]] = {}
@@ -2557,6 +2889,7 @@ class RosbridgeROS2Backend(_ObservationState):
         args: Mapping[str, Any],
         *,
         timeout: float = 5.0,
+        service_type: str | None = None,
     ) -> dict[str, Any]:
         identifier = f"svc-{time.monotonic_ns()}"
         self._send(
@@ -2565,6 +2898,7 @@ class RosbridgeROS2Backend(_ObservationState):
                 "service": service,
                 "args": dict(args),
                 "id": identifier,
+                **({"type": service_type} if service_type else {}),
             }
         )
         response = self._wait_for(
@@ -2742,6 +3076,7 @@ class RosbridgeROS2Backend(_ObservationState):
         if not isinstance(raw_actions, list):
             raise RuntimeError("rosapi action server response is invalid")
         action_names = {str(name) for name in raw_actions}
+        self._action_names = frozenset(action_names)
 
         found: list[StandardInterface] = []
         for _capability_id, (kind, name, interface_type) in DEFAULT_INTERFACES.items():
@@ -2756,6 +3091,26 @@ class RosbridgeROS2Backend(_ObservationState):
         if marker and self._topic_types.get(marker) == CLOCK_TYPE:
             found.append(StandardInterface("topic", marker, CLOCK_TYPE))
         return tuple(found)
+
+    def action_available(self, capability_id: str) -> bool:
+        """Whether rosapi lists an action the adapter uses on its own behalf."""
+        if not self._connected:
+            return False
+        self.discover()
+        return _interface(capability_id)[1] in self._action_names
+
+    def get_parameter(self, node_name: str, name: str) -> Mapping[str, Any] | None:
+        """One parameter of another node, through its standard GetParameters service."""
+        response = self._service(
+            f"{node_name.rstrip('/')}/get_parameters",
+            {"names": [name]},
+            timeout=1.0,
+            service_type=GET_PARAMETERS_TYPE,
+        )
+        values = response.get("values")
+        if not isinstance(values, list) or not values or not isinstance(values[0], Mapping):
+            return None
+        return dict(values[0])
 
     @staticmethod
     def _duration(seconds: float) -> dict[str, int]:
@@ -2775,6 +3130,12 @@ class RosbridgeROS2Backend(_ObservationState):
             1.0,
             float(os.getenv("FLYTO_ROS2_ACTION_ALLOWANCE_SECONDS", "30")),
         )
+        if capability_id == NAVIGATE_THROUGH:
+            frame = os.getenv("FLYTO_ROS2_MAP_FRAME", "map")
+            return {
+                "poses": [_goal_pose(frame, x, y, yaw) for x, y, yaw in _route_poses(arguments)],
+                "behavior_tree": "",
+            }
         if capability_id in PLANNED_MOTIONS:
             yaw = float(arguments.get("yaw_radians", 0.0))
             frame = os.getenv("FLYTO_ROS2_MAP_FRAME", "map")
@@ -2824,7 +3185,7 @@ class RosbridgeROS2Backend(_ObservationState):
         of time is followed by the host's safe stop, which must not first wait
         out the observation timeout for a LiDAR that went quiet.
         """
-        kind, name, interface_type = DEFAULT_INTERFACES[capability_id]
+        kind, name, interface_type = _interface(capability_id)
         evidence: dict[str, Any] = {
             "adapter": "generic_ros2",
             "transport": "rosbridge",
@@ -2866,7 +3227,7 @@ class RosbridgeROS2Backend(_ObservationState):
             return self._results[call_id]
         if call_id not in self._active_actions:
 
-            _, action_name, action_type = DEFAULT_INTERFACES[capability_id]
+            _, action_name, action_type = _interface(capability_id)
             try:
                 self._send(
                     {
