@@ -2,6 +2,10 @@
 
 All notable project changes are recorded here.
 
+## 0.4.1 — 2026-10-05
+
+- An inflation escape goes by its waypoint and then the goal as two NavigateToPose legs. One NavigateThroughPoses goal was refused in under a second on TurtleBot3 Jazzy, whose stock configuration routes through-poses goals to a behaviour tree that reads a single goal, so the planner was handed an empty pose ("Failed to transform from  to map"). Measured live on the twin.
+
 ## 0.4.0 - 2026-10-04
 
 - `motion.navigate` checks, before sending a goal, whether the robot starts inside an obstacle's costmap inflation (`flyto_robotics/inflation_escape.py`): the nearest LiDAR return in the front sector against `inflation_radius + robot_radius`, both read from the live costmaps' parameters (`/local_costmap/local_costmap`, `/global_costmap/global_costmap` via the standard `get_parameters` service; footprint taken as its circumscribed radius; Nav2's defaults 0.55 m / 0.1 m when unreadable, reported as `costmap.source`).

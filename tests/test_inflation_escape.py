@@ -429,35 +429,28 @@ def test_free_start_sends_the_goal_unchanged():
     assert result.evidence["navigation_escape"]["pinned"] is False
 
 
-def test_pinned_start_backs_off_then_routes_through_the_waypoint_to_the_real_goal():
-    backend = EscapeBackend(OBSERVED)
+def test_pinned_start_backs_off_then_goes_by_the_waypoint_to_the_real_goal():
+    # The through-poses action is available, as on TurtleBot3 Jazzy, and is
+    # still not used: there its behaviour tree read no goal and the planner was
+    # handed an empty pose, refusing the route in under a second.
+    backend = EscapeBackend(OBSERVED, through=True)
     result = navigate(make(backend))
     assert result.outcome == OUTCOME_COMPLETED and result.call_id == "nav-1"
-    (backoff_id, backoff_cap, backoff_args), (route_id, route_cap, route_args) = backend.calls
-    assert (backoff_id, backoff_cap) == ("nav-1:escape-backoff", "motion.retreat")
-    assert backoff_args["distance_m"] == pytest.approx(0.20, abs=0.01)
-    # The original goal stays the final pose, under the call's own id.
-    assert (route_id, route_cap) == ("nav-1", NAVIGATE_THROUGH)
-    assert (route_args["x"], route_args["y"]) == (1.20, 0.0)
-    (waypoint,) = route_args["waypoints"]
-    assert abs(waypoint["y"]) > 0.20 + 0.1
-    escape_evidence = result.evidence["navigation_escape"]
-    assert escape_evidence["decision"] == "escape"
-    assert escape_evidence["costmap"]["inflation_radius_m"] == 0.5
-    assert [leg["leg"] for leg in escape_evidence["legs"]] == ["backoff", "through_poses"]
-    assert result.evidence["navigation_target"]["x"] == 1.20
-
-
-def test_without_navigate_through_poses_the_legs_are_sequential():
-    backend = EscapeBackend(OBSERVED, through=False)
-    result = navigate(make(backend))
-    assert result.outcome == OUTCOME_COMPLETED
     assert [(call, cap) for call, cap, _ in backend.calls] == [
         ("nav-1:escape-backoff", "motion.retreat"),
         ("nav-1:escape-waypoint", "motion.navigate"),
         ("nav-1", "motion.navigate"),
     ]
+    assert backend.calls[0][2]["distance_m"] == pytest.approx(0.20, abs=0.01)
+    waypoint = backend.calls[1][2]
+    assert abs(waypoint["y"]) > 0.20 + 0.1
+    # The original goal stays the final pose, under the call's own id.
     assert backend.calls[-1][2] == {"x": 1.20, "y": 0.0}
+    escape_evidence = result.evidence["navigation_escape"]
+    assert escape_evidence["decision"] == "escape"
+    assert escape_evidence["costmap"]["inflation_radius_m"] == 0.5
+    assert [leg["leg"] for leg in escape_evidence["legs"]] == ["backoff", "waypoint", "goal"]
+    assert result.evidence["navigation_target"]["x"] == 1.20
 
 
 def test_no_escape_room_refuses_before_any_motion():
@@ -484,7 +477,7 @@ def test_without_a_backup_action_the_escape_is_lateral_only():
     backend = EscapeBackend(OBSERVED, retreat=False)
     result = navigate(make(backend))
     assert result.outcome == OUTCOME_COMPLETED
-    assert [cap for _, cap, _ in backend.calls] == [NAVIGATE_THROUGH]
+    assert [cap for _, cap, _ in backend.calls] == ["motion.navigate", "motion.navigate"]
     assert result.evidence["navigation_escape"]["backoff_m"] == 0.0
 
 
