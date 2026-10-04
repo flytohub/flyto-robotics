@@ -1456,33 +1456,26 @@ class GenericROS2Adapter:
             if result.outcome != OUTCOME_COMPLETED:
                 return ended("backoff", result)
             legs.append({"leg": "backoff", "outcome": result.outcome})
-        through = getattr(self.backend, "action_available", None)
-        if callable(through) and through(NAVIGATE_THROUGH):
-            if call_id in self._cancelled_escapes:
-                return ended("route", CallResult(call_id, OUTCOME_CANCELLED, detail="cancelled"))
-            result = self.backend.invoke(
-                call_id=call_id,
-                capability_id=NAVIGATE_THROUGH,
-                arguments={**dict(target), "waypoints": [waypoint]},
-                deadline_seconds=max(0.0, deadline - time.monotonic()),
-            )
-            legs.append({"leg": "through_poses", "outcome": result.outcome})
-        else:
-            result = self._escape_leg(
-                call_id, f"{call_id}:escape-waypoint", "motion.navigate", waypoint, deadline
-            )
-            if result.outcome != OUTCOME_COMPLETED:
-                return ended("waypoint", result)
-            legs.append({"leg": "waypoint", "outcome": result.outcome})
-            if call_id in self._cancelled_escapes:
-                return ended("goal", CallResult(call_id, OUTCOME_CANCELLED, detail="cancelled"))
-            result = self.backend.invoke(
-                call_id=call_id,
-                capability_id="motion.navigate",
-                arguments=target,
-                deadline_seconds=max(0.0, deadline - time.monotonic()),
-            )
-            legs.append({"leg": "goal", "outcome": result.outcome})
+        # Two NavigateToPose legs, not one NavigateThroughPoses goal: a stock
+        # Nav2 configuration can route through-poses goals to a behaviour tree
+        # that only reads a single goal (TurtleBot3 Jazzy did: the planner got an
+        # empty pose and the goal was refused in under a second), while
+        # NavigateToPose is served by every Nav2.
+        result = self._escape_leg(
+            call_id, f"{call_id}:escape-waypoint", "motion.navigate", waypoint, deadline
+        )
+        if result.outcome != OUTCOME_COMPLETED:
+            return ended("waypoint", result)
+        legs.append({"leg": "waypoint", "outcome": result.outcome})
+        if call_id in self._cancelled_escapes:
+            return ended("goal", CallResult(call_id, OUTCOME_CANCELLED, detail="cancelled"))
+        result = self.backend.invoke(
+            call_id=call_id,
+            capability_id="motion.navigate",
+            arguments=target,
+            deadline_seconds=max(0.0, deadline - time.monotonic()),
+        )
+        legs.append({"leg": "goal", "outcome": result.outcome})
         return CallResult(
             result.call_id,
             result.outcome,
