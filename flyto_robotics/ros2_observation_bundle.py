@@ -28,6 +28,8 @@ _FIELDS = {
     "map_tf_available",
     "snapshot",
 }
+# Additive fields: absent when the robot cannot report them.
+_OPTIONAL_FIELDS = {"map_pose"}
 _PHASES = {"preflight", "before", "after", "post_stop"}
 _MODES = {"simulation", "hardware"}
 _ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,191}$")
@@ -51,8 +53,14 @@ def build_ros2_observation_bundle(
     camera: Mapping[str, Any] | None,
     map_tf_available: bool,
     observed_at: datetime | None = None,
+    map_pose: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Build one content-addressed observation without exposing ROS graph details."""
+    """Build one content-addressed observation without exposing ROS graph details.
+
+    ``map_pose`` is the same robot pose in the map frame, present only while a
+    fresh map->odom transform exists. It is additive: a bundle without one
+    carries no ``map_pose`` key, so its content address is what it was.
+    """
 
     timestamp = _utc(observed_at or datetime.now(timezone.utc), "observed_at")
     payload: dict[str, Any] = {
@@ -69,6 +77,8 @@ def build_ros2_observation_bundle(
         "camera": dict(camera) if camera is not None else None,
         "map_tf_available": map_tf_available,
     }
+    if map_pose is not None:
+        payload["map_pose"] = dict(map_pose)
     observation_seed = _snapshot(payload)
     payload["observation_id"] = f"obs-{observation_seed[:24]}"
     payload["snapshot"] = _snapshot(payload)
@@ -80,7 +90,7 @@ def parse_ros2_observation_bundle(value: Any) -> dict[str, Any]:
 
     if not isinstance(value, Mapping):
         raise Ros2ObservationError("observation bundle must be an object")
-    if set(value) != _FIELDS:
+    if not _FIELDS <= set(value) <= _FIELDS | _OPTIONAL_FIELDS:
         raise Ros2ObservationError("observation bundle fields do not match the contract")
     if value["contract_version"] != ROS2_OBSERVATION_BUNDLE_VERSION:
         raise Ros2ObservationError("observation bundle version is unsupported")
@@ -110,6 +120,12 @@ def parse_ros2_observation_bundle(value: Any) -> dict[str, Any]:
         _camera(value["camera"])
     if type(value["map_tf_available"]) is not bool:
         raise Ros2ObservationError("map_tf_available must be boolean")
+    if "map_pose" in value:
+        _pose(value["map_pose"])
+        if value["map_pose"]["frame"] != "map":
+            raise Ros2ObservationError("map_pose must be in the map frame")
+        if value["map_tf_available"] is not True:
+            raise Ros2ObservationError("map_pose requires a fresh map transform")
 
     if (
         value["pose"] is None
