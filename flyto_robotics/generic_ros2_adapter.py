@@ -40,6 +40,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Protocol
 
 from . import adapter_contract as decl
+from . import map_frame as map_frame_module
 from . import motion_outcome, provider_evidence
 from .adapter_contract import (
     OUTCOME_CANCELLED,
@@ -399,6 +400,10 @@ class _ObservationState:
         self._camera_seen_at: float | None = None
         self._camera_calibration_snapshot: str | None = None
         self._map_tf_seen_at: float | None = None
+        # The latest map->odom transform as (x, y, yaw), when localization
+        # published one with its values; composed with odometry into the
+        # robot's map pose (see map_frame).
+        self._map_from_odom: tuple[float, float, float] | None = None
         # When this connection started listening: a robot never heard from
         # since then has been silent for as long as it has been listening.
         self._listening_since = time.monotonic()
@@ -430,6 +435,7 @@ class _ObservationState:
                     if isinstance(value, (int, float))
                 },
                 start_pose=snapshot.get("pose"),
+                start_map_pose=snapshot.get("map_pose"),
                 started_at=time.monotonic(),
                 collision_now=self._collision_state,
             )
@@ -485,6 +491,7 @@ class _ObservationState:
             status=status,
             result_values=result_values,
             end_pose=snapshot.get("pose"),
+            end_map_pose=snapshot.get("map_pose"),
             range_observation=snapshot.get("range"),
             clearance_floor_m=_clearance_floor(),
             ended_at=time.monotonic(),
@@ -584,6 +591,7 @@ class _ObservationState:
             self._range_seen_at = None
             self._camera_seen_at = None
             self._map_tf_seen_at = None
+            self._map_from_odom = None
             self._listening_since = time.monotonic()
             self._heard_kinds.clear()
             self._last_heard_at = None
@@ -676,6 +684,15 @@ class _ObservationState:
         with self._condition:
             return self._snapshot()
 
+    def _store_map_transform(
+        self, transform: tuple[float, float, float] | None, observed: float
+    ) -> None:
+        """Record a map->odom transform; called under ``self._condition``."""
+        self._map_tf_seen_at = observed
+        self._map_from_odom = transform
+        self._heard("map_transform", observed)
+        self._condition.notify_all()
+
     def _snapshot(self) -> dict[str, Any]:
         now = time.monotonic()
         max_age = _max_observation_age()
@@ -683,12 +700,22 @@ class _ObservationState:
         def fresh(seen_at: float | None) -> bool:
             return seen_at is not None and now - seen_at <= max_age
 
+        pose = (
+            dict(self._pose)
+            if self._pose is not None and fresh(self._pose_seen_at)
+            else None
+        )
+        # The same pose in the map frame, only while localization's transform
+        # is fresh too: a stale correction would place the robot somewhere it
+        # was. Odometry stays the pose motion is judged on.
+        map_pose = (
+            map_frame_module.compose(self._map_from_odom, pose)
+            if pose is not None and fresh(self._map_tf_seen_at)
+            else None
+        )
         return {
-            "pose": (
-                dict(self._pose)
-                if self._pose is not None and fresh(self._pose_seen_at)
-                else None
-            ),
+            "pose": pose,
+            "map_pose": map_pose,
             "range": (
                 {
                     "minimum_range_m": self._minimum_range,
@@ -1188,6 +1215,7 @@ class GenericROS2Adapter:
                 phase=phase,
                 execution_id=execution_id,
                 pose=observation.get("pose"),
+                map_pose=observation.get("map_pose"),
                 range_observation=range_observation,
                 camera=observation.get("camera"),
                 map_tf_available=bool(observation.get("map_tf_available", False)),
@@ -1587,15 +1615,22 @@ class RclpyROS2Backend(_ObservationState):
     def _on_tf(self, message: Any) -> None:
         map_frame = os.getenv("FLYTO_ROS2_MAP_FRAME", "map")
         odom_frame = os.getenv("FLYTO_ROS2_ODOM_FRAME", "odom")
-        if any(
-            item.header.frame_id == map_frame and item.child_frame_id == odom_frame
-            for item in message.transforms
-        ):
+        for item in message.transforms:
+            if item.header.frame_id != map_frame or item.child_frame_id != odom_frame:
+                continue
+            transform = getattr(item, "transform", None)
+            planar = (
+                map_frame_module.planar_transform(
+                    getattr(transform, "translation", None),
+                    getattr(transform, "rotation", None),
+                )
+                if transform is not None
+                else None
+            )
             observed = time.monotonic()
             with self._condition:
-                self._map_tf_seen_at = observed
-                self._heard("map_transform", observed)
-                self._condition.notify_all()
+                self._store_map_transform(planar, observed)
+            return
 
     def _await_graph(self) -> None:
         """Wait, on a new node only, until DDS discovery has reached the robot.
@@ -1670,6 +1705,10 @@ class RclpyROS2Backend(_ObservationState):
         }
         if self._pose is not None:
             evidence["odom"] = dict(self._pose)
+        with self._condition:
+            map_pose = self._snapshot().get("map_pose")
+        if map_pose is not None:
+            evidence["map_pose"] = map_pose
         if self._minimum_range is not None:
             evidence["minimum_range_m"] = self._minimum_range
         return evidence
@@ -2229,9 +2268,15 @@ class RosbridgeROS2Backend(_ObservationState):
                 header.get("frame_id") == map_frame
                 and item.get("child_frame_id") == odom_frame
             ):
-                self._map_tf_seen_at = observed
-                self._heard("map_transform", observed)
-                self._condition.notify_all()
+                transform = item.get("transform")
+                planar = (
+                    map_frame_module.planar_transform(
+                        transform.get("translation"), transform.get("rotation")
+                    )
+                    if isinstance(transform, Mapping)
+                    else None
+                )
+                self._store_map_transform(planar, observed)
                 return
 
     def _forget_graph(self) -> None:
@@ -2592,6 +2637,8 @@ class RosbridgeROS2Backend(_ObservationState):
                 observation = self._snapshot()
         if observation.get("pose") is not None:
             evidence["odom"] = dict(observation["pose"])
+        if observation.get("map_pose") is not None:
+            evidence["map_pose"] = dict(observation["map_pose"])
         range_observation = observation.get("range")
         if isinstance(range_observation, Mapping):
             evidence["minimum_range_m"] = range_observation["minimum_range_m"]

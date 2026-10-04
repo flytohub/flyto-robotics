@@ -223,6 +223,11 @@ def recovery_context(
         "start_pose": summary.get("start_pose"),
         "final_pose": summary.get("final_pose"),
     }
+    # Where it started and stopped in the map frame, when localization was up:
+    # the frame a navigation goal to the original end is written in.
+    for key in ("start_map_pose", "final_map_pose"):
+        if isinstance(summary.get(key), Mapping):
+            context[key] = dict(summary[key])
     if isinstance(sweep, Mapping):
         context["sweep"] = dict(sweep)
     return context
