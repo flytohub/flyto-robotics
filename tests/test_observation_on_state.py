@@ -871,7 +871,7 @@ def test_a_rosbridge_stop_publishes_first_and_forgets_the_old_goal(no_sleep):
     sent: list[str] = []
     backend._topic_types = {"/cmd_vel": "geometry_msgs/msg/Twist"}
     backend._send = lambda payload: sent.append(payload["op"])
-    backend._wait_for = lambda *_args: None  # the cancel goes unanswered
+    backend._wait_for = lambda *_args, **_kwargs: None  # the cancel goes unanswered
     backend._active_actions["old-call"] = "/drive_on_heading"
 
     assert backend.safe_stop("stop-1").outcome == "completed"

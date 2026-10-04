@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 import queue
+import threading
 import time
 
 import pytest
@@ -359,3 +360,71 @@ def test_a_failed_motion_returns_without_waiting_for_quiet_sensors(monkeypatch):
     assert result.outcome == OUTCOME_FAILED
     assert result.evidence["motion_outcome"]["reason"] == mo.REASON_ABORTED_BY_SERVER
     assert elapsed < 1.5
+
+
+def test_a_safe_stop_for_one_job_does_not_strand_another_jobs_goal(monkeypatch):
+    """Two jobs share one rosbridge connection (2026-10-04 twin incident).
+
+    Job A's goal ended; A's safe stop cancels every active goal, including
+    job B's. The cancel used to *take* B's result while confirming it, so B's
+    invoke() never saw its goal end and waited out its whole deadline
+    ("ROS 2 action still running"). B must learn it was cancelled at once.
+    """
+
+    def silent(_call_id):  # the goal runs until something cancels it
+        return [odom(0.1)]
+
+    backend, socket = backend_with(silent, monkeypatch)
+    backend._topic_types = {"/cmd_vel": "geometry_msgs/msg/Twist"}
+    outcome: dict = {}
+    real_wait = backend._wait_for
+
+    def late_wait(*args, **kwargs):
+        # Job B's thread reaches its wait after the safe stop's cancel has
+        # read the result: the order that stranded B on the twin.
+        if threading.current_thread() is worker and args[1] == "nav-b":
+            time.sleep(0.5)
+        return real_wait(*args, **kwargs)
+
+    backend._wait_for = late_wait
+
+    def job_b():
+        started = time.monotonic()
+        outcome["result"] = backend.invoke(
+            call_id="nav-b", capability_id="motion.advance",
+            arguments={"distance_m": 0.3}, deadline_seconds=4.0,
+        )
+        outcome["seconds"] = time.monotonic() - started
+
+    worker = threading.Thread(target=job_b)
+    worker.start()
+    deadline = time.monotonic() + 2.0
+    while "nav-b" not in backend._active_actions and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert "nav-b" in backend._active_actions
+
+    stop = backend.safe_stop("stop-a")
+    worker.join(timeout=8.0)
+    backend.disconnect()
+
+    assert stop.outcome == OUTCOME_COMPLETED
+    assert not worker.is_alive()
+    assert outcome["result"].outcome == OUTCOME_CANCELLED
+    assert outcome["seconds"] < 2.0
+    assert [m["id"] for m in socket.sent if m.get("op") == "cancel_action_goal"] == ["nav-b"]
+
+
+def test_cancel_with_nobody_waiting_keeps_no_result_behind(monkeypatch):
+    backend, _ = backend_with(lambda _id: [odom(0.05)], monkeypatch)
+    backend._topic_types = {"/cmd_vel": "geometry_msgs/msg/Twist"}
+    timed_out = backend.invoke(call_id="adv-9", capability_id="motion.advance",
+                               arguments={"distance_m": 0.3}, deadline_seconds=0.2)
+    assert timed_out.outcome == OUTCOME_TIMEOUT
+    cancelled = backend.cancel("adv-9")
+    assert cancelled.outcome == OUTCOME_CANCELLED
+    assert "adv-9" not in backend._action_results
+    # A later invoke for the same call answers from the kept result.
+    again = backend.invoke(call_id="adv-9", capability_id="motion.advance",
+                           arguments={"distance_m": 0.3}, deadline_seconds=0.2)
+    assert again.outcome == OUTCOME_CANCELLED
+    backend.disconnect()

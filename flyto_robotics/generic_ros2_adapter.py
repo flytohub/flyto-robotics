@@ -1984,6 +1984,11 @@ class RosbridgeROS2Backend(_ObservationState):
         self._capture_waits: dict[str, str] = {}
         self._captured: dict[str, dict[str, Any]] = {}
         self._active_actions: dict[str, str] = {}
+        # Call ids whose invoke() is waiting for the goal's result right now.
+        # A cancel or a safe stop on this shared connection reads the result
+        # without taking it, so the call that sent the goal still learns how
+        # it ended instead of waiting out its whole deadline.
+        self._result_waiters: dict[str, int] = {}
         self._results: dict[str, CallResult] = {}
         self._counts: dict[str, int] = {}
         self._advertised_topics: set[tuple[str, str]] = set()
@@ -2284,6 +2289,8 @@ class RosbridgeROS2Backend(_ObservationState):
         store: dict[str, dict[str, Any]],
         identifier: str,
         deadline: float,
+        *,
+        consume: bool = True,
     ) -> dict[str, Any] | None:
         with self._condition:
             while identifier not in store and self._connected:
@@ -2291,6 +2298,8 @@ class RosbridgeROS2Backend(_ObservationState):
                 if remaining <= 0:
                     return None
                 self._condition.wait(timeout=remaining)
+            if not consume:
+                return store.get(identifier)
             return store.pop(identifier, None)
 
     def _service(
@@ -2625,11 +2634,21 @@ class RosbridgeROS2Backend(_ObservationState):
             self._count_execution(call_id)
             self._begin_track(call_id, capability_id, arguments)
 
-        result_message = self._wait_for(
-            self._action_results,
-            call_id,
-            time.monotonic() + deadline_seconds,
-        )
+        with self._condition:
+            self._result_waiters[call_id] = self._result_waiters.get(call_id, 0) + 1
+        try:
+            result_message = self._wait_for(
+                self._action_results,
+                call_id,
+                time.monotonic() + deadline_seconds,
+            )
+        finally:
+            with self._condition:
+                remaining = self._result_waiters.get(call_id, 0) - 1
+                if remaining > 0:
+                    self._result_waiters[call_id] = remaining
+                else:
+                    self._result_waiters.pop(call_id, None)
         if result_message is None:
             return _motion_result(
                 call_id,
@@ -2729,11 +2748,20 @@ class RosbridgeROS2Backend(_ObservationState):
             }
         )
         stopped = self._publish_zero()
+        # Read, not take: the goal may belong to another job on this shared
+        # connection (a safe stop cancels every active goal), and its own
+        # invoke() must still receive the result.
         result_message = self._wait_for(
             self._action_results,
             call_id,
             time.monotonic() + 3.0,
+            consume=False,
         )
+        confirmed = result_message is not None and int(result_message.get("status", 0)) == 5
+        with self._condition:
+            if confirmed and call_id not in self._result_waiters:
+                # Nobody is waiting; the kept CANCELLED result answers later.
+                self._action_results.pop(call_id, None)
         if (
             result_message is None
             or int(result_message.get("status", 0)) != 5
