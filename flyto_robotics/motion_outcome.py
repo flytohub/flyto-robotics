@@ -124,6 +124,9 @@ class MotionTrack:
     # "nothing" (type 0) once a stop clears. The monitor publishes only on a
     # change, so a track is seeded with the state in force when it began.
     collision_now: tuple[int, str] | None = None
+    # The start pose in the map frame, when localization was up (additive;
+    # ``start_pose`` stays the odometry pose the motion is judged on).
+    start_map_pose: Mapping[str, Any] | None = None
 
     def __post_init__(self) -> None:
         seeded = self.collision_now
@@ -198,6 +201,14 @@ def _pose(pose: Mapping[str, Any] | None) -> dict[str, float] | None:
         }
     except (KeyError, TypeError, ValueError):
         return None
+
+
+def _map_pose(pose: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    """A map-frame pose as reported, or None for any other frame."""
+    if not isinstance(pose, Mapping) or pose.get("frame") != "map":
+        return None
+    planar = _pose(pose)
+    return {"frame": "map", **planar} if planar is not None else None
 
 
 def _error_code(result_values: Mapping[str, Any] | None) -> int | None:
@@ -275,8 +286,15 @@ def summarize(
     range_observation: Mapping[str, Any] | None,
     clearance_floor_m: float,
     ended_at: float,
+    end_map_pose: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """The record a motion result carries; ``status`` None means still running."""
+    """The record a motion result carries; ``status`` None means still running.
+
+    ``start_pose`` and ``final_pose`` are odometry. When localization was up
+    the same poses in the map frame are added as ``start_map_pose`` and
+    ``final_map_pose``, so a reader can name the place in the frame a
+    navigation goal is given in.
+    """
     start = _pose(track.start_pose)
     end = _pose(end_pose)
     minimum_at_stop: float | None = None
@@ -325,6 +343,12 @@ def summarize(
         ),
         "clearance_floor_m": round(clearance_floor_m, 3),
     }
+    start_map = _map_pose(track.start_map_pose)
+    end_map = _map_pose(end_map_pose)
+    if start_map is not None:
+        summary["start_map_pose"] = start_map
+    if end_map is not None:
+        summary["final_map_pose"] = end_map
     if ahead is not None:
         summary["travel_direction_range_m"] = round(ahead, 3)
     if error_code is not None:
@@ -392,5 +416,11 @@ def describe(summary: Mapping[str, Any]) -> str:
         parts.append(
             f"nearest LiDAR return at stop {nearest:.3f} m "
             f"(floor {summary.get('clearance_floor_m', 0.0):.3f} m)"
+        )
+    stopped = summary.get("final_map_pose")
+    if isinstance(stopped, Mapping):
+        parts.append(
+            f"stopped at map x={stopped['x']:.3f} y={stopped['y']:.3f} "
+            f"yaw={stopped['yaw']:.3f}"
         )
     return "; ".join(parts)
