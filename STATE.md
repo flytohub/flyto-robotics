@@ -1,5 +1,13 @@
 # Flyto2 Robotics State
 
+## Inflation escape before navigation (2026-10-04, 0.4.0)
+
+`motion.navigate` backs out of an obstacle's inflation (back-off plus one
+lateral waypoint, then the original goal) or refuses with `no_escape_room`.
+Verified with ray-cast scans and fake backends only; costmap parameter names
+and values were read from the twin's live Nav2. Not yet run on the twin or the
+robot: whether Nav2 then reaches the original target is unproven.
+
 ## Named places on the execution host (2026-10-04, 0.3.0)
 
 `places.list` / `places.mark` and `motion.navigate(place=...)` work against a
