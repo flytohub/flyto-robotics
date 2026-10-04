@@ -2,8 +2,12 @@
 
 All notable project changes are recorded here.
 
-## Unreleased
+## 0.3.0 - 2026-10-04
 
+- Named places, kept on the execution host (`flyto_robotics/places.py`, `flyto.robot-places.v1`): one JSON file per robot per map (`FLYTO_ROS2_PLACES_FILE`, or `places/<resource>/<FLYTO_ROS2_MAP_ID>.json` under `FLYTO_ROBOTICS_DATA_DIR` / the XDG data dir), entries `{name, frame: "map", x, y, yaw}`, free-text names unique per map ignoring case, atomic writes, and a file that cannot be read exactly as written refused (never overwritten).
+- `places.list` (read-only; `evidence.places` and a `places` `application/json` artifact) and `places.mark` (saves the current `map_pose`; the same call id returns its first result) are declared beside `motion.navigate`.
+- `motion.navigate` takes `place` as an alternative to `x`/`y`; exactly one target, and `yaw_radians` only with `x`/`y`. An unknown place is refused with `evidence.known_places`, an unreadable file is refused, both before any motion. Every navigate result carries `evidence.navigation_target`; a call by place carries `evidence.resolved_arguments`. A resumed call keeps the target it was first sent to. `navigate`'s declaration schema hash changes (x and y are no longer individually required); declarations without text arguments hash as before.
+- `DeclaredArgument.max_length` for text arguments (emitted only when set); JSON schemas give text `minLength`/`maxLength`.
 - The Generic ROS 2 adapter reports the robot's pose in the map frame (`map_pose`) beside odometry whenever a fresh map->odom transform exists: in observation bundles (optional field), motion evidence, `motion_outcome` (`start_map_pose`, `final_map_pose`, and the operator line) and `recovery_context`. Odometry fields and motion verification are unchanged.
 
 ## 0.2.0 - 2026-10-04

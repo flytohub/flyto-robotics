@@ -1,5 +1,26 @@
 # Decisions
 
+## 2026-10-04 — Named places live on the execution host; the adapter resolves them
+
+Places are kept beside the adapter, on the computer that drives the robot: the
+robot runs stock ROS 2 with no Flyto2 code, and Flyto2 Cloud stores no
+location list. The SLAM map itself stays on the robot, so the host keys its
+places by a map id it is configured with (`FLYTO_ROS2_MAP_ID`).
+
+The adapter is the one resolver. A navigation by place is resolved before any
+precondition or motion, and the goal handed to Nav2 is the stored pose. The
+result says which coordinates that was (`resolved_arguments`), because the
+pack's arrival evidence reads its target from the call's arguments
+(`distance_to` over `x`/`y`): a host judges a call by place against the
+authored arguments overlaid with `resolved_arguments`. Without that overlay
+the arrival is unprovable (no `x`), which fails closed.
+
+Rejected: resolving in the pack's step and dispatching `x`/`y` (a second
+resolver, and hosts that dispatch the capability directly would bypass it);
+silently replacing the request's arguments (the request would no longer say
+what was asked); recovering a corrupt file by starting empty (marking a place
+would then destroy every place that could not be read).
+
 ## 2026-10-04 — Clarification: flyto-robotics is the host-side driver layer
 
 This clarifies the 2026-09-21 and 2026-09-22 entries; it reverses neither.
