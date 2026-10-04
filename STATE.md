@@ -1,5 +1,13 @@
 # Flyto2 Robotics State
 
+## Named places on the execution host (2026-10-04, 0.3.0)
+
+`places.list` / `places.mark` and `motion.navigate(place=...)` work against a
+host-side places file (`flyto_robotics/places.py`). Verified with fakes and
+temporary files only: no twin, no physical robot. Hosts (Cloud, Desktop) do
+not yet judge a call by place against `resolved_arguments`, so its arrival
+evidence is unprovable there until they do.
+
 ## Host-side driver layer, module pack join (2026-10-04)
 
 `flyto-robotics` is the host-side driver layer next to the equipment (execution

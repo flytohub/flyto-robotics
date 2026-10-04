@@ -157,6 +157,31 @@ Besides the motions above it declares, when the graph has them:
 | --- | --- | --- |
 | `vision.observe` | `sensor_msgs/msg/CompressedImage` (`FLYTO_ROS2_CAMERA_COMPRESSED_TOPIC`, default `/camera/image_raw/compressed`) | returns one JPEG frame, at most 2 MB |
 | `sensing.map` | `nav_msgs/msg/OccupancyGrid` (`FLYTO_ROS2_MAP_TOPIC`, default `/map`) | returns the latched map's cells, size, resolution and origin |
+| `places.list` | host file (declared with `motion.navigate`) | returns the named places saved for this robot's map, as `evidence.places` and a `places` JSON artifact |
+| `places.mark` | host file + `map_pose` | saves the robot's current map-frame pose (the same `map_pose` navigation arrival is judged on) under a name |
+
+### Named places
+
+Places are kept on the execution host, never on the robot and never in Flyto2
+Cloud (`flyto_robotics/places.py`). Each is `{name, frame: "map", x, y, yaw}`;
+names are free text (any script, 1 to 64 characters, no control characters),
+unique per map ignoring case. Every write is atomic. A file that cannot be
+read exactly as written is refused, never guessed at or overwritten.
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `FLYTO_ROS2_PLACES_FILE` | unset | the places file, named outright |
+| `FLYTO_ROBOTICS_DATA_DIR` | `$XDG_DATA_HOME/flyto-robotics` (`~/.local/share/...`; `%LOCALAPPDATA%\flyto-robotics` on Windows) | data dir; the file is `places/<resource id>/<map id>.json` under it |
+| `FLYTO_ROS2_MAP_ID` | `default` | which map the places belong to. The SLAM map lives on the robot, so the host names it; change it when the map is rebuilt |
+
+`motion.navigate` takes either `x` and `y` (with optional `yaw_radians`) or
+`place`, never both. A place is resolved before anything moves: an unknown
+name is refused with `evidence.known_places`, and an unreadable file is
+refused, both with no motion. The goal sent to Nav2 is the stored pose,
+heading included. Every navigate result carries `evidence.navigation_target`
+(the goal, in the map frame); a call by place also carries
+`evidence.resolved_arguments` (`x`, `y`, `yaw_radians`), the arguments its
+arrival evidence is judged against.
 
 Captures are read-only, read one message through rosbridge (the rclpy backend
 refuses them), and return it as `evidence.capture`; the execution host keeps
