@@ -54,6 +54,13 @@
       ]
     },
     "map_tf_available": {"type": "boolean"},
+    "map_pose": {
+      "description": "Optional. The same robot pose in the map frame, present only while a fresh map->odom transform exists.",
+      "allOf": [
+        {"$ref": "#/$defs/pose"},
+        {"properties": {"frame": {"const": "map"}}}
+      ]
+    },
     "snapshot": {"$ref": "#/$defs/digest"}
   },
   "$defs": {

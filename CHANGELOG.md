@@ -4,6 +4,8 @@ All notable project changes are recorded here.
 
 ## Unreleased
 
+- The Generic ROS 2 adapter reports the robot's pose in the map frame (`map_pose`) beside odometry whenever a fresh map->odom transform exists: in observation bundles (optional field), motion evidence, `motion_outcome` (`start_map_pose`, `final_map_pose`, and the operator line) and `recovery_context`. Odometry fields and motion verification are unchanged.
+
 ## 0.2.0 - 2026-10-04
 
 - Results carry the evidence the adapter can vouch for, additively: `evidence_items` (`passage.clearance` against the adapter's own 0.35 m floor; `robot.arrival` with odometry before, after and once settled, in the exact shape Desktop projected), `artifacts` (photo JPEG, occupancy map drawn as JPEG with Pillow or PNG without, in the `flyto.capability-contract.v1` transport) beside the legacy `capture`, and `recovery_context` on a failed or timed-out advance/retreat (reason, travelled vs requested along the heading, ranges, sweep at the stop).
