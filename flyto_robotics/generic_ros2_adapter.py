@@ -41,7 +41,7 @@ from typing import Any, Callable, Protocol
 
 from . import adapter_contract as decl
 from . import map_frame as map_frame_module
-from . import motion_outcome, provider_evidence
+from . import motion_outcome, places, provider_evidence
 from .adapter_contract import (
     OUTCOME_CANCELLED,
     OUTCOME_COMPLETED,
@@ -306,14 +306,43 @@ DEFAULT_INTERFACES = {
     ),
 }
 
+# Named places, kept on this host (``places.py``), not on the robot.
+PLACES_LIST = "places.list"
+PLACES_MARK = "places.mark"
+PLACE_CAPABILITIES = frozenset({PLACES_LIST, PLACES_MARK})
+# Declared beside navigation: a place is a navigation target on the same map.
+HOST_INTERFACES = {
+    PLACES_LIST: ("host", "places", places.PLACES_SCHEMA),
+    PLACES_MARK: ("host", "places", places.PLACES_SCHEMA),
+}
+# What a places.list result returns as a contract artifact.
+PLACES_ARTIFACT_KIND = "places"
+PLACES_MEDIA_TYPE = "application/json"
+
+
+def _place_argument(description: str, *, required: bool) -> decl.DeclaredArgument:
+    return decl.DeclaredArgument(
+        "place",
+        type="string",
+        required=required,
+        description=description,
+        max_length=places.MAX_NAME_LENGTH,
+    )
+
+
 ARGUMENTS: Mapping[str, tuple[decl.DeclaredArgument, ...]] = {
+    # Either x and y, or a place saved on this host; never both. A place
+    # carries its own heading, so yaw_radians goes only with x and y.
     "motion.navigate": (
-        decl.DeclaredArgument("x", required=True, minimum=-1000.0, maximum=1000.0, unit="m"),
-        decl.DeclaredArgument("y", required=True, minimum=-1000.0, maximum=1000.0, unit="m"),
+        decl.DeclaredArgument("x", required=False, minimum=-1000.0, maximum=1000.0, unit="m"),
+        decl.DeclaredArgument("y", required=False, minimum=-1000.0, maximum=1000.0, unit="m"),
         decl.DeclaredArgument(
             "yaw_radians", required=False, minimum=-math.pi, maximum=math.pi, unit="rad"
         ),
+        _place_argument("A named place on this map, instead of x and y", required=False),
     ),
+    PLACES_LIST: (),
+    PLACES_MARK: (_place_argument("The name to save the current position under", required=True),),
     "vision.observe": (),
     "sensing.map": (),
     "motion.advance": (
@@ -791,17 +820,32 @@ def _remember(store: dict[str, Any], key: str, value: Any) -> None:
         store.pop(next(iter(store)))
 
 
-def _numeric_arguments(capability_id: str, arguments: Mapping[str, Any]) -> dict[str, float]:
+def _navigate_target(arguments: Mapping[str, Any]) -> None:
+    """Exactly one target: a place, or x and y (with an optional heading)."""
+    has_place = "place" in arguments
+    if has_place and ("x" in arguments or "y" in arguments):
+        raise ValueError("give either place or x and y, not both")
+    if has_place and "yaw_radians" in arguments:
+        raise ValueError("a place carries its own heading; yaw_radians goes only with x and y")
+    if not has_place and not ("x" in arguments and "y" in arguments):
+        raise ValueError("x and y are required unless a place is named")
+
+
+def _numeric_arguments(capability_id: str, arguments: Mapping[str, Any]) -> dict[str, Any]:
+    """The call's arguments validated against ``ARGUMENTS``; text is a place name."""
     schemas = {item.name: item for item in ARGUMENTS[capability_id]}
     unknown = set(arguments) - set(schemas)
     if unknown:
         raise ValueError(f"unsupported arguments: {sorted(unknown)}")
-    result: dict[str, float] = {}
+    result: dict[str, Any] = {}
     for name, schema in schemas.items():
         raw = arguments.get(name)
         if raw is None:
             if schema.required:
                 raise ValueError(f"{name} is required")
+            continue
+        if schema.type == "string":
+            result[name] = places.normalize_name(raw)
             continue
         if isinstance(raw, bool) or not isinstance(raw, (int, float)):
             raise ValueError(f"{name} must be a number")
@@ -813,7 +857,44 @@ def _numeric_arguments(capability_id: str, arguments: Mapping[str, Any]) -> dict
         if schema.maximum is not None and value > schema.maximum:
             raise ValueError(f"{name} is above the declared maximum")
         result[name] = value
+    if capability_id == "motion.navigate":
+        _navigate_target(result)
     return result
+
+
+def _target_evidence(target: Mapping[str, Any], place: places.Place | None) -> dict[str, Any]:
+    """Where a navigation was sent, and, for a place, the coordinates it stood for.
+
+    ``navigation_target`` is the goal handed to Nav2, in the map frame.
+    ``resolved_arguments`` exists only for a call by place: the x, y and
+    yaw_radians the place resolved to, which are the arguments the arrival
+    evidence (``distance_to`` on ``map_pose``) is judged against.
+    """
+    evidence: dict[str, Any] = {
+        "navigation_target": {
+            "frame": places.MAP_FRAME,
+            "x": target["x"],
+            "y": target["y"],
+            **({"yaw_radians": target["yaw_radians"]} if "yaw_radians" in target else {}),
+            **({"place": place.name} if place is not None else {}),
+        }
+    }
+    if place is not None:
+        evidence["resolved_arguments"] = {
+            "x": place.x,
+            "y": place.y,
+            "yaw_radians": place.yaw,
+        }
+    return evidence
+
+
+def _places_artifact(listed: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    raw = json.dumps(list(listed), ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    return {
+        "kind": PLACES_ARTIFACT_KIND,
+        "media_type": PLACES_MEDIA_TYPE,
+        "data_base64": base64.b64encode(raw).decode("ascii"),
+    }
 
 
 def _message_fields(message: Any) -> dict[str, Any] | None:
@@ -890,18 +971,34 @@ class GenericROS2Adapter:
     # subscribe and first-sample wait a fresh adapter pays on every job.
     supports_shared_connection = True
 
-    def __init__(self, *, backend: ROS2Backend | None = None, resource_id: str = ""):
+    def __init__(
+        self,
+        *,
+        backend: ROS2Backend | None = None,
+        resource_id: str = "",
+        places_store: places.PlacesStore | None = None,
+    ):
         self.backend = backend or RclpyROS2Backend()
         self.resource_id = (
             resource_id
             or os.getenv("FLYTO_ROS2_RESOURCE_ID", "").strip()
             or "ros2-resource"
         )
+        self._places_store = places_store
         self._declared: set[str] = set()
         # Per call id, bounded like the backend's results: the observation
-        # before a motion, and the result once evidence was added to it.
+        # before a motion, the result once evidence was added to it, and the
+        # place a navigation resolved to (a resumed call keeps its target even
+        # if the place was moved since).
         self._before: dict[str, Any] = {}
         self._provided: dict[str, CallResult] = {}
+        self._targets: dict[str, places.Place] = {}
+
+    @property
+    def places_store(self) -> places.PlacesStore:
+        if self._places_store is None:
+            self._places_store = places.PlacesStore.for_resource(self.resource_id)
+        return self._places_store
 
     def _discovered_capabilities(self) -> set[str]:
         interfaces = {(item.kind, item.name, item.type) for item in self.backend.discover()}
@@ -918,6 +1015,8 @@ class GenericROS2Adapter:
                 continue
             if (kind, name, interface_type) in interfaces:
                 available.add(capability_id)
+        if "motion.navigate" in available:
+            available |= PLACE_CAPABILITIES
         return available
 
     def describe(self) -> Sequence[decl.CapabilityDeclaration]:
@@ -925,7 +1024,9 @@ class GenericROS2Adapter:
         self._declared = available
         declarations: list[decl.CapabilityDeclaration] = []
         for capability_id in sorted(available):
-            kind, name, interface_type = DEFAULT_INTERFACES[capability_id]
+            kind, name, interface_type = (
+                HOST_INTERFACES.get(capability_id) or DEFAULT_INTERFACES[capability_id]
+            )
             basis = _safety_basis()
             observations = (
                 f"{os.getenv('FLYTO_ROS2_ODOM_TOPIC', '/odom')}:{ODOM_TYPE}",
@@ -935,6 +1036,13 @@ class GenericROS2Adapter:
                 if basis == SAFETY_BASIS_OPERATOR
                 else f"{os.getenv('FLYTO_ROS2_SCAN_TOPIC', '/scan')}:{SCAN_TYPE}",
             )
+            if capability_id == PLACES_LIST:
+                observations = ()
+            elif capability_id == PLACES_MARK:
+                observations = (
+                    f"{os.getenv('FLYTO_ROS2_ODOM_TOPIC', '/odom')}:{ODOM_TYPE}",
+                    f"{os.getenv('FLYTO_ROS2_TF_TOPIC', '/tf')}:tf2_msgs/msg/TFMessage",
+                )
             declarations.append(
                 decl.declare(
                     capability_id=capability_id,
@@ -1057,6 +1165,19 @@ class GenericROS2Adapter:
             arguments = _numeric_arguments(request.capability_id, request.arguments)
         except ValueError as error:
             return CallResult(request.call_id, OUTCOME_REFUSED, detail=str(error))
+        if request.capability_id == PLACES_LIST:
+            return self._list_places(request.call_id)
+        if request.capability_id == PLACES_MARK:
+            return self._mark_place(request.call_id, arguments["place"])
+        place: places.Place | None = None
+        if request.capability_id == "motion.navigate" and "place" in arguments:
+            # Resolved before anything else: an unknown place, or a places
+            # file that cannot be read, refuses with no motion.
+            resolved = self._resolve_target(request.call_id, arguments["place"])
+            if isinstance(resolved, CallResult):
+                return resolved
+            place = resolved
+            arguments = {"x": place.x, "y": place.y, "yaw_radians": place.yaw}
         if request.capability_id in CAPTURE_CAPABILITIES:
             capture = getattr(self.backend, "capture", None)
             if not callable(capture):
@@ -1102,7 +1223,90 @@ class GenericROS2Adapter:
             arguments=arguments,
             deadline_seconds=float(request.deadline_seconds),
         )
+        if request.capability_id == "motion.navigate":
+            result = CallResult(
+                result.call_id,
+                result.outcome,
+                evidence={**dict(result.evidence or {}), **_target_evidence(arguments, place)},
+                detail=result.detail,
+            )
         return self._with_motion_evidence(request.capability_id, before, result)
+
+    # -- named places (host-side, never on the robot) ---------------------------
+
+    def _resolve_target(self, call_id: str, name: str) -> places.Place | CallResult:
+        kept = self._targets.get(call_id)
+        if kept is not None:
+            return kept
+        try:
+            place = self.places_store.resolve(name)
+        except places.UnknownPlace as error:
+            return CallResult(
+                call_id,
+                OUTCOME_REFUSED,
+                evidence={"known_places": list(error.known)},
+                detail=str(error),
+            )
+        except places.PlacesStoreError as error:
+            return CallResult(call_id, OUTCOME_REFUSED, detail=str(error))
+        _remember(self._targets, call_id, place)
+        return place
+
+    def _list_places(self, call_id: str) -> CallResult:
+        try:
+            listed = [place.to_dict() for place in self.places_store.list()]
+        except places.PlacesStoreError as error:
+            return CallResult(call_id, OUTCOME_FAILED, detail=str(error))
+        return CallResult(
+            call_id,
+            OUTCOME_COMPLETED,
+            evidence={
+                "places": listed,
+                "map_id": self.places_store.map_id,
+                "artifacts": [_places_artifact(listed)],
+            },
+            detail=f"{len(listed)} places on map {self.places_store.map_id}",
+        )
+
+    def _mark_place(self, call_id: str, name: str) -> CallResult:
+        """Save the robot's map-frame pose (the same ``map_pose`` arrival reads)."""
+        kept = self._provided.get(call_id)
+        if kept is not None:
+            # The same call again: its result, not the pose it is at now.
+            return kept
+        observation = self.backend.observation(required=(REQUIRE_POSE, REQUIRE_MAP_TF))
+        map_pose = observation.get("map_pose")
+        if not isinstance(map_pose, Mapping):
+            return CallResult(
+                call_id,
+                OUTCOME_REFUSED,
+                detail=(
+                    "a fresh map-frame pose is required to mark a place; "
+                    "localization's map-to-odom transform is missing or stale"
+                ),
+            )
+        try:
+            place, replaced = self.places_store.mark(name, map_pose)
+        except places.PlacesError as error:
+            return CallResult(call_id, OUTCOME_REFUSED, detail=str(error))
+        except places.PlacesStoreError as error:
+            return CallResult(call_id, OUTCOME_FAILED, detail=str(error))
+        except OSError as error:
+            return CallResult(
+                call_id, OUTCOME_FAILED, detail=f"could not save the place: {type(error).__name__}"
+            )
+        result = CallResult(
+            call_id,
+            OUTCOME_COMPLETED,
+            evidence={
+                "place": place.to_dict(),
+                "replaced": replaced.to_dict() if replaced is not None else None,
+                "map_id": self.places_store.map_id,
+            },
+            detail=f"saved {place.name!r} on map {self.places_store.map_id}",
+        )
+        _remember(self._provided, call_id, result)
+        return result
 
     def _observe_quietly(self, phase: str, call_id: str) -> dict[str, Any] | None:
         """An observation for evidence; a reading that fails costs the item, not the call."""
