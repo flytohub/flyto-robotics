@@ -70,7 +70,7 @@ def discoverable(monkeypatch):
 
 def test_the_pack_name_is_the_flyto_modules_entry_point_of_the_robotics_pack():
     assert provider.MODULE_PACK == "robotics"
-    assert provider.MANIFEST_EXTENSIONS == ("module_pack",)
+    assert provider.MANIFEST_EXTENSIONS == ("module_pack", "transport")
 
 
 def test_a_host_that_asks_nothing_gets_the_released_manifest_shape(discoverable):
@@ -103,7 +103,7 @@ def test_unknown_or_malformed_requests_add_nothing(discoverable, requested):
 def test_the_discoverer_advertises_the_pack_and_its_extensions():
     discover = provider.discover_resource_manifests
     assert discover.module_pack == "robotics"
-    assert discover.manifest_extensions == ("module_pack",)
+    assert discover.manifest_extensions == ("module_pack", "transport")
     assert discover.watch is provider.watch_resources
 
 
