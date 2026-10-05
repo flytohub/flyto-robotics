@@ -43,7 +43,14 @@ from typing import Any, Callable, Protocol
 
 from . import adapter_contract as decl
 from . import braking_envelope as braking
-from . import inflation_escape, motion_outcome, places, provider_evidence
+from . import (
+    inflation_escape,
+    motion_outcome,
+    path_clearance,
+    places,
+    provider_evidence,
+    ssh_transport,
+)
 from . import map_frame as map_frame_module
 from .adapter_contract import (
     OUTCOME_CANCELLED,
@@ -131,6 +138,22 @@ def _default_requirements() -> tuple[str, ...]:
 def _clearance_floor() -> float:
     """The LiDAR clearance a motion needs to start; never below 0.1 m."""
     return max(0.1, float(os.getenv("FLYTO_ROS2_MIN_CLEARANCE_M", "0.35")))
+
+
+def _rotation_radius() -> float:
+    """The footprint's radius about its centre of rotation (Nav2 ``robot_radius``)."""
+    return _env_metres(
+        "FLYTO_ROS2_ROBOT_RADIUS_M", inflation_escape.DEFAULT_ROBOT_RADIUS_M, low=0.0, high=1.0
+    )
+
+
+def _motion_kind(capability_id: str) -> str | None:
+    """What a capability's motion sweeps, from its contract (not its name)."""
+    try:
+        kind = decl.capability_metadata(capability_id).get("motion_kind")
+    except KeyError:
+        return None
+    return str(kind) if kind else None
 
 
 # -- the braking guard ---------------------------------------------------------------
@@ -1435,8 +1458,18 @@ class GenericROS2Adapter:
         backend: ROS2Backend | None = None,
         resource_id: str = "",
         places_store: places.PlacesStore | None = None,
+        transport: ssh_transport.ManagedTunnel | None = None,
     ):
         self.backend = backend or RclpyROS2Backend()
+        # The managed SSH forward this adapter holds (None: the link is direct,
+        # rclpy or a rosbridge URL someone else keeps reachable). Calls are
+        # admitted through its gate, shared by every adapter on that forward,
+        # so an operator refresh can stop them all before tearing it down.
+        self.transport = transport
+        self._transport_held = transport is not None
+        self._gate = transport.calls if transport is not None else ssh_transport.CallGate()
+        self._refresh_lock = threading.Lock()
+        self._last_link_error = ""
         self.resource_id = (
             resource_id
             or os.getenv("FLYTO_ROS2_RESOURCE_ID", "").strip()
@@ -1522,7 +1555,10 @@ class GenericROS2Adapter:
             )
         return declarations
 
-    def _motion_preflight(self, capability_id: str) -> str | None:
+    def _motion_preflight(
+        self, capability_id: str
+    ) -> str | path_clearance.PathClearance | None:
+        """None when the motion may start; else why not (a refused path with evidence)."""
         if capability_id == "motion.halt":
             return None
         mismatch = self._deployment_mismatch()
@@ -1557,12 +1593,16 @@ class GenericROS2Adapter:
             clearance = float(range_observation["minimum_range_m"])
         except (KeyError, TypeError, ValueError):
             return "valid LiDAR clearance is required before motion"
-        required_clearance = _clearance_floor()
-        if clearance < required_clearance:
-            return (
-                f"LiDAR clearance {clearance:.3f}m is below the "
-                f"{required_clearance:.3f}m motion safety minimum"
-            )
+        # The floor applies along the path this motion sweeps, not all around.
+        verdict = path_clearance.judge(
+            range_observation.get("sweep"),
+            motion_kind=_motion_kind(capability_id),
+            floor_m=_clearance_floor(),
+            radius_m=_rotation_radius(),
+            minimum_range_m=clearance,
+        )
+        if not verdict.admitted:
+            return verdict
         if capability_id in PLANNED_MOTIONS and not observation.get(
             "map_tf_available", False
         ):
@@ -1658,6 +1698,20 @@ class GenericROS2Adapter:
                 OUTCOME_REFUSED,
                 detail="a presence connection never commands the robot",
             )
+        unavailable = self._link_unavailable(request.call_id)
+        if unavailable is not None:
+            return unavailable
+        token = (self, request.call_id)
+        if not self._gate.begin(token, actuating=_actuates(request.capability_id)):
+            return self._transport_unavailable(
+                request.call_id, "the connection is being refreshed by an operator"
+            )
+        try:
+            return self._invoke(request)
+        finally:
+            self._gate.end(token)
+
+    def _invoke(self, request: CallRequest) -> CallResult:
         if request.capability_id not in self._declared:
             # A capability the graph did not have before may have appeared
             # since (Nav2 starts once the map loads), so a miss re-reads it.
@@ -1709,6 +1763,13 @@ class GenericROS2Adapter:
             if bound_error is not None:
                 return CallResult(request.call_id, OUTCOME_REFUSED, detail=bound_error)
         preflight_error = self._motion_preflight(request.capability_id)
+        if isinstance(preflight_error, path_clearance.PathClearance):
+            return CallResult(
+                request.call_id,
+                OUTCOME_REFUSED,
+                evidence=preflight_error.evidence(),
+                detail=preflight_error.describe(),
+            )
         if preflight_error is not None:
             return CallResult(
                 request.call_id,
@@ -2126,6 +2187,9 @@ class GenericROS2Adapter:
         )
 
     def cancel(self, call_id: str) -> CallResult:
+        down = self._transport_down(call_id)
+        if down is not None:
+            return down
         leg = self._escape_legs.get(call_id)
         if call_id in self._escapes:
             # Between legs nothing is active; this stops the next one starting.
@@ -2139,7 +2203,11 @@ class GenericROS2Adapter:
         return self.backend.cancel(call_id)
 
     def safe_stop(self) -> CallResult:
-        return self.backend.safe_stop(f"safe-stop-{time.monotonic_ns()}")
+        call_id = f"safe-stop-{time.monotonic_ns()}"
+        down = self._transport_down(call_id)
+        if down is not None:
+            return down
+        return self.backend.safe_stop(call_id)
 
     def execution_count(self, call_id: str) -> int:
         return self.backend.execution_count(call_id)
@@ -2231,11 +2299,199 @@ class GenericROS2Adapter:
         method = getattr(self.backend, "disconnect", None)
         if callable(method):
             method()
+        # The forward goes with the last adapter holding it (after its linger).
+        if self.transport is not None and self._transport_held:
+            self._transport_held = False
+            self.transport.release()
 
-    def reconnect(self) -> None:
+    def reopen(self) -> None:
+        """Reconnect the ROS link only; the forward is left as it is."""
+        self._hold_transport()
         method = getattr(self.backend, "reconnect", None)
         if callable(method):
             method()
+
+    def _hold_transport(self) -> None:
+        if self.transport is None or self._transport_held:
+            return
+        held = ssh_transport.acquire(self.transport.config)
+        if held is not None:
+            self.transport = held
+            self._gate = held.calls
+            self._transport_held = True
+
+    def _drop_link(self) -> None:
+        method = getattr(self.backend, "disconnect", None)
+        if callable(method):
+            method()
+
+    # -- the link: state, fail-fast admission, operator refresh ------------------------
+
+    def transport_status(self) -> dict[str, Any]:
+        """``{transport, state, since, attempts, last_error, ..., rosbridge_ok}``.
+
+        ``state`` is ``connected``, ``reconnecting`` or ``failed`` (``stopped``
+        once the forward is torn down). Without a managed forward the state is
+        the ROS link's own.
+        """
+        connected = self.connected
+        if self.transport is not None:
+            status = self.transport.status()
+        else:
+            status = {
+                "transport": "direct",
+                "state": ssh_transport.STATE_CONNECTED if connected else ssh_transport.STATE_FAILED,
+                "since": None,
+                "attempts": 0,
+                "last_error": "" if connected else self._last_link_error,
+                "error_code": "",
+                "accepting_calls": not self._gate.paused,
+            }
+        return {**status, "rosbridge_ok": connected}
+
+    def _transport_unavailable(
+        self, call_id: str, why: str = "", *, outcome: str = OUTCOME_REFUSED
+    ) -> CallResult:
+        status = self.transport_status()
+        detail = (
+            ssh_transport.unavailable_detail(status)
+            if self.transport is not None
+            else f"{ssh_transport.REASON_TRANSPORT_UNAVAILABLE}: nothing was sent"
+        )
+        return CallResult(
+            call_id,
+            outcome,
+            evidence={
+                "reason_code": ssh_transport.REASON_TRANSPORT_UNAVAILABLE,
+                "transport": status,
+            },
+            detail=f"{detail}; {why}" if why else detail,
+        )
+
+    def _transport_down(self, call_id: str) -> CallResult | None:
+        if self.transport is None or self.transport.connected:
+            return None
+        return self._transport_unavailable(call_id, outcome=OUTCOME_FAILED)
+
+    def _link_unavailable(self, call_id: str) -> CallResult | None:
+        """Fail fast while the forward is down; reopen a ROS link it dropped."""
+        if self.transport is None:
+            return None
+        if not self.transport.connected:
+            return self._transport_unavailable(call_id)
+        if self.connected:
+            return None
+        try:
+            self.reopen()
+        except Exception as error:  # noqa: BLE001 - rosbridge is not answering yet
+            self._last_link_error = f"{type(error).__name__}: {error}"[:300]
+            return self._transport_unavailable(
+                call_id, f"rosbridge did not answer through the forward ({self._last_link_error})"
+            )
+        if not self.connected:
+            return self._transport_unavailable(call_id, "rosbridge did not answer")
+        return None
+
+    def reconnect(self) -> dict[str, Any]:
+        """Operator refresh: stop what moves, rebuild the link, re-read the robot.
+
+        Pauses new calls on this link; if an actuating call is in flight, safe
+        stops it (zero velocity, then cancel) and refuses the refresh when the
+        stop is not confirmed. Otherwise tears the SSH forward (if managed)
+        and the rosbridge session down now, establishes both again (the robot
+        host resolved anew), and re-reads the ROS graph and
+        ``served_identity()``. Returns ``transport_status()`` plus
+        ``refused``, ``rosbridge_ok``, ``topics_seen``, ``served_identity`` /
+        ``served_identity_error``, ``rosbridge_error`` and ``safe_stop``
+        (None when nothing was moving). Never raises; calling it again
+        repeats the refresh.
+        """
+        with self._refresh_lock:
+            stop = self._stop_actuating_calls()
+            try:
+                if stop is not None and not stop["confirmed"]:
+                    return {
+                        **self.transport_status(),
+                        "refused": True,
+                        "reason_code": "safe_stop_unconfirmed",
+                        "detail": "an actuating call is in flight and its safe stop was not "
+                        "confirmed; the link was left as it is",
+                        "topics_seen": None,
+                        "served_identity": None,
+                        "safe_stop": stop,
+                    }
+                return {**self._refresh_link(), "refused": False, "safe_stop": stop}
+            finally:
+                self._gate.resume()
+
+    def _stop_actuating_calls(self) -> dict[str, Any] | None:
+        tokens = self._gate.pause()
+        if not tokens:
+            return None
+        adapters = list({id(adapter): adapter for adapter, _call in tokens}.values())
+        outcomes: list[dict[str, str]] = []
+        for adapter in adapters:
+            try:
+                result = adapter.safe_stop()
+                outcomes.append({"outcome": result.outcome, "detail": result.detail[:200]})
+            except Exception as error:  # noqa: BLE001 - an unconfirmed stop is the answer
+                outcomes.append({"outcome": OUTCOME_FAILED, "detail": str(error)[:200]})
+        return {
+            "calls": sorted(str(call) for _adapter, call in tokens),
+            "outcomes": outcomes,
+            "confirmed": all(item["outcome"] == OUTCOME_COMPLETED for item in outcomes),
+        }
+
+    def _refresh_link(self) -> dict[str, Any]:
+        self._hold_transport()
+        if self.transport is not None:
+            self.transport.refresh()
+            self.transport.wait_connected(self.transport.config.ready_timeout_s)
+        rosbridge_error = ""
+        if self.transport is None or self.transport.connected:
+            try:
+                self.reopen()
+            except Exception as error:  # noqa: BLE001 - reported, never raised
+                rosbridge_error = f"{type(error).__name__}: {error}"[:300]
+        else:
+            self._drop_link()
+            rosbridge_error = "the SSH forward is not up"
+        self._last_link_error = rosbridge_error
+        topics_seen: int | None = None
+        identity: dict[str, str] | None = None
+        identity_error = ""
+        if self.connected:
+            try:
+                self._invalidate_discovery()
+                self.describe()
+                topics_seen = sum(item.kind == "topic" for item in self.backend.discover())
+                identity = self.served_identity()
+            except Exception as error:  # noqa: BLE001 - reported, never raised
+                identity_error = f"{type(error).__name__}: {error}"[:300]
+        return {
+            **self.transport_status(),
+            "rosbridge_error": rosbridge_error,
+            "topics_seen": topics_seen,
+            "served_identity": identity,
+            "served_identity_error": identity_error,
+        }
+
+
+def _actuates(capability_id: str) -> bool:
+    if capability_id == "motion.halt":
+        return False
+    try:
+        return decl.capability_metadata(capability_id).get("safety_class") == "movement"
+    except KeyError:
+        return False
+
+
+def configured_transport() -> str:
+    """``FLYTO_ROS2_TRANSPORT``; a configured SSH forward implies rosbridge."""
+    explicit = os.getenv("FLYTO_ROS2_TRANSPORT", "").strip().lower()
+    if explicit:
+        return explicit
+    return "rosbridge" if os.getenv(ssh_transport.ENV_HOST, "").strip() else "rclpy"
 
 
 class RclpyROS2Backend(_ObservationState):
@@ -3061,6 +3317,8 @@ class RosbridgeROS2Backend(_ObservationState):
         url: str | None = None,
         connection_factory: Callable[[str], Any] | None = None,
         presence_only: bool = False,
+        url_source: Callable[[], str] | None = None,
+        connect: bool = True,
     ) -> None:
         # A presence connection only watches whether the robot is there and
         # what its graph offers (odometry, Nav2 lifecycle events); it never
@@ -3072,6 +3330,9 @@ class RosbridgeROS2Backend(_ObservationState):
             or os.getenv("FLYTO_ROSBRIDGE_URL", "").strip()
             or "ws://127.0.0.1:19090"
         )
+        # A managed SSH forward may move its local port between attempts: the
+        # URL is read again on every reconnect.
+        self._url_source = url_source
         self._connection_factory = connection_factory or self._connect
         self._ws: Any | None = None
         self._connected = False
@@ -3106,7 +3367,8 @@ class RosbridgeROS2Backend(_ObservationState):
         self._counts: dict[str, int] = {}
         self._advertised_topics: set[tuple[str, str]] = set()
         self._topic_types: dict[str, str] = {}
-        self.reconnect()
+        if connect:
+            self.reconnect()
 
     @staticmethod
     def _connect(url: str) -> Any:
@@ -4145,6 +4407,8 @@ class RosbridgeROS2Backend(_ObservationState):
         self._active_actions.clear()
         self._goal_ids.clear()
         self._goal_owner.clear()
+        if self._url_source is not None:
+            self._url = self._url_source()
         websocket = self._connection_factory(self._url)
         keepalive_stop = threading.Event()
         with self._condition:
@@ -4201,12 +4465,41 @@ def build(resource_id: str = "", *, presence_only: bool = False) -> GenericROS2A
     ``presence_only`` builds a light connection that only watches whether the
     robot is there and what its graph offers; it refuses every command.
     """
-    transport = os.getenv("FLYTO_ROS2_TRANSPORT", "rclpy").strip().lower()
+    transport = configured_transport()
     if transport == "rclpy":
+        if os.getenv(ssh_transport.ENV_HOST, "").strip():
+            raise ssh_transport.TransportConfigError(
+                f"{ssh_transport.ENV_HOST} carries rosbridge, not DDS; "
+                "set FLYTO_ROS2_TRANSPORT=rosbridge (or unset it)"
+            )
         backend: ROS2Backend = RclpyROS2Backend(presence_only=presence_only)
     elif transport == "rosbridge":
+        tunnel = ssh_transport.acquire()
+        if tunnel is not None:
+            return _build_over_forward(tunnel, resource_id, presence_only=presence_only)
         backend = RosbridgeROS2Backend(presence_only=presence_only)
     else:
         raise RuntimeError(f"unsupported ROS 2 transport: {transport}")
     return GenericROS2Adapter(backend=backend, resource_id=resource_id)
+
+
+def _build_over_forward(
+    tunnel: ssh_transport.ManagedTunnel, resource_id: str, *, presence_only: bool
+) -> GenericROS2Adapter:
+    """An adapter on the managed forward, holding it until it is disconnected.
+
+    The first build waits for the forward to come up once; a build while it is
+    down after that returns at once, and the adapter's calls fail fast with
+    ``transport_unavailable`` until it is back.
+    """
+    try:
+        backend = RosbridgeROS2Backend(
+            presence_only=presence_only,
+            url_source=tunnel.url,
+            connect=tunnel.wait_first(),
+        )
+    except Exception:
+        tunnel.release()
+        raise
+    return GenericROS2Adapter(backend=backend, resource_id=resource_id, transport=tunnel)
 
