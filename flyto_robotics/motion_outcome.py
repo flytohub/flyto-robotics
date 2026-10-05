@@ -17,11 +17,15 @@ Reasons, most specific first:
     the goal was cancelled (an operator stop, a halt, a cancel).
 ``obstacle_blocked``
     the action reported a collision ahead, the collision monitor stopped the
-    base for one of its polygons, or the nearest return the way the robot was
-    going is inside the clearance floor at the stop.
+    base for one of its polygons, this adapter's braking guard stopped a
+    straight drive because the room left to the clearance floor was inside
+    its stopping distance, or the nearest return the way the robot was going
+    is inside the clearance floor at the stop.
 ``sensor_stale``
     the collision monitor stopped the base because its sensor data was late
-    or missing ("invalid source"); the robot was not blocked, it was blind.
+    or missing ("invalid source"), or this adapter's braking guard stopped a
+    straight drive because the LiDAR went quiet or unreadable; the robot was
+    not blocked, it was blind.
 ``timeout``
     the action's time allowance, the controller, the planner, or this
     adapter's own deadline ran out.
@@ -43,6 +47,8 @@ import math
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
+
+from . import braking_envelope as braking
 
 REASON_COMPLETED = "completed"
 REASON_CANCELLED = "cancelled"
@@ -99,6 +105,11 @@ COLLISION_LIMIT = 4
 # because a source is late or missing rather than because of a polygon.
 INVALID_SOURCE = "invalid source"
 
+# Why the adapter's braking guard stopped a straight drive.
+GUARD_TRIP_CLEARANCE = "clearance"  # room to the floor inside the stopping distance
+GUARD_TRIP_BLIND = "blind"  # the sweep could not be read
+GUARD_TRIP_STALE = "stale"  # no scan arrived in time
+
 # Half-width of the wedge read the way the robot was travelling.
 TRAVEL_HALF_WIDTH_RAD = math.radians(20.0)
 # Where that wedge is centred, relative to the robot's heading.
@@ -127,6 +138,10 @@ class MotionTrack:
     # The start pose in the map frame, when localization was up (additive;
     # ``start_pose`` stays the odometry pose the motion is judged on).
     start_map_pose: Mapping[str, Any] | None = None
+    # The braking guard's record for a straight drive: the profile it used,
+    # the speed it commanded and why it stopped the robot, if it did (see
+    # braking_envelope). Filled in by the adapter when the track ends.
+    braking: dict[str, Any] | None = None
 
     def __post_init__(self) -> None:
         seeded = self.collision_now
@@ -190,6 +205,44 @@ def travel_range(capability_id: str, sweep: Mapping[str, Any] | None) -> float |
     return nearest
 
 
+def stop_clearance(
+    capability_id: str,
+    sweep: Mapping[str, Any] | None,
+    minimum_range_m: float | None,
+    floor_m: float,
+) -> dict[str, Any] | None:
+    """Where the nearest return was when the robot stopped, and whether the floor held.
+
+    The nearest return is reported with its bearing from the way the robot
+    was going (from its heading for a turn or a planned path), so a wall
+    passed alongside is never read as one driven into. ``floor_held`` is the
+    honest answer over every direction; ``travel_floor_held`` only over the
+    path a straight drive would have continued along.
+    """
+    if minimum_range_m is None and not isinstance(sweep, Mapping):
+        return None
+    direction = _TRAVEL_DIRECTION.get(capability_id, 0.0)
+    nearest = braking.nearest_return(sweep, direction)
+    record: dict[str, Any] = {"floor_m": round(floor_m, 3)}
+    overall = minimum_range_m
+    if nearest is not None:
+        beam, bearing = nearest
+        record["nearest_bearing_rad"] = round(bearing, 4)
+        record["nearest_direction"] = braking.direction_label(bearing)
+        overall = beam if overall is None else min(overall, beam)
+    if overall is not None:
+        record["nearest_range_m"] = round(overall, 3)
+        record["floor_held"] = overall >= floor_m
+    if capability_id in _TRAVEL_DIRECTION:
+        room = braking.room_to_floor(sweep, direction, floor_m)
+        if room is not None:
+            record["travel_room_to_floor_m"] = (
+                round(room.room_m, 3) if math.isfinite(room.room_m) else None
+            )
+            record["travel_floor_held"] = room.room_m >= 0.0
+    return record
+
+
 def _pose(pose: Mapping[str, Any] | None) -> dict[str, float] | None:
     if not isinstance(pose, Mapping):
         return None
@@ -237,6 +290,7 @@ def _reason(
     collision_now: tuple[int, str] | None,
     stop_range: float | None,
     clearance_floor_m: float,
+    guard_trip: str | None = None,
 ) -> str:
     """Most specific first.
 
@@ -247,6 +301,13 @@ def _reason(
     """
     if status == STATUS_SUCCEEDED:
         return REASON_COMPLETED
+    # The adapter's own braking guard cancels the goal it stops, so the
+    # server reports "canceled"; the guard's cause is the reason, not the
+    # cancel it used to act on it.
+    if guard_trip == GUARD_TRIP_CLEARANCE:
+        return REASON_OBSTACLE_BLOCKED
+    if guard_trip in (GUARD_TRIP_BLIND, GUARD_TRIP_STALE):
+        return REASON_SENSOR_STALE
     if status == STATUS_CANCELED:
         return REASON_CANCELLED
     if error_code in _COLLISION_CODES:
@@ -315,6 +376,7 @@ def summarize(
     error_msg = ""
     if isinstance(result_values, Mapping):
         error_msg = str(result_values.get("error_msg") or "")[:200]
+    guard_trip = (track.braking or {}).get("tripped")
     reason = _reason(
         status=status,
         error_code=error_code,
@@ -322,6 +384,7 @@ def summarize(
         collision_now=track.collision_now,
         stop_range=stop_range,
         clearance_floor_m=clearance_floor_m,
+        guard_trip=guard_trip if isinstance(guard_trip, str) else None,
     )
     summary: dict[str, Any] = {
         "reason": reason,
@@ -351,6 +414,13 @@ def summarize(
         summary["final_map_pose"] = end_map
     if ahead is not None:
         summary["travel_direction_range_m"] = round(ahead, 3)
+    clearance = stop_clearance(
+        track.capability_id, sweep, minimum_at_stop, clearance_floor_m
+    )
+    if clearance is not None:
+        summary["stop_clearance"] = clearance
+    if track.braking:
+        summary["braking"] = dict(track.braking)
     if error_code is not None:
         summary["error_code"] = error_code
     if error_msg:
@@ -412,11 +482,33 @@ def describe(summary: Mapping[str, Any]) -> str:
             f"turned {turned:.3f}" + (f" of {wanted:.3f}" if wanted is not None else "") + " rad"
         )
     nearest = summary.get("minimum_range_at_stop_m")
+    clearance = summary.get("stop_clearance")
+    clearance = clearance if isinstance(clearance, Mapping) else {}
     if nearest is not None:
+        where = ""
+        bearing = clearance.get("nearest_bearing_rad")
+        if isinstance(bearing, (int, float)):
+            where = (
+                f" {clearance.get('nearest_direction')} "
+                f"({math.degrees(bearing):+.0f} deg from travel)"
+            )
+        held = clearance.get("floor_held")
+        verdict = "" if held is None else (", floor held" if held else ", floor NOT held")
         parts.append(
-            f"nearest LiDAR return at stop {nearest:.3f} m "
-            f"(floor {summary.get('clearance_floor_m', 0.0):.3f} m)"
+            f"nearest LiDAR return at stop {nearest:.3f} m{where} "
+            f"(floor {summary.get('clearance_floor_m', 0.0):.3f} m{verdict})"
         )
+    guard = summary.get("braking")
+    if isinstance(guard, Mapping) and guard.get("tripped"):
+        trip = guard.get("trip") if isinstance(guard.get("trip"), Mapping) else {}
+        if guard.get("tripped") == GUARD_TRIP_CLEARANCE and trip:
+            parts.append(
+                f"braking guard stopped at {trip.get('speed_mps', 0.0):.3f} m/s with "
+                f"{trip.get('room_m', 0.0):.3f} m to the floor "
+                f"(stopping distance {trip.get('stopping_distance_m', 0.0):.3f} m)"
+            )
+        else:
+            parts.append(f"braking guard stopped: LiDAR {guard.get('tripped')}")
     stopped = summary.get("final_map_pose")
     if isinstance(stopped, Mapping):
         parts.append(

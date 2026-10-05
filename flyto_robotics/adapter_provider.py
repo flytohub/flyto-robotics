@@ -13,7 +13,6 @@ import contextlib
 import importlib.util
 import json
 import os
-import re
 import socket
 import sys
 import threading
@@ -22,7 +21,12 @@ from datetime import datetime, timezone
 from typing import Any
 
 from . import adapter_contract as contract
-from .generic_ros2_adapter import SILENT_SECONDS, GenericROS2Adapter, build
+from .generic_ros2_adapter import (
+    SILENT_SECONDS,
+    GenericROS2Adapter,
+    build,
+    configured_resource_id,
+)
 
 ADAPTER_ID = "ros2.generic"
 PROVIDER_PROTOCOL = "flyto2.adapter-provider.v1"
@@ -50,23 +54,37 @@ def _extensions(requested: Iterable[str] | None) -> frozenset[str]:
     return frozenset(names) & frozenset(MANIFEST_EXTENSIONS)
 
 
-def _safe_fragment(value: str) -> str:
-    text = re.sub(r"[^A-Za-z0-9_.-]+", "-", str(value or "").strip())
-    return text.strip("-._")[:48] or "resource"
+class ResourceNotServed(RuntimeError):
+    """A host asked for an adapter for a resource this computer does not serve."""
 
 
 def _resource_identity() -> tuple[str, str]:
-    domain = os.getenv("ROS_DOMAIN_ID", "0").strip() or "0"
     hostname = socket.gethostname()
-    resource_id = (
-        os.getenv("FLYTO_ROS2_RESOURCE_ID", "").strip()
-        or f"ros2-{_safe_fragment(hostname)}-{_safe_fragment(domain)}"
-    )[:128]
+    resource_id = configured_resource_id()
     resource_name = (
         os.getenv("FLYTO_ROS2_RESOURCE_NAME", "").strip()
         or f"ROS 2 robot ({hostname})"
     )[:200]
     return resource_id, resource_name
+
+
+def _require_served(resource_id: str) -> str:
+    """The configured resource id, or a refusal naming both ids.
+
+    An adapter labels its results with the id it was built for, but its
+    transport reaches whatever this computer is wired to. Building one for
+    any other id would let a job for one resource (a simulated twin) run on
+    another (the physical robot) and be recorded as the first.
+    """
+    configured = configured_resource_id()
+    requested = str(resource_id or "").strip()
+    if requested != configured:
+        raise ResourceNotServed(
+            f"the {ADAPTER_ID} adapter on this computer serves {configured!r} "
+            f"(FLYTO_ROS2_RESOURCE_ID), not {requested or '(no resource id)'!r}; "
+            "refused rather than label it as another resource"
+        )
+    return configured
 
 
 def _manifest(
@@ -378,9 +396,12 @@ discover_resource_manifests.manifest_extensions = MANIFEST_EXTENSIONS  # type: i
 
 
 def build_adapter(resource_id: str) -> GenericROS2Adapter:
-    """Python entry point used by hosts that load adapters in-process."""
+    """Python entry point used by hosts that load adapters in-process.
 
-    return build(resource_id)
+    Refuses (``ResourceNotServed``) any id but the one configured here.
+    """
+
+    return build(_require_served(resource_id))
 
 
 def _response(request_id: Any, *, ok: bool, result: Any = None, error: str = "") -> dict[str, Any]:
@@ -403,6 +424,14 @@ def _serve(adapter_id: str, resource_id: str) -> int:
                 _response(None, ok=False, error=f"unsupported adapter: {adapter_id}"),
                 separators=(",", ":"),
             ),
+            flush=True,
+        )
+        return 2
+    try:
+        resource_id = _require_served(resource_id)
+    except ResourceNotServed as error:
+        print(
+            json.dumps(_response(None, ok=False, error=str(error)), separators=(",", ":")),
             flush=True,
         )
         return 2
@@ -462,6 +491,8 @@ def _serve(adapter_id: str, resource_id: str) -> int:
                             else None
                         ),
                     )
+                elif op == "served_identity":
+                    value = adapter.served_identity()
                 elif op == "describe":
                     value = _manifest(
                         adapter,
