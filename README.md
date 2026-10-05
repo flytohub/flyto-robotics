@@ -182,6 +182,66 @@ would move.
   disabled. A Flyto2 Cloud host asks it before every job and refuses unless
   both match what Cloud scored.
 
+### Reaching a loopback-bound robot: the managed SSH forward
+
+Everything the robot serves (rosbridge, camera) binds to `127.0.0.1` on the
+robot, so the SSH local forward is the transport, not a workaround. The
+adapter owns it (`flyto_robotics/ssh_transport.py`); nobody starts a tunnel
+by hand, and a robot reboot or a Wi-Fi drop is recovered on its own.
+
+| Variable | Meaning |
+| --- | --- |
+| `FLYTO_ROS2_SSH_HOST` | `[user@]host`, e.g. `ubuntu@flyto-robot.local`. Setting it turns the forward on and implies `FLYTO_ROS2_TRANSPORT=rosbridge` (an explicit `rclpy` is refused). |
+| `FLYTO_ROS2_SSH_IDENTITY` | optional private key (`-i`, `IdentitiesOnly=yes`) |
+| `FLYTO_ROS2_SSH_KNOWN_HOSTS` | optional known_hosts file (default: ssh's own) |
+| `FLYTO_ROS2_SSH_FORWARDS` | remote loopback ports by name, default `rosbridge=9090`; e.g. `rosbridge=9090,camera=8080`. `rosbridge` is always forwarded. |
+| `FLYTO_ROS2_SSH_LOCAL_PORTS` | optional pinned local ports, e.g. `rosbridge=19090`; otherwise an ephemeral `127.0.0.1` port |
+| `FLYTO_ROS2_SSH_READY_TIMEOUT_S` | how long the first build waits for the forward (10) |
+| `FLYTO_ROS2_SSH_LINGER_S` | how long the forward outlives its last adapter (30), so per-job adapters reuse it |
+
+`FLYTO_ROSBRIDGE_URL` is derived from the forward (`ws://127.0.0.1:<local>`);
+an explicit value that differs is refused rather than silently ignored.
+
+Security: `BatchMode=yes` with password and keyboard-interactive auth off
+(key only); `StrictHostKeyChecking=yes`, never `accept-new` — an unknown or
+changed host key is a `failed` state whose `last_error` names how to trust the
+robot once (`ssh-keyscan` compared with `ssh-keygen -lf` on the robot); every
+forward is `127.0.0.1 -> 127.0.0.1` and any other address on either side is
+refused; `-N` (no remote command). A private `ControlMaster` socket lets a
+restarted host stop a master a crashed one left holding the ports.
+
+Lifecycle: the adapter starts ssh (`ExitOnForwardFailure`, `ServerAliveInterval`),
+supervises it, re-resolves the host (mDNS) on every attempt and reconnects
+with exponential backoff and jitter (1 s doubling to 30 s, each delay drawn
+from its upper half). Host-key and authentication failures do not retry on
+their own; they wait for an operator `reconnect()`. The forward stops with
+the last adapter that holds it (after the linger) and when the process exits.
+
+While the forward is down every capability call fails fast — `refused`, with
+`evidence.reason_code: "transport_unavailable"` and `evidence.transport` —
+and nothing is sent; `safe_stop()` and `cancel()` return `failed` with the
+same evidence.
+
+Status: `GenericROS2Adapter.transport_status()` (process op
+`transport_status`; `adapter_provider.transport_status()`, also
+`discover_resource_manifests.transport_status`; manifest extension
+`transport` on request) returns
+`{transport, state: connected|reconnecting|failed|stopped, since, attempts,
+last_error, error_code, host, resolved_address, forwards, accepting_calls,
+rosbridge_ok}`. The presence watch notifies the host `transport_<state>` on
+every change and retries the robot at once when the forward returns.
+
+Operator refresh: `GenericROS2Adapter.reconnect()` (process op `reconnect`;
+`adapter_provider.reconnect_resource(resource_id)`, also
+`discover_resource_manifests.reconnect`) pauses new calls on the link, safe
+stops any actuating call in flight (zero velocity, then cancel) and refuses
+with `reason_code: "safe_stop_unconfirmed"` if that stop is not confirmed;
+otherwise tears the forward and the rosbridge session down, establishes both
+again, re-reads the graph and `served_identity()`, and returns the status
+above plus `refused`, `topics_seen`, `served_identity` /
+`served_identity_error`, `rosbridge_error` and `safe_stop`. It never raises
+and may be repeated.
+
 ### Named places
 
 Places are kept on the execution host, never on the robot and never in Flyto2
@@ -269,10 +329,28 @@ the execution host:
 
 | Value | Before a motion | Bounds |
 | --- | --- | --- |
-| `lidar_clearance` (default) | LiDAR clearance of at least `FLYTO_ROS2_MIN_CLEARANCE_M` (0.35 m) | the declared argument ranges |
+| `lidar_clearance` (default) | LiDAR clearance of at least `FLYTO_ROS2_MIN_CLEARANCE_M` (0.35 m) along the path the motion sweeps | the declared argument ranges |
 | `operator_present` | no LiDAR; odometry is still required so Cloud can verify the motion | 0.05 m/s and 0.3 m per advance or retreat; π/2 per turn, at Nav2's own rotation speed (Spin takes no speed); navigation refused |
 
-Under `lidar_clearance` the floor is checked once before a motion starts, and a
+The floor is checked before a motion starts along the path that motion
+sweeps (`flyto_robotics/path_clearance.py`), chosen by the capability
+contract's `motion_kind`, not its name:
+
+| `motion_kind` | Capability | Swept path | Starts when |
+| --- | --- | --- | --- |
+| `advance` / `retreat` | `motion.advance` / `motion.retreat` | corridor in the direction of travel: returns with `x > 0` and `abs(y) < floor + FLYTO_ROS2_ROBOT_RADIUS_M` (0.1) | the nearest of them is at least the floor away |
+| `rotate` | `motion.rotate` | the footprint turning in place, all around | every return is at least `floor + FLYTO_ROS2_ROBOT_RADIUS_M` away |
+| `planned` | `motion.navigate` | left to Nav2, the inflation escape and the in-motion guard | (not judged on a static distance) |
+
+A refusal carries `evidence.reason_code: "path_blocked"` and
+`evidence.path_clearance` (`motion_kind`, `shape`, `threshold_m`,
+`clearance_m`, `limiting_side`, `limiting_bearing_rad`, and `sectors`: the
+nearest return `ahead`, `left`, `behind`, `right`, `null` where there is
+none), and its detail names the side, e.g. `LiDAR clearance 0.334m behind on
+the retreat path is below the 0.350m motion safety minimum`. Without a sweep
+the nearest return in any direction is judged as before.
+
+Under `lidar_clearance` a
 straight drive (`motion.advance`, `motion.retreat`) is then guarded on every
 scan by its braking envelope (`flyto_robotics/braking_envelope.py`). A moving
 robot cannot stop where it is told to: it covers `v * t` before the stop takes

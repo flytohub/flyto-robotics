@@ -272,7 +272,7 @@ class FakeAdapter:
     def silent_seconds(self):
         return self.silent if self.connected else None
 
-    def reconnect(self) -> None:
+    def reopen(self) -> None:
         self.reconnects += 1
         if self.reconnect_error is not None:
             raise self.reconnect_error

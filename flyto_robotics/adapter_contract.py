@@ -36,6 +36,9 @@ _CAPABILITY_METADATA: Mapping[str, Mapping[str, Any]] = {
         "display_name": "Navigate",
         "description": "Travel to a map coordinate or resolved destination and arrive there",
         "safety_class": "movement",
+        # What the motion sweeps, for the clearance check before it starts
+        # (flyto_robotics.path_clearance.SWEPT_PATHS).
+        "motion_kind": "planned",
         "required_permissions": ("robot.motion",),
         "requires_safe_stop": True,
     },
@@ -76,6 +79,7 @@ _CAPABILITY_METADATA: Mapping[str, Mapping[str, Any]] = {
         "display_name": "Advance",
         "description": "Move forward by a bounded relative distance",
         "safety_class": "movement",
+        "motion_kind": "advance",
         "required_permissions": ("robot.motion",),
         "requires_safe_stop": True,
     },
@@ -83,6 +87,7 @@ _CAPABILITY_METADATA: Mapping[str, Mapping[str, Any]] = {
         "display_name": "Retreat",
         "description": "Move backward by a bounded relative distance",
         "safety_class": "movement",
+        "motion_kind": "retreat",
         "required_permissions": ("robot.motion",),
         "requires_safe_stop": True,
     },
@@ -90,6 +95,7 @@ _CAPABILITY_METADATA: Mapping[str, Mapping[str, Any]] = {
         "display_name": "Rotate",
         "description": "Rotate in place by a bounded angle",
         "safety_class": "movement",
+        "motion_kind": "rotate",
         "required_permissions": ("robot.motion",),
         "requires_safe_stop": True,
     },
