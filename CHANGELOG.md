@@ -2,6 +2,14 @@
 
 All notable project changes are recorded here.
 
+## 0.5.0 — 2026-10-05
+
+- Straight drives (`motion.advance`, `motion.retreat`) under `lidar_clearance` are guarded on every scan by a braking envelope (`flyto_robotics/braking_envelope.py`): they stop while the room left before any return reaches the 0.35 m floor is still at least `v * t_latency + v^2 / (2 * a_decel)`. Until now the floor was checked only before a motion started; while it ran, the only stop was Nav2's own DriveOnHeading collision check (footprint radius plus `simulate_ahead_time * v` against the local costmap), which knows nothing of the floor. On the physical TurtleBot3 a 2.0 m advance ended with a return 0.181 m from the LiDAR.
+- The room is measured along the way the robot is going and includes returns beside the path it would pass closer than the floor (`x - sqrt(floor^2 - y^2)`).
+- A drive starts at no more than `0.8 * v_max(room)` and is re-sent slower, as a preempting goal with the rest of its distance, as the room shrinks (rosbridge transport; the rclpy transport stops but does not re-send). A drive that could not stop at the floor from 0.02 m/s is refused before it moves. An unreadable or quiet LiDAR stops a guarded drive (`sensor_stale`).
+- `t_latency` is the larger of `FLYTO_ROS2_STOP_LATENCY_S` (0.5 s) and the measured budget (scan interval, scan delivery delay each way, control period, actuation); `a_decel` the smaller of `FLYTO_ROS2_STOP_DECEL_MPS2` (0.5 m/s^2) and the robot's declared `/velocity_smoother:max_decel`.
+- `motion_outcome` adds `braking` (profile and sources, speeds, slowdowns, trip, measured stop distance) and `stop_clearance` (nearest return at rest with its bearing and side from the direction of travel, `floor_held`, `travel_floor_held`); the operator line names the side and says whether the floor held. A guard stop reports `obstacle_blocked` (or `sensor_stale`), not `cancelled`. All additive.
+
 ## 0.4.1 — 2026-10-05
 
 - An inflation escape goes by its waypoint and then the goal as two NavigateToPose legs. One NavigateThroughPoses goal was refused in under a second on TurtleBot3 Jazzy, whose stock configuration routes through-poses goals to a behaviour tree that reads a single goal, so the planner was handed an empty pose ("Failed to transform from  to map"). Measured live on the twin.

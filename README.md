@@ -250,6 +250,37 @@ the execution host:
 | `lidar_clearance` (default) | LiDAR clearance of at least `FLYTO_ROS2_MIN_CLEARANCE_M` (0.35 m) | the declared argument ranges |
 | `operator_present` | no LiDAR; odometry is still required so Cloud can verify the motion | 0.05 m/s and 0.3 m per advance or retreat; π/2 per turn, at Nav2's own rotation speed (Spin takes no speed); navigation refused |
 
+Under `lidar_clearance` the floor is checked once before a motion starts, and a
+straight drive (`motion.advance`, `motion.retreat`) is then guarded on every
+scan by its braking envelope (`flyto_robotics/braking_envelope.py`). A moving
+robot cannot stop where it is told to: it covers `v * t` before the stop takes
+effect and `v^2 / (2a)` while braking, so the clearance it has to stop at is
+
+    floor + v * t_latency + v^2 / (2 * a_decel)
+
+along the way it is going. The room it measures is, for every return at
+`(x, y)` ahead in the frame of travel, `x - sqrt(floor^2 - y^2)` (a return beside
+the path that it would pass closer than the floor counts too). The drive starts
+at no more than `0.8 * v_max(room)`, is re-sent slower (a preempting goal with
+the rest of its distance) as the room shrinks, and is stopped (zero velocity,
+cancel, zero) while the room is still at least its stopping distance, or when
+the LiDAR is unreadable or quiet for `FLYTO_ROS2_STOP_SCAN_TIMEOUT_S`. A drive
+that could not stop at the floor even at 0.02 m/s is refused before it moves.
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `FLYTO_ROS2_STOP_LATENCY_S` | `0.5` | end-to-end stop latency. The measured budget (worst recent scan interval + scan delivery delay, twice, for the scan in and the cancel out + `FLYTO_ROS2_STOP_CONTROL_PERIOD_S` 0.1 + `FLYTO_ROS2_STOP_ACTUATION_S` 0.1) replaces it only when larger |
+| `FLYTO_ROS2_STOP_DECEL_MPS2` | `0.5` | achievable deceleration. The robot's declared limit (`FLYTO_ROS2_DECEL_PARAMETER`, default `/velocity_smoother:max_decel`) replaces it only when smaller |
+| `FLYTO_ROS2_STOP_SCAN_TIMEOUT_S` | `0.5` | longest gap between scans before a guarded drive stops (at least three measured scan periods) |
+
+A straight drive's `motion_outcome` carries `braking` (the profile and where
+each value came from, the requested and commanded speeds, every slowdown, and
+the trip with its room, speed, stopping distance and the distance the robot
+actually covered after it) and every motion's carries `stop_clearance`: the
+nearest return at rest, its bearing and side (`ahead`, `left`, `right`,
+`behind`) from the way the robot was going, and whether the floor held, over
+every direction and along the path.
+
 The basis is part of each motion capability's declared observations (`/scan`
 or `operator:present`), so it is shown when the capability is approved and a
 changed basis needs a new approval. `operator_present` relies on Cloud holding

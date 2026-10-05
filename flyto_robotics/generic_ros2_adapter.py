@@ -36,10 +36,11 @@ import queue
 import threading
 import time
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable, Protocol
 
 from . import adapter_contract as decl
+from . import braking_envelope as braking
 from . import inflation_escape, motion_outcome, places, provider_evidence
 from . import map_frame as map_frame_module
 from .adapter_contract import (
@@ -128,6 +129,159 @@ def _default_requirements() -> tuple[str, ...]:
 def _clearance_floor() -> float:
     """The LiDAR clearance a motion needs to start; never below 0.1 m."""
     return max(0.1, float(os.getenv("FLYTO_ROS2_MIN_CLEARANCE_M", "0.35")))
+
+
+# -- the braking guard ---------------------------------------------------------------
+#
+# The floor above is checked once, before a motion starts. A straight drive is
+# then watched on every scan: it is stopped while the room left before a return
+# reaches the floor is still at least the distance the robot needs to stop from
+# its speed (braking_envelope), and its commanded speed is lowered as that room
+# shrinks. Turns and planned paths have no single direction and stay with Nav2.
+
+#: Direction of travel of each straight drive, from the robot's heading.
+STRAIGHT_MOTIONS: Mapping[str, float] = {
+    "motion.advance": 0.0,
+    "motion.retreat": math.pi,
+}
+#: Speed a straight drive is sent at when the caller names none, in m/s.
+DEFAULT_STRAIGHT_SPEED_MPS: Mapping[str, float] = {
+    "motion.advance": 0.12,
+    "motion.retreat": 0.10,
+}
+#: A drive is commanded at this fraction of the fastest speed its room allows,
+#: so the guard is not tripped by the next scan of an approach it is managing.
+SLOWDOWN_FRACTION = 0.8
+#: A slowdown is sent only when it lowers the speed below this fraction of the
+#: current one, so a long approach is a few steps, not a goal per scan.
+SLOWDOWN_STEP = 0.9
+#: Shortest interval between two slowdowns of one drive, in seconds.
+SLOWDOWN_MIN_INTERVAL_S = 0.5
+
+
+def _env_number(name: str, default: float, *, low: float, high: float) -> float:
+    try:
+        value = float(os.getenv(name, str(default)))
+    except ValueError:
+        return default
+    if not math.isfinite(value):
+        return default
+    return min(high, max(low, value))
+
+
+def _stop_latency_s() -> float:
+    """Configured end-to-end stop latency; a measured one can only raise it."""
+    return _env_number(
+        "FLYTO_ROS2_STOP_LATENCY_S", braking.DEFAULT_LATENCY_S,
+        low=braking.LATENCY_BOUNDS_S[0], high=braking.LATENCY_BOUNDS_S[1],
+    )
+
+
+def _stop_decel_mps2() -> float:
+    """Configured achievable deceleration; a declared one can only lower it."""
+    return _env_number(
+        "FLYTO_ROS2_STOP_DECEL_MPS2", braking.DEFAULT_DECEL_MPS2,
+        low=braking.DECEL_BOUNDS_MPS2[0], high=braking.DECEL_BOUNDS_MPS2[1],
+    )
+
+
+def _stop_control_period_s() -> float:
+    """One cycle of the robot-side loop that acts on a cancel (Nav2 behaviors: 10 Hz)."""
+    return _env_number("FLYTO_ROS2_STOP_CONTROL_PERIOD_S", 0.1, low=0.0, high=1.0)
+
+
+def _stop_actuation_s() -> float:
+    """Velocity smoothing and motor response after the stop is commanded."""
+    return _env_number("FLYTO_ROS2_STOP_ACTUATION_S", 0.1, low=0.0, high=1.0)
+
+
+def _decel_parameter() -> tuple[str, str] | None:
+    """``node:parameter`` holding the base's declared deceleration limit."""
+    raw = os.getenv("FLYTO_ROS2_DECEL_PARAMETER", "/velocity_smoother:max_decel").strip()
+    node, _, name = raw.partition(":")
+    if not node or not name:
+        return None
+    return node, name
+
+
+def _declared_decel(value: Mapping[str, Any] | None) -> float | None:
+    """The linear deceleration in a ParameterValue: a number, or x of an array."""
+    number = inflation_escape.parameter_number(value)
+    if number is None and isinstance(value, Mapping) and value.get("type") == 8:
+        array = value.get("double_array_value")
+        if isinstance(array, (list, tuple)) and array:
+            with contextlib.suppress(TypeError, ValueError):
+                number = float(array[0])
+    if number is None or not math.isfinite(number) or number == 0.0:
+        return None
+    return abs(number)
+
+
+def _scan_timeout_s(period_s: float | None) -> float:
+    """How long a guarded drive goes without a scan before it is stopped."""
+    measured = 3.0 * period_s if period_s is not None else 0.0
+    configured = _env_number("FLYTO_ROS2_STOP_SCAN_TIMEOUT_S", 0.5, low=0.1, high=5.0)
+    return max(configured, measured)
+
+
+@dataclass
+class _BrakingGuard:
+    """One straight drive's braking envelope and what it did."""
+
+    capability_id: str
+    profile: braking.BrakingProfile
+    direction_rad: float
+    speed_mps: float
+    requested_speed_mps: float
+    distance_m: float
+    start_room_m: float | None
+    start_pose: Mapping[str, Any] | None = None
+    tripped: str | None = None
+    trip: dict[str, Any] | None = None
+    # A slower speed the room now calls for, waiting to be sent.
+    slow_to: float | None = None
+    last_slowdown_at: float = 0.0
+    speed_changes: list[dict[str, Any]] = field(default_factory=list)
+    minimum_room_m: float | None = None
+    # Odometry at the trip and at rest, for the measured stopping distance.
+    trip_pose: Mapping[str, Any] | None = None
+    stop_command_sent: bool = False
+
+    def record(self, rest_pose: Mapping[str, Any] | None) -> dict[str, Any]:
+        out: dict[str, Any] = {
+            "profile": self.profile.to_dict(),
+            "requested_speed_mps": round(self.requested_speed_mps, 4),
+            "commanded_speed_mps": round(self.speed_mps, 4),
+            "start_room_to_floor_m": (
+                round(self.start_room_m, 4)
+                if self.start_room_m is not None and math.isfinite(self.start_room_m)
+                else None
+            ),
+            "required_clearance_at_start_m": round(
+                self.profile.required_clearance(self.speed_changes[0]["speed_mps"])
+                if self.speed_changes
+                else self.profile.required_clearance(self.speed_mps),
+                4,
+            ),
+            "speed_changes": list(self.speed_changes),
+            "tripped": self.tripped,
+        }
+        if self.minimum_room_m is not None:
+            out["minimum_room_to_floor_m"] = round(self.minimum_room_m, 4)
+        if self.trip is not None:
+            trip = dict(self.trip)
+            if self.trip_pose is not None and rest_pose is not None:
+                # What the robot actually covered after the guard acted:
+                # the number that calibrates latency and deceleration.
+                trip["measured_stop_distance_m"] = round(
+                    math.hypot(
+                        float(rest_pose["x"]) - float(self.trip_pose["x"]),
+                        float(rest_pose["y"]) - float(self.trip_pose["y"]),
+                    ),
+                    4,
+                )
+            out["trip"] = trip
+        return out
 
 
 def _collision_state_topic() -> str:
@@ -529,6 +683,14 @@ class _ObservationState:
         # The collision monitor's latest (action type, polygon); it publishes
         # only on a change, so a new motion starts from this one.
         self._collision_state: tuple[int, str] | None = None
+        # Scan arrival intervals and delivery delays, measured as they come:
+        # the latency term of every straight drive's braking envelope.
+        self._latency = braking.LatencyEstimator()
+        # The base's declared deceleration limit, read once per connection.
+        self._declared_decel_mps2: float | None = None
+        self._declared_decel_read = False
+        # Straight drives being watched on every scan, keyed by call_id.
+        self._guards: dict[str, _BrakingGuard] = {}
 
     def _begin_track(
         self, call_id: str, capability_id: str, arguments: Mapping[str, Any]
@@ -551,6 +713,153 @@ class _ObservationState:
             if isinstance(reading, Mapping):
                 track.saw_range(reading.get("minimum_range_m"))
             _remember(self._motion_tracks, call_id, track)
+
+    # -- braking guard ---------------------------------------------------------
+
+    def _note_scan_timing(self, observed: float, stamp_s: float | None) -> None:
+        """Called under the condition with each scan's arrival and header stamp."""
+        delay = time.time() - stamp_s if stamp_s else None
+        self._latency.observe(observed, delay)
+
+    def _declared_deceleration(self) -> float | None:
+        """The base's declared deceleration limit, or None if it says none.
+
+        Read once per connection, never under the condition: it is a service
+        call to the robot.
+        """
+        if self._declared_decel_read:
+            return self._declared_decel_mps2
+        self._declared_decel_read = True
+        target = _decel_parameter()
+        reader = getattr(self, "get_parameter", None)
+        if target is None or not callable(reader):
+            return None
+        try:
+            value = reader(*target)
+        except Exception as error:  # noqa: BLE001 - a missing node is "not declared"
+            logger.info("declared deceleration %s:%s unreadable: %s", *target, error)
+            return None
+        self._declared_decel_mps2 = _declared_decel(value)
+        return self._declared_decel_mps2
+
+    def braking_profile(self) -> braking.BrakingProfile:
+        """The envelope a straight drive is guarded with, right now."""
+        declared = self._declared_deceleration()
+        with self._condition:
+            budget = self._latency.budget(
+                control_period_s=_stop_control_period_s(),
+                actuation_s=_stop_actuation_s(),
+            )
+        return braking.resolve_profile(
+            floor_m=_clearance_floor(),
+            configured_latency_s=_stop_latency_s(),
+            configured_decel_mps2=_stop_decel_mps2(),
+            measured_latency=budget,
+            declared_decel_mps2=declared,
+        )
+
+    def arm_braking_guard(
+        self,
+        call_id: str,
+        capability_id: str,
+        *,
+        profile: braking.BrakingProfile,
+        speed_mps: float,
+        requested_speed_mps: float,
+        distance_m: float,
+        start_room_m: float | None,
+    ) -> None:
+        """Watch the straight drive ``call_id`` against ``profile`` from now on."""
+        with self._condition:
+            if call_id in self._guards:
+                return  # a resumed call keeps the guard it started with
+            guard = _BrakingGuard(
+                capability_id=capability_id,
+                profile=profile,
+                direction_rad=STRAIGHT_MOTIONS[capability_id],
+                speed_mps=float(speed_mps),
+                requested_speed_mps=float(requested_speed_mps),
+                distance_m=float(distance_m),
+                start_room_m=start_room_m,
+                start_pose=dict(self._pose) if self._pose is not None else None,
+            )
+            guard.speed_changes.append(
+                {"at_s": 0.0, "speed_mps": round(float(speed_mps), 4), "room_m": (
+                    round(start_room_m, 4)
+                    if start_room_m is not None and math.isfinite(start_room_m)
+                    else None
+                )}
+            )
+            guard.last_slowdown_at = time.monotonic()
+            _remember(self._guards, call_id, guard)
+
+    def _trip_guard(
+        self, guard: _BrakingGuard, cause: str, detail: Mapping[str, Any]
+    ) -> None:
+        """Called under the condition: this drive must stop now."""
+        if guard.tripped is not None:
+            return
+        guard.tripped = cause
+        guard.trip = dict(detail)
+        guard.trip_pose = dict(self._pose) if self._pose is not None else None
+        guard.slow_to = None
+
+    def _check_guards(self) -> None:
+        """Called under the condition after each scan: judge every guarded drive."""
+        if not self._guards:
+            return
+        measured = abs(self._velocity[0]) if self._velocity is not None else 0.0
+        for guard in self._guards.values():
+            if guard.tripped is not None:
+                continue
+            room = braking.room_to_floor(
+                self._range_sweep, guard.direction_rad, guard.profile.floor_m
+            )
+            if room is None:
+                self._trip_guard(guard, motion_outcome.GUARD_TRIP_BLIND, {
+                    "detail": "the LiDAR sweep could not be read",
+                })
+                continue
+            if guard.minimum_room_m is None or room.room_m < guard.minimum_room_m:
+                guard.minimum_room_m = room.room_m
+            # The robot may still be faster than the last command asked for.
+            speed = max(guard.speed_mps, measured)
+            stopping = guard.profile.stopping_distance(speed)
+            allowed = guard.profile.max_speed(room.room_m) * SLOWDOWN_FRACTION
+            if room.room_m <= stopping or allowed < braking.MIN_SPEED_MPS:
+                self._trip_guard(guard, motion_outcome.GUARD_TRIP_CLEARANCE, {
+                    "room_m": round(room.room_m, 4),
+                    "speed_mps": round(speed, 4),
+                    "stopping_distance_m": round(stopping, 4),
+                    "required_clearance_m": round(guard.profile.required_clearance(speed), 4),
+                    **room.to_dict(),
+                })
+                continue
+            if (
+                allowed < guard.speed_mps * SLOWDOWN_STEP
+                and time.monotonic() - guard.last_slowdown_at >= SLOWDOWN_MIN_INTERVAL_S
+            ):
+                guard.slow_to = allowed
+        self._condition.notify_all()
+
+    def _check_scan_fresh(self, call_id: str) -> None:
+        """Stop a guarded drive whose LiDAR has gone quiet."""
+        with self._condition:
+            guard = self._guards.get(call_id)
+            if guard is None or guard.tripped is not None:
+                return
+            limit = _scan_timeout_s(self._latency.scan_period_s)
+            seen = self._range_seen_at
+            age = None if seen is None else time.monotonic() - seen
+            if age is None or age > limit:
+                self._trip_guard(guard, motion_outcome.GUARD_TRIP_STALE, {
+                    "scan_age_s": None if age is None else round(age, 3),
+                    "limit_s": round(limit, 3),
+                })
+
+    def _guard(self, call_id: str) -> _BrakingGuard | None:
+        with self._condition:
+            return self._guards.get(call_id)
 
     def _track_range(self, minimum_range_m: float) -> None:
         """Called under the condition with each LiDAR minimum."""
@@ -594,6 +903,13 @@ class _ObservationState:
             if track is None:
                 return None
             snapshot = self._snapshot()
+            guard = (
+                self._guards.get(call_id)
+                if status is None
+                else self._guards.pop(call_id, None)
+            )
+            if guard is not None:
+                track.braking = guard.record(snapshot.get("pose"))
         return motion_outcome.summarize(
             track,
             status=status,
@@ -608,6 +924,7 @@ class _ObservationState:
     def _forget_track(self, call_id: str) -> None:
         with self._condition:
             self._motion_tracks.pop(call_id, None)
+            self._guards.pop(call_id, None)
 
     def add_graph_listener(self, listener: Callable[[str], None]) -> None:
         """Call ``listener(reason)`` when the robot's graph may have changed.
@@ -700,6 +1017,9 @@ class _ObservationState:
             self._camera_seen_at = None
             self._map_tf_seen_at = None
             self._map_from_odom = None
+            self._latency.reset()
+            self._declared_decel_read = False
+            self._declared_decel_mps2 = None
             self._listening_since = time.monotonic()
             self._heard_kinds.clear()
             self._last_heard_at = None
@@ -889,6 +1209,33 @@ class _ObservationState:
             "still_samples": still,
             "waited_seconds": round(time.monotonic() - started, 3),
         }
+
+
+def _travelled_along(
+    start: Mapping[str, Any] | None,
+    now: Mapping[str, Any] | None,
+    direction_rad: float,
+) -> float:
+    """Odometry distance covered along a straight drive's direction of travel."""
+    if not isinstance(start, Mapping) or not isinstance(now, Mapping):
+        return 0.0
+    heading = float(start["yaw"]) + direction_rad
+    return (float(now["x"]) - float(start["x"])) * math.cos(heading) + (
+        float(now["y"]) - float(start["y"])
+    ) * math.sin(heading)
+
+
+def _header_stamp(message: Mapping[str, Any]) -> float | None:
+    """A rosbridge message's header stamp in seconds, or None."""
+    header = message.get("header")
+    stamp = header.get("stamp") if isinstance(header, Mapping) else None
+    if not isinstance(stamp, Mapping):
+        return None
+    try:
+        value = float(stamp.get("sec", 0)) + float(stamp.get("nanosec", 0)) * 1e-9
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0.0 else None
 
 
 def _remember(store: dict[str, Any], key: str, value: Any) -> None:
@@ -1312,6 +1659,11 @@ class GenericROS2Adapter:
                     },
                     detail=escape.describe(),
                 )
+        if request.capability_id in STRAIGHT_MOTIONS and not supervised:
+            braked = self._arm_braking(request.call_id, request.capability_id, arguments)
+            if isinstance(braked, CallResult):
+                return braked
+            arguments = braked
         before = self._before.get(request.call_id)
         if before is None:
             # A call resumed after a timeout keeps the observation from before
@@ -1343,6 +1695,63 @@ class GenericROS2Adapter:
                 detail=result.detail,
             )
         return self._with_motion_evidence(request.capability_id, before, result)
+
+    # -- braking envelope for straight drives ---------------------------------------
+
+    def _arm_braking(
+        self, call_id: str, capability_id: str, arguments: Mapping[str, Any]
+    ) -> dict[str, Any] | CallResult:
+        """Cap a straight drive's speed by its room and have the backend guard it.
+
+        The speed is the requested one, or lower: the fastest that can still
+        come to rest at the clearance floor from the room the drive starts
+        with, less a margin. A drive that cannot be given even the minimum
+        speed is refused before it moves.
+        """
+        arm = getattr(self.backend, "arm_braking_guard", None)
+        profile_of = getattr(self.backend, "braking_profile", None)
+        if not callable(arm) or not callable(profile_of):
+            return dict(arguments)
+        profile = profile_of()
+        observation = self.backend.observation()
+        reading = observation.get("range")
+        sweep = reading.get("sweep") if isinstance(reading, Mapping) else None
+        room = braking.room_to_floor(sweep, STRAIGHT_MOTIONS[capability_id], profile.floor_m)
+        if room is None:
+            return CallResult(
+                call_id,
+                OUTCOME_REFUSED,
+                detail="the LiDAR sweep cannot be read, so the room to stop cannot be judged",
+            )
+        requested = float(
+            arguments.get("speed_mps", DEFAULT_STRAIGHT_SPEED_MPS[capability_id])
+        )
+        allowed = profile.max_speed(room.room_m) * SLOWDOWN_FRACTION
+        speed = min(requested, allowed)
+        if speed < braking.MIN_SPEED_MPS:
+            return CallResult(
+                call_id,
+                OUTCOME_REFUSED,
+                evidence={
+                    "reason_code": motion_outcome.REASON_OBSTACLE_BLOCKED,
+                    "braking": {"profile": profile.to_dict(), **room.to_dict()},
+                },
+                detail=(
+                    f"only {room.room_m:.3f} m of room before the {profile.floor_m:.3f} m "
+                    "clearance floor the way the robot would drive; it could not stop "
+                    f"there from even {braking.MIN_SPEED_MPS:.2f} m/s"
+                ),
+            )
+        arm(
+            call_id,
+            capability_id,
+            profile=profile,
+            speed_mps=speed,
+            requested_speed_mps=requested,
+            distance_m=float(arguments["distance_m"]),
+            start_room_m=room.room_m,
+        )
+        return {**arguments, "speed_mps": speed}
 
     # -- leaving an obstacle's inflation before navigating -------------------------
 
@@ -2024,12 +2433,18 @@ class RclpyROS2Backend(_ObservationState):
                 range_min=message.range_min,
                 range_max=message.range_max,
             )
+            stamp = getattr(getattr(message, "header", None), "stamp", None)
+            stamp_s = (
+                float(stamp.sec) + float(stamp.nanosec) * 1e-9 if stamp is not None else None
+            )
             with self._condition:
                 self._minimum_range = min(usable)
                 self._track_range(self._minimum_range)
                 self._range_sample_count = len(usable)
                 self._range_sweep = sweep
                 self._range_seen_at = time.monotonic()
+                self._note_scan_timing(self._range_seen_at, stamp_s)
+                self._check_guards()
                 self._condition.notify_all()
 
     def _on_camera(self, message: Any) -> None:
@@ -2152,6 +2567,39 @@ class RclpyROS2Backend(_ObservationState):
             found.append(StandardInterface("topic", marker, CLOCK_TYPE))
         return found
 
+    def _await_guarded(self, call_id: str, future: Any, deadline: float) -> bool:
+        """Wait for a goal's result, stopping it if its braking guard trips.
+
+        This transport only stops a guarded drive; it does not re-send it
+        slower (the rosbridge transport does). The drive's starting speed is
+        still capped by the room it starts with.
+        """
+        done = threading.Event()
+        future.add_done_callback(lambda _future: done.set())
+        while not future.done():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            guard = self._guard(call_id)
+            if guard is None:
+                done.wait(timeout=remaining)
+                continue
+            self._check_scan_fresh(call_id)
+            if guard.tripped is not None and not guard.stop_command_sent:
+                guard.stop_command_sent = True
+                logger.warning("braking guard stopping %s: %s %s", call_id,
+                               guard.tripped, guard.trip)
+                with contextlib.suppress(Exception):
+                    self._publish_zero()
+                handle = self._goal_handles.get(call_id)
+                if handle is not None:
+                    with contextlib.suppress(Exception):
+                        handle.cancel_goal_async()
+                with contextlib.suppress(Exception):
+                    self._publish_zero()
+            done.wait(timeout=min(remaining, 0.05))
+        return True
+
     def _wait_future(self, future: Any, deadline: float) -> bool:
         """Wait for an rclpy future that the background executor completes."""
         if future.done():
@@ -2234,6 +2682,7 @@ class RclpyROS2Backend(_ObservationState):
             "double_value": float(value.double_value),
             "string_value": str(value.string_value),
             "string_array_value": list(value.string_array_value),
+            "double_array_value": [float(item) for item in value.double_array_value],
         }
 
     def _goal(self, capability_id: str, arguments: Mapping[str, float]):
@@ -2342,7 +2791,7 @@ class RclpyROS2Backend(_ObservationState):
         future = self._result_futures[call_id]
         deadline = time.monotonic() + deadline_seconds
 
-        if not self._wait_future(future, deadline):
+        if not self._await_guarded(call_id, future, deadline):
             return _motion_result(
                 call_id,
                 OUTCOME_TIMEOUT,
@@ -2352,6 +2801,12 @@ class RclpyROS2Backend(_ObservationState):
             )
         response = future.result()
         status = int(getattr(response, "status", 0))
+        guard = self._guard(call_id)
+        braked = guard is not None and guard.tripped is not None
+        if braked:
+            with contextlib.suppress(Exception):
+                self._publish_zero()
+            self.wait_until_stationary(1.5)
         summary = self._motion_summary(
             call_id,
             status=status,
@@ -2360,6 +2815,14 @@ class RclpyROS2Backend(_ObservationState):
         if status == GoalStatus.STATUS_SUCCEEDED:
             result = _motion_result(
                 call_id, OUTCOME_COMPLETED, self._evidence(capability_id), summary
+            )
+        elif braked:
+            result = _motion_result(
+                call_id,
+                OUTCOME_FAILED,
+                self._evidence(capability_id),
+                summary,
+                fallback="stopped by the braking guard",
             )
         elif status == GoalStatus.STATUS_CANCELED:
             result = _motion_result(call_id, OUTCOME_CANCELLED, {}, summary, fallback="cancelled")
@@ -2558,6 +3021,11 @@ class RosbridgeROS2Backend(_ObservationState):
         # it ended instead of waiting out its whole deadline.
         self._result_waiters: dict[str, int] = {}
         self._results: dict[str, CallResult] = {}
+        # A straight drive slowed by its braking guard is re-sent as a new goal
+        # that preempts the running one; its result still answers the call.
+        # call_id -> the goal id now driving it, and goal id -> call_id.
+        self._goal_ids: dict[str, str] = {}
+        self._goal_owner: dict[str, str] = {}
         self._counts: dict[str, int] = {}
         self._advertised_topics: set[tuple[str, str]] = set()
         self._topic_types: dict[str, str] = {}
@@ -2624,14 +3092,22 @@ class RosbridgeROS2Backend(_ObservationState):
         if not isinstance(identifier, str):
             return
         with self._condition:
+            owner = self._goal_owner.get(identifier, identifier)
+            if operation in ("action_result", "action_feedback") and (
+                self._goal_ids.get(owner, owner) != identifier
+            ):
+                # A goal the braking guard has since replaced with a slower
+                # one: the server aborted it for the preemption, which says
+                # nothing about how the call ends.
+                return
             if operation == "service_response":
                 self._responses[identifier] = message
                 self._condition.notify_all()
             elif operation == "action_result":
-                self._action_results[identifier] = message
+                self._action_results[owner] = message
                 self._condition.notify_all()
             elif operation == "action_feedback":
-                self._track_feedback(identifier, message.get("values"))
+                self._track_feedback(owner, message.get("values"))
 
     @staticmethod
     def _camera_payload(data: Any) -> bytes:
@@ -2720,6 +3196,8 @@ class RosbridgeROS2Backend(_ObservationState):
             range_max=maximum,
         )
         self._range_seen_at = observed
+        self._note_scan_timing(observed, _header_stamp(message))
+        self._check_guards()
         self._condition.notify_all()
 
     def _update_camera(self, message: Mapping[str, Any], observed: float) -> None:
@@ -3242,10 +3720,8 @@ class RosbridgeROS2Backend(_ObservationState):
         with self._condition:
             self._result_waiters[call_id] = self._result_waiters.get(call_id, 0) + 1
         try:
-            result_message = self._wait_for(
-                self._action_results,
-                call_id,
-                time.monotonic() + deadline_seconds,
+            result_message = self._await_result(
+                call_id, capability_id, time.monotonic() + deadline_seconds
             )
         finally:
             with self._condition:
@@ -3264,8 +3740,18 @@ class RosbridgeROS2Backend(_ObservationState):
             )
 
         self._active_actions.pop(call_id, None)
+        self._forget_goal_ids(call_id)
         status = int(result_message.get("status", 0))
         values = result_message.get("values")
+        guard = self._guard(call_id)
+        braked = guard is not None and guard.tripped is not None
+        if braked:
+            # The last command on cmd_vel must be a stop, whatever the server
+            # published while the cancel was on its way.
+            with contextlib.suppress(RuntimeError):
+                self._publish_zero()
+            # Read where the robot came to rest, not where it was cancelled.
+            self.wait_until_stationary(1.5)
         summary = self._motion_summary(
             call_id,
             status=status,
@@ -3274,6 +3760,14 @@ class RosbridgeROS2Backend(_ObservationState):
         if result_message.get("result") is True and status == 4:
             result = _motion_result(
                 call_id, OUTCOME_COMPLETED, self._evidence(capability_id), summary
+            )
+        elif braked:
+            result = _motion_result(
+                call_id,
+                OUTCOME_FAILED,
+                self._evidence(capability_id, wait=False),
+                summary,
+                fallback="stopped by the braking guard",
             )
         elif status == 5:
             result = _motion_result(call_id, OUTCOME_CANCELLED, {}, summary, fallback="cancelled")
@@ -3289,6 +3783,132 @@ class RosbridgeROS2Backend(_ObservationState):
                 fallback=f"ROS 2 action status {status}",
             )
         return self._keep_result(call_id, result)
+
+    def _await_result(
+        self, call_id: str, capability_id: str, deadline: float
+    ) -> dict[str, Any] | None:
+        """The goal's result, acting on its braking guard while waiting.
+
+        Returns None when the deadline passes or the connection drops first.
+        A guarded drive is re-judged on every scan (see ``_check_guards``);
+        this loop carries out what that decides: a stop, or a slower goal.
+        """
+        while True:
+            action = None
+            with self._condition:
+                while True:
+                    if call_id in self._action_results:
+                        return self._action_results.pop(call_id)
+                    if not self._connected:
+                        return None
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        return None
+                    guard = self._guards.get(call_id)
+                    if guard is not None:
+                        self._check_scan_fresh(call_id)
+                        if guard.tripped is not None and not guard.stop_command_sent:
+                            guard.stop_command_sent = True
+                            action = "brake"
+                            break
+                        if guard.tripped is None and guard.slow_to is not None:
+                            action = "slow"
+                            break
+                    # A guarded drive also wakes to notice a LiDAR gone quiet.
+                    self._condition.wait(
+                        timeout=min(remaining, 0.05) if guard is not None else remaining
+                    )
+            if action == "brake":
+                self._brake(call_id)
+            elif action == "slow":
+                self._slow_down(call_id, capability_id)
+
+    def _brake(self, call_id: str) -> None:
+        """Stop a guarded drive: zero first, then cancel its goal, then zero again."""
+        guard = self._guard(call_id)
+        logger.warning(
+            "braking guard stopping %s: %s %s",
+            call_id,
+            guard.tripped if guard else "?",
+            guard.trip if guard else {},
+        )
+        with contextlib.suppress(RuntimeError):
+            self._publish_zero()
+        action_name = self._active_actions.get(call_id)
+        if action_name is not None:
+            with contextlib.suppress(RuntimeError):
+                self._send(
+                    {
+                        "op": "cancel_action_goal",
+                        "id": self._goal_ids.get(call_id, call_id),
+                        "action": action_name,
+                    }
+                )
+        with contextlib.suppress(RuntimeError):
+            self._publish_zero()
+
+    def _slow_down(self, call_id: str, capability_id: str) -> None:
+        """Preempt a guarded drive with the same heading, the rest of its
+        distance, and the slower speed its room now allows."""
+        action_name = self._active_actions.get(call_id)
+        with self._condition:
+            guard = self._guards.get(call_id)
+            if guard is None or guard.slow_to is None or action_name is None:
+                return
+            speed = guard.slow_to
+            guard.slow_to = None
+            remaining = guard.distance_m - _travelled_along(
+                guard.start_pose, self._pose, guard.direction_rad
+            )
+            if remaining <= 0.02:
+                return  # nearly there; a new goal would only add a stop
+            previous = self._goal_ids.get(call_id, call_id)
+            sequence = len(guard.speed_changes)
+            goal_id = f"{call_id}#slow{sequence}"
+            self._goal_ids[call_id] = goal_id
+            self._goal_owner[goal_id] = call_id
+            now = time.monotonic()
+            guard.last_slowdown_at = now
+            guard.speed_mps = speed
+            started = self._motion_tracks.get(call_id)
+            guard.speed_changes.append(
+                {
+                    "at_s": round(now - started.started_at, 3) if started else None,
+                    "speed_mps": round(speed, 4),
+                    "room_m": (
+                        round(guard.minimum_room_m, 4)
+                        if guard.minimum_room_m is not None
+                        else None
+                    ),
+                    "remaining_m": round(remaining, 4),
+                }
+            )
+        _, _, action_type = _interface(capability_id)
+        try:
+            self._send(
+                {
+                    "op": "send_action_goal",
+                    "id": goal_id,
+                    "action": action_name,
+                    "action_type": action_type,
+                    "args": self._action_goal(
+                        capability_id, {"distance_m": remaining, "speed_mps": speed}
+                    ),
+                    "feedback": True,
+                }
+            )
+        except RuntimeError:
+            # The faster goal is still the one driving; the guard keeps
+            # watching it and stops it if the room runs out.
+            with self._condition:
+                self._goal_ids[call_id] = previous
+                self._goal_owner.pop(goal_id, None)
+
+    def _forget_goal_ids(self, call_id: str) -> None:
+        with self._condition:
+            self._goal_ids.pop(call_id, None)
+            for goal_id in [g for g, owner in self._goal_owner.items() if owner == call_id]:
+                self._goal_owner.pop(goal_id, None)
 
     def _publish_zero(self) -> bool:
         topic = DEFAULT_INTERFACES["motion.halt"][1]
@@ -3348,7 +3968,7 @@ class RosbridgeROS2Backend(_ObservationState):
         self._send(
             {
                 "op": "cancel_action_goal",
-                "id": call_id,
+                "id": self._goal_ids.get(call_id, call_id),
                 "action": action_name,
             }
         )
@@ -3446,6 +4066,8 @@ class RosbridgeROS2Backend(_ObservationState):
         self.disconnect()
         # Goal ids belong to the socket that sent them.
         self._active_actions.clear()
+        self._goal_ids.clear()
+        self._goal_owner.clear()
         websocket = self._connection_factory(self._url)
         keepalive_stop = threading.Event()
         with self._condition:
