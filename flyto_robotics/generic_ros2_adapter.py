@@ -33,6 +33,8 @@ import logging
 import math
 import os
 import queue
+import re
+import socket
 import threading
 import time
 from collections.abc import Iterable, Mapping, Sequence
@@ -307,6 +309,36 @@ def _simulation_marker_topic() -> str:
     legitimately publishes /clock.
     """
     return os.getenv("FLYTO_ROS2_SIM_MARKER_TOPIC", "/clock").strip()
+
+
+def _safe_fragment(value: str) -> str:
+    text = re.sub(r"[^A-Za-z0-9_.-]+", "-", str(value or "").strip())
+    return text.strip("-._")[:48] or "resource"
+
+
+def configured_resource_id() -> str:
+    """The one resource the adapter on this computer is configured to serve.
+
+    ``FLYTO_ROS2_RESOURCE_ID``, else a name derived from this host and its
+    ROS domain. Discovery publishes it, and it is the only id an adapter here
+    may be built for or may say it serves: the id a host hands the factory is
+    a request, not a fact about what the transport reaches.
+    """
+    domain = os.getenv("ROS_DOMAIN_ID", "0").strip() or "0"
+    return (
+        os.getenv("FLYTO_ROS2_RESOURCE_ID", "").strip()
+        or f"ros2-{_safe_fragment(socket.gethostname())}-{_safe_fragment(domain)}"
+    )[:128]
+
+
+def _configured_deployment_mode() -> str:
+    """``simulation`` or ``hardware``: anything but simulation is hardware."""
+    mode = os.getenv("FLYTO_ROS2_DEPLOYMENT_MODE", "hardware").strip().lower()
+    return "simulation" if mode == "simulation" else "hardware"
+
+
+class ServedIdentityError(RuntimeError):
+    """The adapter cannot show which resource it serves, or in which deployment."""
 SCAN_TYPE = "sensor_msgs/msg/LaserScan"
 
 # What makes a motion safe to start on this robot, set by whoever installed it.
@@ -1556,11 +1588,56 @@ class GenericROS2Adapter:
         self._invalidate_discovery()
         return self._deployment_mismatch_in(self.backend.discover(), marker)
 
+    def served_identity(self) -> dict[str, str]:
+        """Which resource this adapter serves now, and in which deployment.
+
+        The execution host asks this before any call reaches equipment and
+        refuses a job unless both are what Cloud scored (flyto-cloud
+        ``local/served_resource.py``). The answer never comes from the id the
+        adapter was built with: the resource is the one configured on this
+        computer, and the deployment is the configured mode confirmed against
+        the ROS graph as it is now (a simulator iff it publishes the marker
+        topic, /clock by default). Raises ``ServedIdentityError`` when the
+        configured mode and the graph disagree, when the graph shows nothing,
+        or when a simulation is claimed with the marker check disabled: real
+        is never lowered to simulation on the configuration alone.
+
+        Returns ``{"resource_id", "deployment_mode"}`` with the mode
+        ``simulation`` or ``real``, as in this adapter's discovery manifest.
+        """
+        resource_id = configured_resource_id()
+        mode = _configured_deployment_mode()
+        marker = _simulation_marker_topic()
+        if not marker:
+            if mode == "simulation":
+                raise ServedIdentityError(
+                    "the adapter is configured for simulation but the simulation marker "
+                    "check is disabled (FLYTO_ROS2_SIM_MARKER_TOPIC is empty), so the "
+                    "graph cannot confirm it is not physical hardware"
+                )
+            return {"resource_id": resource_id, "deployment_mode": "real"}
+        # Read the graph as it is now: the robot behind this endpoint may have
+        # been swapped for its simulator (or back) since discovery cached it.
+        self._invalidate_discovery()
+        interfaces = tuple(self.backend.discover())
+        if not interfaces:
+            raise ServedIdentityError(
+                f"the ROS graph behind the adapter for {resource_id!r} shows no "
+                "interfaces, so it cannot show which robot it reaches"
+            )
+        mismatch = self._deployment_mismatch_in(interfaces, marker)
+        if mismatch is not None:
+            raise ServedIdentityError(mismatch)
+        return {
+            "resource_id": resource_id,
+            "deployment_mode": "simulation" if mode == "simulation" else "real",
+        }
+
     @staticmethod
     def _deployment_mismatch_in(
         interfaces: Iterable[StandardInterface], marker: str
     ) -> str | None:
-        mode = os.getenv("FLYTO_ROS2_DEPLOYMENT_MODE", "hardware").strip().lower()
+        mode = _configured_deployment_mode()
         simulated = any(item.kind == "topic" and item.name == marker for item in interfaces)
         if mode == "simulation" and not simulated:
             return (

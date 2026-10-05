@@ -95,10 +95,55 @@ PolygonStop radius 0.10, `FootprintApproach` 2.0 s; OpenCR
 ~0.4 s budget measured on the twin), `a_decel` 0.5 m/s^2 (a fifth of the
 declared 2.5, for slip and load).
 
-## Verified
+## Resource identity guard (same PR, still 0.5.0)
 
-- `make verify`: exit 0; ruff clean; 1479 passed, 1 skipped; asset, dry-run and
-  contract targets pass.
+Companion to flyto-cloud `claude/resource-identity-guard`
+(`src/ui/web/backend/local/served_resource.py`). Live 2026-10-05 21:54: the
+adapter on the execution computer was reconfigured from `turtlebot3-twin`
+(simulation) to the physical `burger-01` (hardware). A Cloud job for the twin
+was built an adapter "for the twin" (the factory labelled itself with whatever
+id it was handed), reached the physical robot, ran, and was recorded as the
+twin. A simulated movement is auto-run, so the same path could move the robot
+with nobody asked.
+
+- `generic_ros2_adapter.configured_resource_id()`: `FLYTO_ROS2_RESOURCE_ID`,
+  else `ros2-<host>-<ROS_DOMAIN_ID>` (moved here from
+  `adapter_provider._resource_identity`, which now calls it; discovery output
+  unchanged).
+- `adapter_provider.build_adapter(resource_id)` and `_serve` (process
+  protocol `--resource-id`) raise / answer `ResourceNotServed` for any other
+  id, including an empty one, before a transport is opened.
+- `GenericROS2Adapter.served_identity()` returns `{"resource_id",
+  "deployment_mode"}` (`simulation` / `real`, the manifest's vocabulary, which
+  the Cloud host maps through `DEPLOYMENT_CLASS_OF_MODE`). The resource is the
+  configured one, never the id the adapter was built with. The mode is the
+  configured mode confirmed against the graph read fresh
+  (`invalidate_discovery` first): simulation iff the marker topic (`/clock`)
+  is on it. It raises `ServedIdentityError`, which the Cloud host turns into a
+  refusal, when the mode and graph disagree, when the graph shows no
+  interfaces, or when simulation is configured with the marker check disabled
+  (hardware with the check disabled is reported `real`, the stricter class).
+  Also exposed as the process op `served_identity`.
+- `tests/test_served_identity.py` (17 tests, fakes only): the live case
+  (configured `burger-01` hardware, asked for `turtlebot3-twin` -> refused,
+  nothing built), configured id built, empty id refused, derived default id,
+  process protocol refusal and `served_identity` op, real/simulation answers,
+  answer ignores the built-with id, both mismatch directions, empty graph,
+  marker disabled, and an endpoint swap seen on the next answer.
+- Verified for this part: `make verify` exit 0 (1496 passed, 1 skipped);
+  `flyto-index verify --strict` 20 pass / 0 warn / 0 fail; `task validate`
+  (indexer interpreter, repo on PYTHONPATH: the shim's PYTHONSAFEPATH keeps
+  the repo off pytest's path) ruff pass, pytest pass; `pr-risk` 20/medium,
+  its one "breaking" flag is the private `adapter_provider._safe_fragment`
+  moving to `generic_ros2_adapter` (no other user).
+- Not verified: not run against the twin, the robot or a running Cloud host;
+  the Cloud side was read, not executed. `open_rmf_adapter.build_adapter` still
+  builds for any `fleet:<name>` id it is given (a fleet resource names its
+  target in the id; not changed here).
+
+
+- `make verify`: exit 0; ruff clean; 1496 passed, 1 skipped (with the identity
+  guard; 1479 before it); asset, dry-run and contract targets pass.
 - `tests/test_braking_envelope.py` covers the kinematic model (scan sampling at
   10 Hz with three phases, latency, constant decel), 12 speeds from 0.02 to
   0.5 m/s (the declared max). New rule: rests >= 0.35 m at every speed and

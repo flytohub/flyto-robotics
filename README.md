@@ -160,6 +160,28 @@ Besides the motions above it declares, when the graph has them:
 | `places.list` | host file (declared with `motion.navigate`) | returns the named places saved for this robot's map, as `evidence.places` and a `places` JSON artifact |
 | `places.mark` | host file + `map_pose` | saves the robot's current map-frame pose (the same `map_pose` navigation arrival is judged on) under a name |
 
+### Which resource an adapter serves
+
+One computer's `ros2.generic` adapter serves exactly one resource: its
+`FLYTO_ROS2_RESOURCE_ID` (else `ros2-<host>-<ROS_DOMAIN_ID>`), in its
+`FLYTO_ROS2_DEPLOYMENT_MODE` (`simulation`, anything else is hardware). The
+physical robot and its twin can sit behind the same endpoint, so neither the
+id a host asks for nor the configured mode alone says which machine a job
+would move.
+
+- `adapter_provider.build_adapter(resource_id)` (and the process protocol's
+  `--resource-id`) refuses any other id with `ResourceNotServed`, before any
+  transport is opened, instead of labelling the adapter with the id it was
+  handed.
+- `GenericROS2Adapter.served_identity()` (process op `served_identity`)
+  returns `{"resource_id", "deployment_mode"}`: the configured resource and
+  `simulation` or `real`, confirmed against the live graph (a simulator iff it
+  publishes `FLYTO_ROS2_SIM_MARKER_TOPIC`, default `/clock`). It raises
+  `ServedIdentityError` when the mode and the graph disagree, when the graph
+  shows no interfaces, or when simulation is claimed with the marker check
+  disabled. A Flyto2 Cloud host asks it before every job and refuses unless
+  both match what Cloud scored.
+
 ### Named places
 
 Places are kept on the execution host, never on the robot and never in Flyto2
