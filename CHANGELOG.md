@@ -2,6 +2,11 @@
 
 All notable project changes are recorded here.
 
+## 0.6.1 — 2026-10-06
+
+- An inflation escape no longer narrows the obstacle at a LiDAR bin it could not read. The obstacle cluster ended at the first unread bin, so one dropout in a box's face cut its extent on that side; the lateral waypoint was then placed beside only part of the box, the goal leg started inside its inflation and Nav2 failed to make progress until it aborted. Unread bins inside the object or just past its last return now count as the object (at the last return's range, within the `CLUSTER_JUMP_M` arc that joins two returns), so the extent only grows for what the scan did not see. Twin, 2026-10-06, ten runs of the same box: 8 waypoints at 0.39-0.41 m arrived in 15-18 s; one at 0.285 m (extent 0.085 m) stalled 165 s in Nav2 recoveries; one at ~0.22 m (extent ~0.02 m) failed after 180 s (`error 105`). Replaying the recorded sweep through the 0.6.0 code with one face bin unread gives 0.226 m and 0.284 m; this release gives 0.41 m for both.
+- The lateral waypoint lies at least Nav2's arrival tolerance plus the margin from where the back-off ends. The tolerance is the largest `xy_goal_tolerance` of the controller's goal checkers (`goal_checker_plugins` on `FLYTO_ROS2_CONTROLLER_NODES`, default `/controller_server`; Nav2's 0.25 m when unreadable). A waypoint inside it is "reached" where the robot stands: on the twin a 0.22 m waypoint against 0.25 m succeeded in 20 ms without moving. `navigation_escape` evidence adds `arrival_tolerance_m` and `obstacle.unread_bins`, additively. The 0.35 m floor and every clearance check are unchanged.
+
 ## 0.6.0 — 2026-10-06
 
 - The SSH local forward to a loopback-bound robot is owned by the adapter (`flyto_robotics/ssh_transport.py`), configured by `FLYTO_ROS2_SSH_HOST` (implies rosbridge), `FLYTO_ROS2_SSH_IDENTITY`, `FLYTO_ROS2_SSH_KNOWN_HOSTS`, `FLYTO_ROS2_SSH_FORWARDS` (default `rosbridge=9090`) and `FLYTO_ROS2_SSH_LOCAL_PORTS` (else ephemeral). `FLYTO_ROSBRIDGE_URL` is derived from the forward; a contradicting explicit URL is refused. Until now the forward was started by hand and died with every robot reboot.
