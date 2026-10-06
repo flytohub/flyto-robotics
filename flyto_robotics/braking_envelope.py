@@ -32,7 +32,7 @@ from __future__ import annotations
 import math
 from collections import deque
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 #: End-to-end stop latency assumed when nothing better is known, in seconds.
@@ -332,3 +332,190 @@ def direction_label(bearing_rad: float) -> str:
     if abs(degrees) >= 135.0:
         return "behind"
     return "left" if degrees > 0 else "right"
+
+
+# -- how a running drive's speed can be governed ----------------------------------
+#
+# A guard that sees the room shrink can slow a drive only if the server running
+# it accepts a new goal in place of the running one (preemption) and carries on
+# from the robot's current speed. Nav2's straight-drive behaviors do not:
+# ``TimedBehavior::execute`` answers a preemption with "Received a preemption
+# request for drive_on_heading, however feature is currently not implemented.
+# Aborting and stopping", stops the robot and starts the new goal from rest
+# (read from the installed nav2_behaviors 1.3.13 header and from
+# navigation2 main, 2026-10-06; logged by the twin 4 times on 2026-10-06). A
+# "slowdown" sent there is a stop and a restart, and the restarted drive is
+# tripped by the guard within a scan: the advance ends early.
+#
+# So the speed is governed one of two ways, chosen per drive by
+# ``decide_governance`` from facts about the server running it:
+#
+# * ``GOVERNANCE_RESEND``: the server takes a preempting goal; the guard
+#   re-sends the rest of the drive at the lower speed its room allows.
+# * ``GOVERNANCE_PLANNED``: no mid-drive goal is ever sent. The speed and the
+#   distance are both fixed before sending from the room measured then, so
+#   the drive ends by itself where it can still come to rest at or beyond the
+#   floor (``plan_drive``). The guard stays a hard safety stop only.
+
+GOVERNANCE_RESEND = "preemptive_resend"
+GOVERNANCE_PLANNED = "planned_before_send"
+
+#: Whether the code behind a straight drive replaces a running goal with a new
+#: one without stopping. Keyed by what the running server says implements the
+#: drive: the behavior plugin class it loaded (Nav2's ``<behavior>.plugin``
+#: parameter, the most specific fact), else the action's interface type. An
+#: implementation not listed is treated as not preemptible, since planning
+#: before sending is safe on any server.
+PREEMPTION_BY_IMPLEMENTATION: Mapping[str, bool] = {
+    # nav2_behaviors TimedBehavior plugins (see above).
+    "nav2_behaviors::DriveOnHeading": False,
+    "nav2_behaviors::BackUp": False,
+    # The action contracts those plugins serve, when the plugin is unreadable.
+    "nav2_msgs/action/DriveOnHeading": False,
+    "nav2_msgs/action/BackUp": False,
+}
+
+#: Why a drive got the mode it did.
+GOVERNANCE_SOURCE_PLUGIN = "server_plugin"
+GOVERNANCE_SOURCE_TABLE = "action_type"
+GOVERNANCE_SOURCE_UNKNOWN_TYPE = "implementation_not_declared"
+GOVERNANCE_SOURCE_TRANSPORT = "transport_cannot_resend"
+
+
+@dataclass(frozen=True)
+class SpeedGovernance:
+    """How one straight drive's speed is governed, and the fact that decided it."""
+
+    mode: str
+    action_type: str | None
+    preemption_supported: bool | None
+    source: str
+    server_plugin: str | None = None
+
+    @property
+    def resends(self) -> bool:
+        return self.mode == GOVERNANCE_RESEND
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "mode": self.mode,
+            "action_type": self.action_type,
+            "preemption_supported": self.preemption_supported,
+            "source": self.source,
+            "server_plugin": self.server_plugin,
+        }
+
+
+def decide_governance(
+    action_type: str | None,
+    *,
+    transport_resends: bool,
+    server_plugin: str | None = None,
+    table: Mapping[str, bool] | None = None,
+) -> SpeedGovernance:
+    """The one place a straight drive's speed governance is decided.
+
+    Both inputs are read from the running server: ``server_plugin`` is the
+    behavior plugin class it loaded for the drive (None when it does not say)
+    and ``action_type`` the interface it serves the action with. Nav2 has no
+    parameter or service that says whether a behavior takes a preempting goal,
+    and its answer to one cannot be told from a supported preemption by status
+    alone (both abort the old goal), so what implements the drive decides,
+    through ``PREEMPTION_BY_IMPLEMENTATION``. A transport that cannot send a
+    second goal plans before sending. An implementation nobody declared is
+    planned, the mode that is safe on every server.
+    """
+    known = PREEMPTION_BY_IMPLEMENTATION if table is None else table
+    declared: bool | None = None
+    source = GOVERNANCE_SOURCE_UNKNOWN_TYPE
+    if server_plugin and server_plugin in known:
+        declared, source = known[server_plugin], GOVERNANCE_SOURCE_PLUGIN
+    elif action_type and action_type in known:
+        declared, source = known[action_type], GOVERNANCE_SOURCE_TABLE
+    if not transport_resends:
+        source = GOVERNANCE_SOURCE_TRANSPORT
+    mode = GOVERNANCE_RESEND if transport_resends and declared else GOVERNANCE_PLANNED
+    return SpeedGovernance(mode, action_type, declared, source, server_plugin)
+
+
+#: Shortest straight drive worth sending: below this the base's odometry
+#: cannot tell it from standing still.
+MIN_DISTANCE_M = 0.01
+
+
+@dataclass(frozen=True)
+class DrivePlan:
+    """The speed and distance a straight drive is sent with, and why."""
+
+    speed_mps: float
+    distance_m: float
+    requested_speed_mps: float
+    requested_distance_m: float
+    room_m: float
+    mode: str
+    #: The drive was given less distance than asked so it ends before the floor.
+    shortened: bool
+    #: Why it cannot be sent at all; None when it can.
+    refusal: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "mode": self.mode,
+            "requested_speed_mps": round(self.requested_speed_mps, 4),
+            "requested_distance_m": round(self.requested_distance_m, 4),
+            "commanded_speed_mps": round(self.speed_mps, 4),
+            "commanded_distance_m": round(self.distance_m, 4),
+            "room_to_floor_at_send_m": (
+                round(self.room_m, 4) if math.isfinite(self.room_m) else None
+            ),
+            "shortened": self.shortened,
+        }
+
+
+def plan_drive(
+    profile: BrakingProfile,
+    *,
+    room_m: float,
+    requested_speed_mps: float,
+    requested_distance_m: float,
+    mode: str,
+    speed_fraction: float,
+) -> DrivePlan:
+    """The speed and distance to send a straight drive with, from ``room_m``.
+
+    The speed is the requested one, capped at ``speed_fraction`` of the fastest
+    speed that can still stop within the room (``v = a(-t + sqrt(t^2 +
+    2 room / a))``), so a guard watching the drive is not tripped by the next
+    scan of an approach it can stop from.
+
+    Under ``GOVERNANCE_PLANNED`` the distance is also capped, at ``room -
+    stopping_distance(v)``: a drive that ends there by itself and then needs
+    the whole stopping distance (latency at ``v``, then braking) still comes
+    to rest at the floor, never inside it. Under ``GOVERNANCE_RESEND`` the
+    distance is sent as asked and the guard lowers the speed on the way.
+    """
+    requested_speed = abs(float(requested_speed_mps))
+    requested_distance = abs(float(requested_distance_m))
+    speed = min(requested_speed, profile.max_speed(room_m) * speed_fraction)
+    distance = requested_distance
+    if mode == GOVERNANCE_PLANNED and math.isfinite(room_m):
+        distance = min(requested_distance, room_m - profile.stopping_distance(speed))
+    plan = DrivePlan(
+        speed_mps=speed,
+        distance_m=max(0.0, distance),
+        requested_speed_mps=requested_speed,
+        requested_distance_m=requested_distance,
+        room_m=room_m,
+        mode=mode,
+        shortened=distance < requested_distance,
+    )
+    if speed < MIN_SPEED_MPS:
+        return replace(plan, refusal=f"it could not stop there from even {MIN_SPEED_MPS:.2f} m/s")
+    if requested_distance >= MIN_DISTANCE_M and distance < MIN_DISTANCE_M:
+        return replace(
+            plan,
+            refusal=f"at {speed:.3f} m/s it needs {profile.stopping_distance(speed):.3f} m "
+            f"to stop, which leaves less than {MIN_DISTANCE_M:.2f} m to drive",
+        )
+    return plan
+

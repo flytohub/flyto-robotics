@@ -361,11 +361,31 @@ effect and `v^2 / (2a)` while braking, so the clearance it has to stop at is
 along the way it is going. The room it measures is, for every return at
 `(x, y)` ahead in the frame of travel, `x - sqrt(floor^2 - y^2)` (a return beside
 the path that it would pass closer than the floor counts too). The drive starts
-at no more than `0.8 * v_max(room)`, is re-sent slower (a preempting goal with
-the rest of its distance) as the room shrinks, and is stopped (zero velocity,
-cancel, zero) while the room is still at least its stopping distance, or when
-the LiDAR is unreadable or quiet for `FLYTO_ROS2_STOP_SCAN_TIMEOUT_S`. A drive
-that could not stop at the floor even at 0.02 m/s is refused before it moves.
+at no more than `0.8 * v_max(room)`, with `v_max(room) = a(-t + sqrt(t^2 +
+2 room / a))`. How its speed is governed after that is decided once per drive
+(`braking_envelope.decide_governance`) from what the running server says
+implements it, looked up in `PREEMPTION_BY_IMPLEMENTATION`: the behavior plugin
+class it loaded (`<behavior>.plugin` on `FLYTO_ROS2_BEHAVIOR_SERVER`, default
+`/behavior_server`), else the action type it serves; and from whether the
+transport can send a second goal:
+
+- `planned_before_send`: the server cannot take a preempting goal. Nav2's
+  `DriveOnHeading` and `BackUp` cannot in any release (its behavior server
+  answers one with "feature is currently not implemented. Aborting and
+  stopping", then restarts from rest), nor can any undeclared type or the rclpy
+  transport. The distance is planned with the speed, as `min(requested, room -
+  stopping_distance(v))`, so the drive ends by itself where it can still come
+  to rest at the floor. Nothing is sent while it runs. A drive that ends there,
+  short of the request, reports `obstacle_blocked` like a guard stop.
+- `preemptive_resend`: a server declared preemptible gets the whole distance
+  and is re-sent slower (a preempting goal with the rest of its distance) as
+  the room shrinks.
+
+Either way the drive is stopped (zero velocity, cancel, zero) while the room is
+still at least its stopping distance, or when the LiDAR is unreadable or quiet
+for `FLYTO_ROS2_STOP_SCAN_TIMEOUT_S`. A drive that could not stop at the floor
+even at 0.02 m/s, or would have under 0.01 m left to drive, is refused before
+it moves.
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
@@ -374,9 +394,12 @@ that could not stop at the floor even at 0.02 m/s is refused before it moves.
 | `FLYTO_ROS2_STOP_SCAN_TIMEOUT_S` | `0.5` | longest gap between scans before a guarded drive stops (at least three measured scan periods) |
 
 A straight drive's `motion_outcome` carries `braking` (the profile and where
-each value came from, the requested and commanded speeds, every slowdown, and
-the trip with its room, speed, stopping distance and the distance the robot
-actually covered after it) and every motion's carries `stop_clearance`: the
+each value came from, the requested and commanded speeds, `governance` (mode,
+action type, whether it preempts, and the fact that decided it), `plan` (the
+speed and distance sent against those asked, from the room at send), every
+slowdown, `ended: planned_stop` for a drive that ended at its planned stop
+point, and the trip with its room, speed, stopping distance and the distance
+the robot actually covered after it) and every motion's carries `stop_clearance`: the
 nearest return at rest, its bearing and side (`ahead`, `left`, `right`,
 `behind`) from the way the robot was going, and whether the floor held, over
 every direction and along the path.

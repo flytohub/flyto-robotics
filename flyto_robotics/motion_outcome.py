@@ -109,6 +109,10 @@ INVALID_SOURCE = "invalid source"
 GUARD_TRIP_CLEARANCE = "clearance"  # room to the floor inside the stopping distance
 GUARD_TRIP_BLIND = "blind"  # the sweep could not be read
 GUARD_TRIP_STALE = "stale"  # no scan arrived in time
+# A straight drive the guard did not stop, which ended where it was planned
+# to before sending: short of the request, because the clearance measured then
+# left no more room to stop at the floor (braking_envelope.plan_drive).
+GUARD_END_PLANNED_STOP = "planned_stop"
 
 # Half-width of the wedge read the way the robot was travelling.
 TRAVEL_HALF_WIDTH_RAD = math.radians(20.0)
@@ -393,6 +397,7 @@ def _reason(
     stop_range: float | None,
     clearance_floor_m: float,
     guard_trip: str | None = None,
+    guard_end: str | None = None,
 ) -> str:
     """Most specific first.
 
@@ -401,6 +406,10 @@ def _reason(
     monitor raised and then cleared during the run: a slowdown for a box
     passed earlier must not turn "no path to the goal" into "blocked".
     """
+    # A drive planned to end short of an obstacle succeeded at what it was
+    # sent, but not at what was asked: the obstacle is why, as for a guard stop.
+    if status == STATUS_SUCCEEDED and guard_end == GUARD_END_PLANNED_STOP:
+        return REASON_OBSTACLE_BLOCKED
     if status == STATUS_SUCCEEDED:
         return REASON_COMPLETED
     # The adapter's own braking guard cancels the goal it stops, so the
@@ -479,6 +488,7 @@ def summarize(
     if isinstance(result_values, Mapping):
         error_msg = str(result_values.get("error_msg") or "")[:200]
     guard_trip = (track.braking or {}).get("tripped")
+    guard_end = (track.braking or {}).get("ended")
     reason = _reason(
         status=status,
         error_code=error_code,
@@ -487,6 +497,7 @@ def summarize(
         stop_range=stop_range,
         clearance_floor_m=clearance_floor_m,
         guard_trip=guard_trip if isinstance(guard_trip, str) else None,
+        guard_end=guard_end if isinstance(guard_end, str) else None,
     )
     summary: dict[str, Any] = {
         "reason": reason,
@@ -553,6 +564,11 @@ def summarize(
             )
     if "distance_m" in track.arguments:
         summary["requested_distance_m"] = float(track.arguments["distance_m"])
+    plan = (track.braking or {}).get("plan")
+    if isinstance(plan, Mapping) and plan.get("shortened"):
+        # The caller asked for more than was sent; report against the ask.
+        summary["requested_distance_m"] = float(plan["requested_distance_m"])
+        summary["commanded_distance_m"] = float(plan["commanded_distance_m"])
     if track.capability_id == "motion.rotate" and "yaw_radians" in track.arguments:
         summary["requested_yaw_rad"] = abs(float(track.arguments["yaw_radians"]))
     if track.capability_id == "motion.navigate":
@@ -617,6 +633,21 @@ def describe(summary: Mapping[str, Any]) -> str:
             )
         else:
             parts.append(f"braking guard stopped: LiDAR {guard.get('tripped')}")
+    if isinstance(guard, Mapping) and guard.get("ended") == GUARD_END_PLANNED_STOP:
+        plan = guard.get("plan") if isinstance(guard.get("plan"), Mapping) else {}
+        room = plan.get("room_to_floor_at_send_m") or 0.0
+        parts.append(
+            f"ended at the stop point planned from {room:.3f} m "
+            f"of room to the floor at send: {plan.get('commanded_distance_m', 0.0):.3f} m "
+            f"at {plan.get('commanded_speed_mps', 0.0):.3f} m/s"
+        )
+    governance = guard.get("governance") if isinstance(guard, Mapping) else None
+    if isinstance(governance, Mapping) and (
+        guard.get("tripped") or guard.get("ended")
+    ):
+        parts.append(
+            f"speed governance {governance.get('mode')} ({governance.get('source')})"
+        )
     stopped = summary.get("final_map_pose")
     if isinstance(stopped, Mapping):
         parts.append(
