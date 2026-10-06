@@ -553,6 +553,12 @@ def _costmap_nodes() -> tuple[str, ...]:
     return tuple(item.strip() for item in raw.split(",") if item.strip())
 
 
+def _controller_nodes() -> tuple[str, ...]:
+    """Controller nodes whose goal checkers say how close a goal counts as reached."""
+    raw = os.getenv("FLYTO_ROS2_CONTROLLER_NODES", "/controller_server")
+    return tuple(item.strip() for item in raw.split(",") if item.strip())
+
+
 def _escape_enabled() -> bool:
     return os.getenv("FLYTO_ROS2_INFLATION_ESCAPE", "on").strip().lower() not in {
         "0",
@@ -1916,6 +1922,9 @@ class GenericROS2Adapter:
             reader if callable(reader) else None, _costmap_nodes()
         )
         can_back_off = "motion.retreat" in self._declared
+        arrival_tolerance, _ = inflation_escape.read_arrival_tolerance(
+            reader if callable(reader) else None, _controller_nodes()
+        )
         decision = inflation_escape.plan_escape(
             sweep,
             geometry,
@@ -1927,6 +1936,7 @@ class GenericROS2Adapter:
             ),
             margin_m=_env_metres("FLYTO_ROS2_ESCAPE_MARGIN_M", 0.10, low=0.0, high=1.0),
             max_lateral_m=_env_metres("FLYTO_ROS2_ESCAPE_MAX_LATERAL_M", 1.0, low=0.1, high=3.0),
+            arrival_tolerance_m=arrival_tolerance,
         )
         if decision is None:
             return None

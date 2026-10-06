@@ -34,6 +34,9 @@ from typing import Any
 #: Nav2's documented costmap defaults, used when a parameter cannot be read.
 DEFAULT_INFLATION_RADIUS_M = 0.55
 DEFAULT_ROBOT_RADIUS_M = 0.1
+#: Nav2's SimpleGoalChecker default ``xy_goal_tolerance``: a goal this close
+#: to the robot counts as reached, used when the controller cannot be asked.
+DEFAULT_ARRIVAL_TOLERANCE_M = 0.25
 #: A radius outside this band is a misread, not a robot.
 MAX_PLAUSIBLE_RADIUS_M = 5.0
 
@@ -208,6 +211,32 @@ def read_costmap_geometry(
     )
 
 
+def read_arrival_tolerance(
+    reader: ParameterReader | None, nodes: Iterable[str]
+) -> tuple[float, str]:
+    """How close Nav2 counts a goal as reached, from the controllers' goal checkers.
+
+    Every goal checker the controller loads (``goal_checker_plugins``) is read
+    and the largest ``xy_goal_tolerance`` is kept: the leg is judged by
+    whichever is loosest. Falls back to Nav2's default when none can be read.
+    Returns the tolerance and where it came from (``parameters``/``fallback``).
+    """
+    if reader is None:
+        return DEFAULT_ARRIVAL_TOLERANCE_M, "fallback"
+    found: list[float] = []
+    for node in nodes:
+        try:
+            for plugin in parameter_strings(reader(node, "goal_checker_plugins")):
+                value = parameter_number(reader(node, f"{plugin}.xy_goal_tolerance"))
+                if _plausible(value):
+                    found.append(float(value))  # type: ignore[arg-type]
+        except Exception:  # noqa: BLE001 - one unreadable node falls back
+            continue
+    if not found:
+        return DEFAULT_ARRIVAL_TOLERANCE_M, "fallback"
+    return max(found), "parameters"
+
+
 # -- scan geometry -----------------------------------------------------------
 
 
@@ -217,6 +246,9 @@ class Beam:
 
     bearing: float
     range_m: float | None
+    #: False for a bin the LiDAR could not read that is taken as part of an
+    #: obstacle beside it (see :func:`obstacle_cluster`); its range is assumed.
+    seen: bool = True
 
     def point(self) -> tuple[float, float] | None:
         if self.range_m is None:
@@ -273,6 +305,16 @@ def obstacle_cluster(beams: Sequence[Beam]) -> tuple[Beam, ...]:
     Starts at the nearest return in the front sector and grows in both
     directions while neighbouring returns stay within ``CLUSTER_JUMP_M`` of
     each other and remain ahead of the robot (|bearing| < 90 degrees).
+
+    A bin the LiDAR could not read is not room, and so not the object's edge:
+    growth carries on past it, and every unread bin met on the way -- inside
+    the object or just beyond its last return -- is kept as part of it, at the
+    range of the last return before it (``seen=False``), as far as an arc of
+    ``CLUSTER_JUMP_M`` from that return. The object can only come out wider
+    for what the scan did not see, never narrower. (Twin 2026-10-06: one
+    unread bin in a 0.40 m box's face cut its extent on one side to 0.02 m
+    and 0.085 m, and the way round was placed 0.22 m and 0.29 m to the side
+    instead of 0.40 m.)
     """
     count = len(beams)
     front = [
@@ -283,23 +325,38 @@ def obstacle_cluster(beams: Sequence[Beam]) -> tuple[Beam, ...]:
     if not front:
         return ()
     seed = min(front, key=lambda index: beams[index].range_m)  # type: ignore[arg-type,return-value]
-    members = {seed}
+    members: dict[int, Beam] = {seed: beams[seed]}
     for direction in (1, -1):
         previous = beams[seed]
+        unread: list[int] = []
         index = seed
         for _ in range(count - 1):
             index = (index + direction) % count
             beam = beams[index]
-            if (
-                index in members
-                or beam.range_m is None
-                or abs(beam.bearing) >= math.pi / 2
-                or abs(beam.range_m - previous.range_m) > CLUSTER_JUMP_M  # type: ignore[operator]
-            ):
+            if index in members or abs(beam.bearing) >= math.pi / 2:
                 break
-            members.add(index)
+            if beam.range_m is None:
+                # Only within the continuity scale that joins two returns into
+                # one object: a longer unread run is no more this object's
+                # surface than a return that far away would be.
+                arc = previous.range_m * abs(  # type: ignore[operator]
+                    math.remainder(beam.bearing - previous.bearing, math.tau)
+                )
+                if arc > CLUSTER_JUMP_M:
+                    break
+                unread.append(index)
+                continue
+            if abs(beam.range_m - previous.range_m) > CLUSTER_JUMP_M:  # type: ignore[operator]
+                break
+            for gap in unread:
+                members[gap] = Beam(beams[gap].bearing, previous.range_m, seen=False)
+            unread = []
+            members[index] = beam
             previous = beam
-    return tuple(beams[index] for index in sorted(members))
+        for gap in unread:
+            # Unread bins past the last return: the object may go on through them.
+            members.setdefault(gap, Beam(beams[gap].bearing, previous.range_m, seen=False))
+    return tuple(members[index] for index in sorted(members))
 
 
 def segment_clearance(
@@ -388,6 +445,7 @@ class EscapeDecision:
     backoff_limited_by: str | None = None
     side: str | None = None
     lateral_offset_m: float = 0.0
+    arrival_tolerance_m: float = 0.0
     obstacle: Mapping[str, Any] | None = None
     sides_tried: tuple[Mapping[str, Any], ...] = field(default_factory=tuple)
 
@@ -407,6 +465,7 @@ class EscapeDecision:
             "clearance_floor_m": metres(self.floor_m),
             "clearances_m": {key: metres(value) for key, value in self.clearances.items()},
             "costmap": self.geometry.to_dict(),
+            "arrival_tolerance_m": metres(self.arrival_tolerance_m),
         }
         if self.pinned:
             data["backoff_m"] = metres(self.backoff_m)
@@ -451,8 +510,17 @@ def plan_escape(
     max_backoff_m: float,
     margin_m: float,
     max_lateral_m: float,
+    arrival_tolerance_m: float,
 ) -> EscapeDecision | None:
-    """Decide from one sweep; None when the sweep has no usable geometry."""
+    """Decide from one sweep; None when the sweep has no usable geometry.
+
+    ``arrival_tolerance_m`` is how close Nav2 counts a goal as reached. The
+    lateral waypoint is placed at least that far plus the margin from where
+    the back-off ends, so Nav2 cannot report it reached before the robot has
+    moved: a waypoint inside the tolerance is "reached" where the robot
+    stands (twin 2026-10-06: a 0.22 m waypoint against a 0.25 m tolerance
+    succeeded in 20 ms and the goal leg started from right behind the box).
+    """
     beams = sweep_beams(sweep)
     if not beams:
         return None
@@ -464,6 +532,7 @@ def plan_escape(
         "floor_m": floor_m,
         "clearances": clearances,
         "geometry": geometry,
+        "arrival_tolerance_m": max(0.0, arrival_tolerance_m),
     }
     if front is None or front >= threshold:
         # Nothing ahead inside inflation (an unreadable front is the
@@ -483,7 +552,8 @@ def plan_escape(
     cluster = obstacle_cluster(beams)
     lateral = _lateral_positions(cluster)
     obstacle = {
-        "returns": len(cluster),
+        "returns": sum(1 for beam in cluster if beam.seen),
+        "unread_bins": sum(1 for beam in cluster if not beam.seen),
         "bearing_min_rad": round(min(beam.bearing for beam in cluster), 4),
         "bearing_max_rad": round(max(beam.bearing for beam in cluster), 4),
         "lateral_min_m": round(min(lateral), 3),
@@ -493,6 +563,9 @@ def plan_escape(
     start = (-backoff, 0.0)
     for side in choose_sides(clearances["left"], clearances["right"]):
         offset = lateral_offset(cluster, side, geometry.robot_radius_m, margin_m)
+        leaves = max(0.0, arrival_tolerance_m) + margin_m
+        if abs(offset) < leaves:
+            offset = leaves if side == "left" else -leaves
         attempt: dict[str, Any] = {"side": side, "lateral_offset_m": round(offset, 3)}
         side_room = clearances[side]
         swept = segment_clearance(beams, start, (-backoff, offset))
