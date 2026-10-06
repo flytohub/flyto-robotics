@@ -49,6 +49,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from . import braking_envelope as braking
+from . import sim_time
 
 REASON_COMPLETED = "completed"
 REASON_CANCELLED = "cancelled"
@@ -185,6 +186,10 @@ class MotionTrack:
     # something between the controller and the wheels.
     stalls: list[dict[str, Any]] = field(default_factory=list)
     recoveries_at_s: list[float] = field(default_factory=list)
+    # The simulator's clock during the motion (simulation only); None with
+    # ``sim_time_note`` saying why there is no record.
+    clock: sim_time.ClockRecord | None = None
+    sim_time_note: dict[str, Any] | None = None
     _still_since: float | None = None
     _still_pose: Mapping[str, Any] | None = None
     _still_commands: dict[str, _Commanded] = field(default_factory=dict)
@@ -220,6 +225,15 @@ class MotionTrack:
                 self._still_commands = {}
             return
         self.close_still(at)
+
+    def saw_clock(self, sim_s: float, wall_s: float) -> None:
+        if self.clock is not None:
+            self.clock.add(sim_s, wall_s)
+
+    def sim_time_summary(self) -> dict[str, Any]:
+        if self.clock is not None:
+            return self.clock.summary()
+        return dict(self.sim_time_note or sim_time.not_applicable())
 
     def saw_command(self, topic: str, linear: float, angular: float) -> None:
         """A velocity command on ``topic``; kept only while the base stands still."""
@@ -553,6 +567,7 @@ def summarize(
         summary["stalls"] = [dict(stall) for stall in track.stalls]
     if track.recoveries_at_s:
         summary["recoveries_at_s"] = list(track.recoveries_at_s)
+    summary["sim_time"] = track.sim_time_summary()
     if start is not None and end is not None:
         if track.capability_id == "motion.rotate":
             summary["yaw_turned_rad"] = round(

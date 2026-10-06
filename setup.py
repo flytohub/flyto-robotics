@@ -6,7 +6,7 @@ PACKAGE_NAME = "flyto_robotics"
 
 setup(
     name=PACKAGE_NAME,
-    version="0.6.4",
+    version="0.6.5",
     packages=find_packages(exclude=("tests",)),
     package_data={PACKAGE_NAME: []},
     include_package_data=True,

@@ -2,6 +2,12 @@
 
 All notable project changes are recorded here.
 
+## 0.6.5 — 2026-10-06
+
+- Read-only; no motion behaviour changes. Every motion result says how fast a simulator's clock ran during it. Twin, 2026-10-06 22:01 local: a detour took 68 s where the same detour usually takes ~33 s. Every phase was stretched 1.8-2.4x in wall time, including Nav2's BackUp (9.1 s against ~5 s for the same 0.20 m), with no stall and no recovery. The simulator had fallen behind real time, which the result could not show.
+- `motion_outcome.sim_time` (additive): in a simulation deployment (the adapter's own deployment, the configured mode confirmed against the graph as `served_identity` reports it, never a resource name), the rosbridge transport samples the simulator clock (`FLYTO_ROS2_SIM_MARKER_TOPIC`, `/clock`, read only, at most every 100 ms). The result reports `rtf_mean` (simulated seconds per wall second over the motion), `rtf_min` (over windows of at least 1 s), `wall_s`, `sim_s`, `samples` and `clock_reset_seen`, plus `sim_slow` when `rtf_min` is below `sim_time.SIM_SLOW_RTF` (0.5; `FLYTO_ROS2_SIM_SLOW_RTF` overrides it with a factor in (0, 1]), with `sim_slow_threshold` and its `basis`. A real deployment reports `{"applicable": false, "reason": "real deployment: no simulator clock"}` and reads nothing new. A simulated motion on the rclpy transport reports that it does not read the clock.
+- `navigation_escape.legs[].sim_time` gives each leg's record. `navigation_escape.sim_time` covers the whole call: the legs' clocks summed, and the slowest window of any leg.
+
 ## 0.6.4 — 2026-10-06
 
 - A straight drive's speed is governed the way the server running it can take, and on Nav2 no goal is ever sent mid-drive. The braking guard slowed a drive by sending a slower goal that preempted the running one, but Nav2's straight-drive behaviors do not support preemption in any release: the twin's behavior server logged "Received a preemption request for drive_on_heading, however feature is currently not implemented. Aborting and stopping" on every slowdown (2026-10-06 19:32, 20:13, 20:20, 20:26 local), stopped the robot and restarted the drive from rest, and the guard tripped the restarted drive within a scan (20:13: a 1.2 m advance ended after 0.052 m, `obstacle_blocked`), which set off the detour. It always stopped with the floor held, but the slowdown it was designed to do never happened.
