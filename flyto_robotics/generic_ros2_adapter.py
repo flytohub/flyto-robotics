@@ -161,8 +161,11 @@ def _motion_kind(capability_id: str) -> str | None:
 # The floor above is checked once, before a motion starts. A straight drive is
 # then watched on every scan: it is stopped while the room left before a return
 # reaches the floor is still at least the distance the robot needs to stop from
-# its speed (braking_envelope), and its commanded speed is lowered as that room
-# shrinks. Turns and planned paths have no single direction and stay with Nav2.
+# its speed (braking_envelope). Its speed is governed one of two ways
+# (braking.decide_governance): lowered by a preempting goal as the room shrinks,
+# on a server that takes one, or else planned before sending together with a
+# distance that ends the drive where it can still stop at the floor. Turns and
+# planned paths have no single direction and stay with Nav2.
 
 #: Direction of travel of each straight drive, from the robot's heading.
 STRAIGHT_MOTIONS: Mapping[str, float] = {
@@ -271,6 +274,18 @@ class _BrakingGuard:
     # Odometry at the trip and at rest, for the measured stopping distance.
     trip_pose: Mapping[str, Any] | None = None
     stop_command_sent: bool = False
+    # How the speed is governed while the drive runs (braking.decide_governance)
+    # and the speed and distance planned before it was sent.
+    governance: braking.SpeedGovernance | None = None
+    plan: braking.DrivePlan | None = None
+    # How the drive ended when the guard did not stop it: at the stop point
+    # planned before sending (GUARD_END_PLANNED_STOP), short of the request.
+    ended: str | None = None
+
+    @property
+    def resends(self) -> bool:
+        """Whether a slower goal may be sent while this drive runs."""
+        return self.governance is not None and self.governance.resends
 
     def record(self, rest_pose: Mapping[str, Any] | None) -> dict[str, Any]:
         out: dict[str, Any] = {
@@ -291,6 +306,12 @@ class _BrakingGuard:
             "speed_changes": list(self.speed_changes),
             "tripped": self.tripped,
         }
+        if self.governance is not None:
+            out["governance"] = self.governance.to_dict()
+        if self.plan is not None:
+            out["plan"] = self.plan.to_dict()
+        if self.ended is not None:
+            out["ended"] = self.ended
         if self.minimum_room_m is not None:
             out["minimum_room_to_floor_m"] = round(self.minimum_room_m, 4)
         if self.trip is not None:
@@ -860,8 +881,14 @@ class _ObservationState:
         requested_speed_mps: float,
         distance_m: float,
         start_room_m: float | None,
+        governance: braking.SpeedGovernance | None = None,
+        plan: braking.DrivePlan | None = None,
     ) -> None:
-        """Watch the straight drive ``call_id`` against ``profile`` from now on."""
+        """Watch the straight drive ``call_id`` against ``profile`` from now on.
+
+        Without a ``governance`` the drive is never re-sent: the guard only
+        stops it, which is safe on any server.
+        """
         with self._condition:
             if call_id in self._guards:
                 return  # a resumed call keeps the guard it started with
@@ -874,6 +901,8 @@ class _ObservationState:
                 distance_m=float(distance_m),
                 start_room_m=start_room_m,
                 start_pose=dict(self._pose) if self._pose is not None else None,
+                governance=governance,
+                plan=plan,
             )
             guard.speed_changes.append(
                 {"at_s": 0.0, "speed_mps": round(float(speed_mps), 4), "room_m": (
@@ -918,7 +947,11 @@ class _ObservationState:
             speed = max(guard.speed_mps, measured)
             stopping = guard.profile.stopping_distance(speed)
             allowed = guard.profile.max_speed(room.room_m) * SLOWDOWN_FRACTION
-            if room.room_m <= stopping or allowed < braking.MIN_SPEED_MPS:
+            # A drive that can be slowed is stopped once even the slowest
+            # speed no longer fits; one that cannot is stopped only when its
+            # own speed no longer fits (its distance was planned to end first).
+            cannot_slow = guard.resends and allowed < braking.MIN_SPEED_MPS
+            if room.room_m <= stopping or cannot_slow:
                 self._trip_guard(guard, motion_outcome.GUARD_TRIP_CLEARANCE, {
                     "room_m": round(room.room_m, 4),
                     "speed_mps": round(speed, 4),
@@ -928,7 +961,8 @@ class _ObservationState:
                 })
                 continue
             if (
-                allowed < guard.speed_mps * SLOWDOWN_STEP
+                guard.resends
+                and allowed < guard.speed_mps * SLOWDOWN_STEP
                 and time.monotonic() - guard.last_slowdown_at >= SLOWDOWN_MIN_INTERVAL_S
             ):
                 guard.slow_to = allowed
@@ -1010,6 +1044,15 @@ class _ObservationState:
                 else self._guards.pop(call_id, None)
             )
             if guard is not None:
+                if (
+                    status == motion_outcome.STATUS_SUCCEEDED
+                    and guard.tripped is None
+                    and guard.plan is not None
+                    and guard.plan.shortened
+                ):
+                    # The drive ended where it was planned to, short of the
+                    # request, because going on would have broken the floor.
+                    guard.ended = motion_outcome.GUARD_END_PLANNED_STOP
                 track.braking = guard.record(snapshot.get("pose"))
         return motion_outcome.summarize(
             track,
@@ -1468,6 +1511,20 @@ def _motion_result(
     return CallResult(call_id, outcome, evidence=merged, detail=detail)
 
 
+def _ended_at_planned_stop(summary: Mapping[str, Any] | None) -> bool:
+    """A straight drive that ended at the stop point planned before sending.
+
+    Its server reports success, but the drive went less far than asked because
+    the floor was in the way: the call failed, ``obstacle_blocked``, exactly
+    as if the guard had stopped it, so a caller can plan a way round.
+    """
+    record = summary.get("braking") if isinstance(summary, Mapping) else None
+    return (
+        isinstance(record, Mapping)
+        and record.get("ended") == motion_outcome.GUARD_END_PLANNED_STOP
+    )
+
+
 def _with_artifacts(result: CallResult) -> CallResult:
     """A capture's result with its picture also as a contract artifact.
 
@@ -1536,6 +1593,8 @@ class GenericROS2Adapter:
         # resumed call keeps it rather than re-deciding half way out), and the
         # escape leg running now, so a cancel of the call reaches it.
         self._escapes: dict[str, inflation_escape.EscapeDecision] = {}
+        # The behavior plugin class the server loaded per action, once read.
+        self._server_plugins: dict[str, str | None] = {}
         self._escape_legs: dict[str, str] = {}
         self._escape_starts: dict[str, dict[str, Any]] = {}
         self._cancelled_escapes: dict[str, bool] = {}
@@ -1887,18 +1946,23 @@ class GenericROS2Adapter:
     def _arm_braking(
         self, call_id: str, capability_id: str, arguments: Mapping[str, Any]
     ) -> dict[str, Any] | CallResult:
-        """Cap a straight drive's speed by its room and have the backend guard it.
+        """Plan a straight drive from its room and have the backend guard it.
 
-        The speed is the requested one, or lower: the fastest that can still
-        come to rest at the clearance floor from the room the drive starts
-        with, less a margin. A drive that cannot be given even the minimum
-        speed is refused before it moves.
+        How the speed can be governed once the drive runs is decided first
+        (``braking.decide_governance``, from the server running the drive).
+        The speed is the requested one, or lower: a margin under the fastest
+        that can still come to rest at the clearance floor from the room the
+        drive starts with. A server that cannot take a slower goal mid-drive
+        also gets a shorter distance, so the drive ends by itself where it can
+        still stop at the floor. A drive that cannot be given the minimum
+        speed or distance is refused before it moves.
         """
         arm = getattr(self.backend, "arm_braking_guard", None)
         profile_of = getattr(self.backend, "braking_profile", None)
         if not callable(arm) or not callable(profile_of):
             return dict(arguments)
         profile = profile_of()
+        governance = self._speed_governance(capability_id)
         observation = self.backend.observation()
         reading = observation.get("range")
         sweep = reading.get("sweep") if isinstance(reading, Mapping) else None
@@ -1909,35 +1973,94 @@ class GenericROS2Adapter:
                 OUTCOME_REFUSED,
                 detail="the LiDAR sweep cannot be read, so the room to stop cannot be judged",
             )
-        requested = float(
-            arguments.get("speed_mps", DEFAULT_STRAIGHT_SPEED_MPS[capability_id])
+        plan = braking.plan_drive(
+            profile,
+            room_m=room.room_m,
+            requested_speed_mps=float(
+                arguments.get("speed_mps", DEFAULT_STRAIGHT_SPEED_MPS[capability_id])
+            ),
+            requested_distance_m=float(arguments["distance_m"]),
+            mode=governance.mode,
+            speed_fraction=SLOWDOWN_FRACTION,
         )
-        allowed = profile.max_speed(room.room_m) * SLOWDOWN_FRACTION
-        speed = min(requested, allowed)
-        if speed < braking.MIN_SPEED_MPS:
+        if plan.refusal is not None:
             return CallResult(
                 call_id,
                 OUTCOME_REFUSED,
                 evidence={
                     "reason_code": motion_outcome.REASON_OBSTACLE_BLOCKED,
-                    "braking": {"profile": profile.to_dict(), **room.to_dict()},
+                    "braking": {
+                        "profile": profile.to_dict(),
+                        "governance": governance.to_dict(),
+                        "plan": plan.to_dict(),
+                        **room.to_dict(),
+                    },
                 },
                 detail=(
                     f"only {room.room_m:.3f} m of room before the {profile.floor_m:.3f} m "
-                    "clearance floor the way the robot would drive; it could not stop "
-                    f"there from even {braking.MIN_SPEED_MPS:.2f} m/s"
+                    f"clearance floor the way the robot would drive; {plan.refusal}"
                 ),
             )
         arm(
             call_id,
             capability_id,
             profile=profile,
-            speed_mps=speed,
-            requested_speed_mps=requested,
-            distance_m=float(arguments["distance_m"]),
+            speed_mps=plan.speed_mps,
+            requested_speed_mps=plan.requested_speed_mps,
+            distance_m=plan.distance_m,
             start_room_m=room.room_m,
+            governance=governance,
+            plan=plan,
         )
-        return {**arguments, "speed_mps": speed}
+        return {**arguments, "speed_mps": plan.speed_mps, "distance_m": plan.distance_m}
+
+    def _speed_governance(self, capability_id: str) -> braking.SpeedGovernance:
+        """How this drive's speed can be governed on the server that runs it."""
+        _, action_name, declared_type = _interface(capability_id)
+        action_type = next(
+            (
+                item.type
+                for item in self._interfaces_for_governance()
+                if item.kind == "action" and item.name == action_name
+            ),
+            declared_type,
+        )
+        return braking.decide_governance(
+            action_type,
+            transport_resends=bool(getattr(self.backend, "RESENDS_GOALS", False)),
+            server_plugin=self._server_plugin(action_name),
+        )
+
+    def _server_plugin(self, action_name: str) -> str | None:
+        """The behavior plugin class the running server loaded for an action.
+
+        Nav2's behavior server names each behavior after its action and
+        declares ``<behavior>.plugin`` (``nav2_behaviors::DriveOnHeading``).
+        Read once per action on this adapter; None when the server does not
+        say or cannot be read, which is kept too: a robot without a behavior
+        server must not wait out a parameter read before every drive, and
+        "not said" only ever makes a drive planned, the mode safe everywhere.
+        """
+        if action_name in self._server_plugins:
+            return self._server_plugins[action_name]
+        reader = getattr(self.backend, "get_parameter", None)
+        node = os.getenv("FLYTO_ROS2_BEHAVIOR_SERVER", "/behavior_server").strip()
+        if not callable(reader) or not node:
+            return None
+        try:
+            value = reader(node, f"{action_name.strip('/')}.plugin")
+        except Exception as error:  # noqa: BLE001 - unreadable is "not said"
+            logger.info("behavior plugin for %s unreadable: %s", action_name, error)
+            value = None
+        plugin = inflation_escape.parameter_text(value)
+        self._server_plugins[action_name] = plugin
+        return plugin
+
+    def _interfaces_for_governance(self) -> Sequence[StandardInterface]:
+        try:
+            return tuple(self.backend.discover())
+        except Exception:  # noqa: BLE001 - the declared type then stands
+            return ()
 
     # -- leaving an obstacle's inflation before navigating -------------------------
 
@@ -2584,6 +2707,9 @@ class RclpyROS2Backend(_ObservationState):
     spin to a fixed deadline costs that deadline whether or not anything came.
     """
 
+    #: This transport only stops a guarded drive; it never re-sends one.
+    RESENDS_GOALS = False
+
     def __init__(self, *, presence_only: bool = False) -> None:
         # See RosbridgeROS2Backend: odometry and lifecycle events only.
         self._presence_only = bool(presence_only)
@@ -2985,8 +3111,8 @@ class RclpyROS2Backend(_ObservationState):
         """Wait for a goal's result, stopping it if its braking guard trips.
 
         This transport only stops a guarded drive; it does not re-send it
-        slower (the rosbridge transport does). The drive's starting speed is
-        still capped by the room it starts with.
+        slower, so its drives are planned before sending (speed and distance
+        from the room they start with; see ``braking.plan_drive``).
         """
         done = threading.Event()
         future.add_done_callback(lambda _future: done.set())
@@ -3226,11 +3352,11 @@ class RclpyROS2Backend(_ObservationState):
             status=status,
             result_values=_message_fields(getattr(response, "result", None)),
         )
-        if status == GoalStatus.STATUS_SUCCEEDED:
+        if status == GoalStatus.STATUS_SUCCEEDED and not _ended_at_planned_stop(summary):
             result = _motion_result(
                 call_id, OUTCOME_COMPLETED, self._evidence(capability_id), summary
             )
-        elif braked:
+        elif braked or _ended_at_planned_stop(summary):
             result = _motion_result(
                 call_id,
                 OUTCOME_FAILED,
@@ -3391,6 +3517,10 @@ class RosbridgeROS2Backend(_ObservationState):
     external computer and speaks the same standard ROS 2 capability contract
     as :class:`RclpyROS2Backend`.
     """
+
+    #: This transport can send a second goal for a running straight drive, so
+    #: a server that takes preempting goals can have a drive slowed mid-way.
+    RESENDS_GOALS = True
 
     def __init__(
         self,
@@ -4191,11 +4321,12 @@ class RosbridgeROS2Backend(_ObservationState):
             status=status,
             result_values=values if isinstance(values, Mapping) else None,
         )
-        if result_message.get("result") is True and status == 4:
+        planned_stop = _ended_at_planned_stop(summary)
+        if result_message.get("result") is True and status == 4 and not planned_stop:
             result = _motion_result(
                 call_id, OUTCOME_COMPLETED, self._evidence(capability_id), summary
             )
-        elif braked:
+        elif braked or planned_stop:
             result = _motion_result(
                 call_id,
                 OUTCOME_FAILED,
@@ -4287,7 +4418,12 @@ class RosbridgeROS2Backend(_ObservationState):
         action_name = self._active_actions.get(call_id)
         with self._condition:
             guard = self._guards.get(call_id)
-            if guard is None or guard.slow_to is None or action_name is None:
+            if (
+                guard is None
+                or not guard.resends
+                or guard.slow_to is None
+                or action_name is None
+            ):
                 return
             speed = guard.slow_to
             guard.slow_to = None
