@@ -309,6 +309,37 @@ class _BrakingGuard:
         return out
 
 
+def _command_watch_topics() -> tuple[str, ...]:
+    """Velocity topics read (never written) to say why a goal stood still.
+
+    Nav2's controller output (``/cmd_vel_nav``) and what reaches the base
+    (``/cmd_vel``): a stall with near-zero controller commands is the
+    controller choosing to stand; real commands that never reach the base
+    point between them (smoother, collision monitor). Empty turns it off.
+    """
+    raw = os.getenv("FLYTO_ROS2_COMMAND_WATCH_TOPICS", "/cmd_vel_nav,/cmd_vel")
+    return tuple(dict.fromkeys(item.strip() for item in raw.split(",") if item.strip()))
+
+
+#: Watched velocity topics are sampled at most this often (ms) by rosbridge.
+COMMAND_WATCH_THROTTLE_MS = 100
+
+
+def _twist_command(message: Any) -> tuple[float, float] | None:
+    """(linear x, angular z) of a Twist or TwistStamped message, or None."""
+    if not isinstance(message, Mapping):
+        return None
+    twist = message.get("twist") if isinstance(message.get("twist"), Mapping) else message
+    linear = twist.get("linear")
+    angular = twist.get("angular")
+    if not isinstance(linear, Mapping) or not isinstance(angular, Mapping):
+        return None
+    try:
+        return float(linear.get("x", 0.0)), float(angular.get("z", 0.0))
+    except (TypeError, ValueError):
+        return None
+
+
 def _collision_state_topic() -> str:
     """Nav2's collision monitor state, read to tell why a motion stopped.
 
@@ -927,6 +958,15 @@ class _ObservationState:
         for track in self._motion_tracks.values():
             track.saw_range(minimum_range_m)
 
+    def _track_command(self, topic: str, message: Mapping[str, Any]) -> None:
+        """A velocity command seen on a watched topic (see ``_command_watch_topics``)."""
+        command = _twist_command(message)
+        if command is None:
+            return
+        with self._condition:
+            for track in self._motion_tracks.values():
+                track.saw_command(topic, *command)
+
     def _track_collision_state(self, action_type: Any, polygon_name: Any) -> None:
         try:
             kind = int(action_type)
@@ -941,7 +981,7 @@ class _ObservationState:
         with self._condition:
             track = self._motion_tracks.get(call_id)
             if track is not None:
-                track.saw_feedback(values)
+                track.saw_feedback(values, time.monotonic())
 
     def _motion_summary(
         self,
@@ -1061,6 +1101,8 @@ class _ObservationState:
             self._velocity = velocity
             self._pose_seen_at = observed
             self._odom_sequence += 1
+            for track in self._motion_tracks.values():
+                track.saw_base(velocity, observed, pose)
             self._heard("odometry", observed)
             self._condition.notify_all()
 
@@ -1986,15 +2028,32 @@ class GenericROS2Adapter:
         are the real target's. An escape leg that does not complete ends the
         call with that leg's outcome and says which leg it was.
         """
-        deadline = time.monotonic() + deadline_seconds
+        began = time.monotonic()
+        deadline = began + deadline_seconds
         start = self._escape_starts.get(call_id) or {}
         goal_xy = (float(target["x"]), float(target["y"]))
         waypoint = inflation_escape.waypoint_pose(start, decision, goal_xy)
         heading = inflation_escape.waypoint_heading(start, decision, goal_xy)
         legs: list[dict[str, Any]] = []
+        leg_started = began
+
+        def record(leg: str, outcome: str) -> None:
+            # When each leg began and ended, from the call's start: the gap
+            # between one leg's end and the next one's start is the adapter's.
+            nonlocal leg_started
+            now = time.monotonic()
+            legs.append(
+                {
+                    "leg": leg,
+                    "outcome": outcome,
+                    "started_at_s": round(leg_started - began, 3),
+                    "elapsed_s": round(now - leg_started, 3),
+                }
+            )
+            leg_started = now
 
         def ended(leg: str, result: CallResult) -> CallResult:
-            legs.append({"leg": leg, "outcome": result.outcome})
+            record(leg, result.outcome)
             outcome = result.outcome if result.outcome != OUTCOME_REFUSED else OUTCOME_FAILED
             return CallResult(
                 call_id,
@@ -2020,7 +2079,7 @@ class GenericROS2Adapter:
             )
             if result.outcome != OUTCOME_COMPLETED:
                 return ended("backoff", result)
-            legs.append({"leg": "backoff", "outcome": result.outcome})
+            record("backoff", result.outcome)
         # Two NavigateToPose legs, not one NavigateThroughPoses goal: a stock
         # Nav2 configuration can route through-poses goals to a behaviour tree
         # that only reads a single goal (TurtleBot3 Jazzy did: the planner got an
@@ -2031,7 +2090,7 @@ class GenericROS2Adapter:
         )
         if result.outcome != OUTCOME_COMPLETED:
             return ended("waypoint", result)
-        legs.append({"leg": "waypoint", "outcome": result.outcome})
+        record("waypoint", result.outcome)
         if call_id in self._cancelled_escapes:
             return ended("goal", CallResult(call_id, OUTCOME_CANCELLED, detail="cancelled"))
         result = self.backend.invoke(
@@ -2040,7 +2099,7 @@ class GenericROS2Adapter:
             arguments=target,
             deadline_seconds=max(0.0, deadline - time.monotonic()),
         )
-        legs.append({"leg": "goal", "outcome": result.outcome})
+        record("goal", result.outcome)
         return CallResult(
             result.call_id,
             result.outcome,
@@ -3662,6 +3721,9 @@ class RosbridgeROS2Backend(_ObservationState):
                 raw_message.get("action_type"), raw_message.get("polygon_name")
             )
             return
+        if topic in _command_watch_topics():
+            self._track_command(topic, raw_message)
+            return
         message = dict(raw_message)
         observed = time.monotonic()
         waiter = self._capture_waits.get(topic)
@@ -3796,6 +3858,15 @@ class RosbridgeROS2Backend(_ObservationState):
                 *subscriptions,
                 (collision_topic, COLLISION_STATE_TYPE, "reliable", 0),
             )
+        if not self._presence_only:
+            # Read only, sampled: what was commanded while a goal stood still.
+            subscriptions = (
+                *subscriptions,
+                *(
+                    (topic, None, "reliable", COMMAND_WATCH_THROTTLE_MS)
+                    for topic in _command_watch_topics()
+                ),
+            )
         if self._presence_only:
             # Odometry says the robot is there; a few a second is plenty.
             subscriptions = ((subscriptions[0][0], subscriptions[0][1], "reliable", 500),)
@@ -3809,21 +3880,23 @@ class RosbridgeROS2Backend(_ObservationState):
         for index, (topic, message_type, reliability, throttle_rate) in enumerate(
             subscriptions
         ):
-            self._send(
-                {
-                    "op": "subscribe",
-                    "id": f"observation-{index}",
-                    "topic": topic,
-                    "type": message_type,
-                    "qos": {
-                        "history": "keep_last",
-                        "depth": 5,
-                        "reliability": reliability,
-                        "durability": "volatile",
-                    },
-                    "throttle_rate": throttle_rate,
-                }
-            )
+            request: dict[str, Any] = {
+                "op": "subscribe",
+                "id": f"observation-{index}",
+                "topic": topic,
+                "qos": {
+                    "history": "keep_last",
+                    "depth": 5,
+                    "reliability": reliability,
+                    "durability": "volatile",
+                },
+                "throttle_rate": throttle_rate,
+            }
+            if message_type is not None:
+                # Without a type rosbridge takes the one the graph advertises,
+                # so a stamped and an unstamped cmd_vel both subscribe.
+                request["type"] = message_type
+            self._send(request)
 
     def capture(
         self, *, call_id: str, capability_id: str, deadline_seconds: float

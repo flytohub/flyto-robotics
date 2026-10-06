@@ -95,3 +95,13 @@ is inferred, not measured.
 
 - Run the twin box series on 0.6.2 and record the goal-leg start yaw and
   `number_of_recoveries` per run.
+
+## Correction (2026-10-06, after 0.6.2 ran on the twin)
+
+The root cause claimed above is **not established**. On 0.6.2,
+t-f044dad913d21612 stalled the same way (8 progress failures, 9 recoveries,
+119 s goal leg) with the goal leg starting at map yaw +0.484, away from the box,
+the same start heading as a 20.5 s run of the same release (2619db56, +0.492).
+Heading separated the 0.6.1 slow run from the fast ones, but it is not what
+causes the stall. The heading change stays, because it is harmless, but it is
+not a fix. See `2026-10-06-goal-stall-instrumentation.md`.

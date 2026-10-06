@@ -174,7 +174,7 @@ def test_the_backend_subscribes_to_the_nav2_lifecycle_topics(no_sleep):
         return sockets[-1]
 
     backend = RosbridgeROS2Backend(url="ws://127.0.0.1:1", connection_factory=connect)
-    topics = {item["topic"]: item["type"] for item in sockets[-1].subscribed}
+    topics = {item["topic"]: item.get("type") for item in sockets[-1].subscribed}
     assert topics["/bt_navigator/transition_event"] == "lifecycle_msgs/msg/TransitionEvent"
     assert topics["/behavior_server/transition_event"] == "lifecycle_msgs/msg/TransitionEvent"
     assert "/scan" in topics
