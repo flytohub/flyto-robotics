@@ -49,6 +49,7 @@ from . import (
     path_clearance,
     places,
     provider_evidence,
+    sim_time,
     ssh_transport,
 )
 from . import map_frame as map_frame_module
@@ -384,6 +385,19 @@ def _simulation_marker_topic() -> str:
     legitimately publishes /clock.
     """
     return os.getenv("FLYTO_ROS2_SIM_MARKER_TOPIC", "/clock").strip()
+
+
+def _served_deployment_mode() -> str:
+    """``simulation`` or ``real``, as ``served_identity`` answers once confirmed.
+
+    A motion reaches the robot only after the graph has confirmed the
+    configured mode (``_deployment_mismatch``), and a simulation is never
+    served with the marker check disabled, so during a motion this is the
+    deployment the adapter serves. Never derived from a resource name.
+    """
+    if _configured_deployment_mode() == "simulation" and _simulation_marker_topic():
+        return "simulation"
+    return "real"
 
 
 def _safe_fragment(value: str) -> str:
@@ -756,6 +770,8 @@ class _ObservationState:
     _connected: bool
     _results: dict[str, CallResult]
     _counts: dict[str, int]
+    #: Whether this transport reads the simulator clock for ``sim_time``.
+    READS_SIM_CLOCK = False
 
     def _init_observation_state(self) -> None:
         self._condition = threading.Condition()
@@ -825,7 +841,25 @@ class _ObservationState:
             reading = snapshot.get("range")
             if isinstance(reading, Mapping):
                 track.saw_range(reading.get("minimum_range_m"))
+            if _served_deployment_mode() == "simulation":
+                if self.READS_SIM_CLOCK:
+                    track.clock = sim_time.ClockRecord(_simulation_marker_topic())
+                else:
+                    track.sim_time_note = {
+                        "applicable": True,
+                        "measured": False,
+                        "reason": "this transport does not read the simulator clock",
+                    }
             _remember(self._motion_tracks, call_id, track)
+
+    def _track_clock(self, message: Any, observed: float) -> None:
+        """A simulator clock sample (wall time ``observed``) for every running motion."""
+        seconds = sim_time.clock_seconds(message)
+        if seconds is None:
+            return
+        with self._condition:
+            for track in self._motion_tracks.values():
+                track.saw_clock(seconds, observed)
 
     # -- braking guard ---------------------------------------------------------
 
@@ -2160,34 +2194,47 @@ class GenericROS2Adapter:
         legs: list[dict[str, Any]] = []
         leg_started = began
 
-        def record(leg: str, outcome: str) -> None:
+        def record(leg: str, result: CallResult) -> None:
             # When each leg began and ended, from the call's start: the gap
             # between one leg's end and the next one's start is the adapter's.
             nonlocal leg_started
             now = time.monotonic()
-            legs.append(
-                {
-                    "leg": leg,
-                    "outcome": outcome,
-                    "started_at_s": round(leg_started - began, 3),
-                    "elapsed_s": round(now - leg_started, 3),
-                }
-            )
+            entry: dict[str, Any] = {
+                "leg": leg,
+                "outcome": result.outcome,
+                "started_at_s": round(leg_started - began, 3),
+                "elapsed_s": round(now - leg_started, 3),
+            }
+            # How fast a simulator ran during this leg, from its own record.
+            outcome_record = (result.evidence or {}).get("motion_outcome")
+            if isinstance(outcome_record, Mapping) and isinstance(
+                outcome_record.get("sim_time"), Mapping
+            ):
+                entry["sim_time"] = dict(outcome_record["sim_time"])
+            legs.append(entry)
             leg_started = now
 
+        def escape_record() -> dict[str, Any]:
+            timed = [leg["sim_time"] for leg in legs if "sim_time" in leg]
+            summary: dict[str, Any] = {
+                "waypoint_map": waypoint,
+                "waypoint_heading": heading,
+                "legs": legs,
+            }
+            if timed:
+                # Over the whole call: the legs' clocks summed, the slowest window.
+                summary["sim_time"] = sim_time.combine(timed)
+            return summary
+
         def ended(leg: str, result: CallResult) -> CallResult:
-            record(leg, result.outcome)
+            record(leg, result)
             outcome = result.outcome if result.outcome != OUTCOME_REFUSED else OUTCOME_FAILED
             return CallResult(
                 call_id,
                 outcome,
                 evidence={
                     **dict(result.evidence or {}),
-                    "navigation_escape": {
-                        "waypoint_map": waypoint,
-                        "waypoint_heading": heading,
-                        "legs": legs,
-                    },
+                    "navigation_escape": escape_record(),
                 },
                 detail=f"inflation escape {leg} {result.outcome}: {result.detail}".strip(),
             )
@@ -2202,7 +2249,7 @@ class GenericROS2Adapter:
             )
             if result.outcome != OUTCOME_COMPLETED:
                 return ended("backoff", result)
-            record("backoff", result.outcome)
+            record("backoff", result)
         # Two NavigateToPose legs, not one NavigateThroughPoses goal: a stock
         # Nav2 configuration can route through-poses goals to a behaviour tree
         # that only reads a single goal (TurtleBot3 Jazzy did: the planner got an
@@ -2213,7 +2260,7 @@ class GenericROS2Adapter:
         )
         if result.outcome != OUTCOME_COMPLETED:
             return ended("waypoint", result)
-        record("waypoint", result.outcome)
+        record("waypoint", result)
         if call_id in self._cancelled_escapes:
             return ended("goal", CallResult(call_id, OUTCOME_CANCELLED, detail="cancelled"))
         result = self.backend.invoke(
@@ -2222,17 +2269,13 @@ class GenericROS2Adapter:
             arguments=target,
             deadline_seconds=max(0.0, deadline - time.monotonic()),
         )
-        record("goal", result.outcome)
+        record("goal", result)
         return CallResult(
             result.call_id,
             result.outcome,
             evidence={
                 **dict(result.evidence or {}),
-                "navigation_escape": {
-                    "waypoint_map": waypoint,
-                    "waypoint_heading": heading,
-                    "legs": legs,
-                },
+                "navigation_escape": escape_record(),
             },
             detail=result.detail,
         )
@@ -3521,6 +3564,8 @@ class RosbridgeROS2Backend(_ObservationState):
     #: This transport can send a second goal for a running straight drive, so
     #: a server that takes preempting goals can have a drive slowed mid-way.
     RESENDS_GOALS = True
+    #: Samples /clock (read only, throttled) in a simulation deployment.
+    READS_SIM_CLOCK = True
 
     def __init__(
         self,
@@ -3854,6 +3899,13 @@ class RosbridgeROS2Backend(_ObservationState):
         if topic in _command_watch_topics():
             self._track_command(topic, raw_message)
             return
+        if (
+            topic
+            and topic == _simulation_marker_topic()
+            and _served_deployment_mode() == "simulation"
+        ):
+            self._track_clock(raw_message, time.monotonic())
+            return
         message = dict(raw_message)
         observed = time.monotonic()
         waiter = self._capture_waits.get(topic)
@@ -3987,6 +4039,13 @@ class RosbridgeROS2Backend(_ObservationState):
             subscriptions = (
                 *subscriptions,
                 (collision_topic, COLLISION_STATE_TYPE, "reliable", 0),
+            )
+        clock_topic = _simulation_marker_topic()
+        if not self._presence_only and clock_topic and _served_deployment_mode() == "simulation":
+            # Read only, sampled: how fast simulated time runs against the wall.
+            subscriptions = (
+                *subscriptions,
+                (clock_topic, CLOCK_TYPE, "best_effort", sim_time.CLOCK_THROTTLE_MS),
             )
         if not self._presence_only:
             # Read only, sampled: what was commanded while a goal stood still.
