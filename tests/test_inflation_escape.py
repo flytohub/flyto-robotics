@@ -7,8 +7,10 @@ against what the LiDAR would report, not against the scene itself.
 
 from __future__ import annotations
 
+import json
 import math
 from collections.abc import Mapping
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -35,6 +37,8 @@ FLOOR = 0.35
 BINS = 180
 MAX_RANGE = 3.5
 TWIN = escape.CostmapGeometry(0.5, 0.1, source="parameters")
+# The twin's controller_server goal checker xy_goal_tolerance (read live 2026-10-06).
+ARRIVAL = 0.25
 
 
 # -- scenes ------------------------------------------------------------------
@@ -89,9 +93,19 @@ def scan(segments, *, bins: int = BINS) -> dict[str, Any]:
 
 
 def decide(segments, geometry=TWIN, **overrides):
-    options = {"floor_m": FLOOR, "max_backoff_m": 0.30, "margin_m": 0.10, "max_lateral_m": 1.0}
+    return plan(scan(segments), geometry, **overrides)
+
+
+def plan(sweep, geometry=TWIN, **overrides):
+    options = {
+        "floor_m": FLOOR,
+        "max_backoff_m": 0.30,
+        "margin_m": 0.10,
+        "max_lateral_m": 1.0,
+        "arrival_tolerance_m": ARRIVAL,
+    }
     options.update(overrides)
-    return escape.plan_escape(scan(segments), geometry, **options)
+    return escape.plan_escape(sweep, geometry, **options)
 
 
 # The failure seen on the twin: a 0.30 x 0.40 m box 0.40 m ahead.
@@ -133,6 +147,12 @@ TWIN_PARAMS = {
     },
 }
 NODES = tuple(TWIN_PARAMS)
+CONTROLLER_PARAMS = {
+    "/controller_server": {
+        "goal_checker_plugins": {"type": 9, "string_array_value": ["goal_checker"]},
+        "goal_checker.xy_goal_tolerance": _double(ARRIVAL),
+    }
+}
 
 
 def reader_for(params):
@@ -325,9 +345,7 @@ def test_floor_is_never_violated(near, width, side_room, rear):
 
 
 def test_no_sweep_means_no_decision():
-    decision = escape.plan_escape(
-        None, TWIN, floor_m=FLOOR, max_backoff_m=0.3, margin_m=0.1, max_lateral_m=1
-    )
+    decision = plan(None)
     assert decision is None
 
 
@@ -348,7 +366,9 @@ def test_waypoint_pose_is_placed_from_the_start_map_pose_and_faces_the_goal():
 class EscapeBackend:
     """A ROS graph whose LiDAR sees ``segments`` and whose costmaps are the twin's."""
 
-    def __init__(self, segments, *, through=True, retreat=True, params=TWIN_PARAMS, outcomes=None):
+    def __init__(
+        self, segments, *, through=True, retreat=True, params=None, outcomes=None
+    ):
         names = {"motion.navigate", "motion.halt"} | ({"motion.retreat"} if retreat else set())
         self.interfaces = [
             StandardInterface(
@@ -359,7 +379,7 @@ class EscapeBackend:
             for name in names
         ]
         self.through = through
-        self.params = params
+        self.params = {**TWIN_PARAMS, **CONTROLLER_PARAMS} if params is None else params
         self.calls: list[tuple[str, str, dict]] = []
         self.cancelled: list[str] = []
         self.outcomes = outcomes or {}
@@ -555,3 +575,119 @@ def test_decision_evidence_is_json_shaped():
     data = decide(OBSERVED).to_dict()
     json.dumps(data, allow_nan=False)
     assert {"pinned", "decision", "pinned_threshold_m", "clearances_m", "costmap"} <= _keys(data)
+
+
+# -- what the scan did not see is not the obstacle's edge ---------------------
+
+
+def _unread(sweep: dict[str, Any], *bearings_deg: float) -> dict[str, Any]:
+    """The sweep with the bins nearest these bearings unread (None)."""
+    ranges = list(sweep["ranges_m"])
+    step = sweep["angle_increment_rad"]
+    for degrees in bearings_deg:
+        offset = math.remainder(math.radians(degrees) - sweep["angle_min_rad"], math.tau)
+        ranges[round(offset / step) % len(ranges)] = None
+    return {**sweep, "ranges_m": ranges}
+
+
+@pytest.mark.parametrize("bearing", [4.0, 12.0, 18.0])
+def test_an_unread_bin_inside_the_obstacle_does_not_narrow_it(bearing):
+    # Twin 2026-10-06, runs 4 and 9: one unread bin in the box's face ended
+    # the cluster; its left extent read 0.085 m and ~0.02 m instead of 0.20 m,
+    # and the way round was placed 0.29 m and 0.22 m to the side.
+    whole = plan(scan(OBSERVED))
+    punctured = plan(_unread(scan(OBSERVED), bearing, -bearing))
+    assert punctured.obstacle["lateral_max_m"] >= whole.obstacle["lateral_max_m"] - 1e-9
+    assert punctured.obstacle["lateral_min_m"] <= whole.obstacle["lateral_min_m"] + 1e-9
+    assert abs(punctured.lateral_offset_m) >= abs(whole.lateral_offset_m) - 1e-9
+    assert punctured.obstacle["unread_bins"] == 2
+
+
+def test_unread_bins_past_the_last_return_count_as_the_obstacle():
+    sweep = scan(OBSERVED)
+    whole = plan(sweep)
+    edge = math.degrees(whole.obstacle["bearing_max_rad"])
+    beyond = plan(_unread(sweep, edge + 2.0, edge + 4.0))
+    assert beyond.obstacle["unread_bins"] > 0
+    assert beyond.obstacle["lateral_max_m"] > whole.obstacle["lateral_max_m"]
+    # ...but only as far as the arc that joins two returns into one object.
+    reach = whole.obstacle["lateral_max_m"] + escape.CLUSTER_JUMP_M
+    assert beyond.obstacle["lateral_max_m"] <= reach + 1e-9
+
+
+def test_a_long_unread_run_is_not_taken_for_the_obstacle():
+    # Far open space beside the box reads as no return: the box does not grow
+    # into it, so the way round is not refused for it.
+    sweep = scan(OBSERVED)
+    whole = plan(sweep)
+    edge = math.degrees(whole.obstacle["bearing_max_rad"])
+    open_side = plan(_unread(sweep, *[edge + 2.0 * k for k in range(1, 30)]))
+    assert open_side.feasible
+    reach = whole.obstacle["lateral_max_m"] + escape.CLUSTER_JUMP_M
+    assert open_side.obstacle["lateral_max_m"] <= reach + 1e-9
+
+
+def test_the_recorded_twin_sweep_places_the_way_round_beside_the_whole_box():
+    """The sweep the twin reported at the stop of run 9, and with one face bin unread.
+
+    The recorded sweep already has an unread bin just past the box's left
+    edge. Run 9's escape was decided from a later sweep of the same scene;
+    its 0.22 m waypoint is what the previous code made of this sweep with
+    the face bin ~4 deg left of ahead unread (0.226 m), reconstructed here.
+    """
+    recorded = json.loads(
+        (Path(__file__).parent / "fixtures" / "twin_box_sweep_2026-10-06.json").read_text()
+    )
+    sweep = {key: recorded[key] for key in ("angle_min_rad", "angle_increment_rad", "ranges_m")}
+    for candidate in (sweep, _unread(sweep, 4.0)):
+        decision = plan(candidate)
+        assert decision.pinned and decision.feasible
+        # A 0.40 m box, centred: 0.20 m each side, plus radius and margin.
+        assert decision.obstacle["lateral_max_m"] >= 0.19
+        assert decision.obstacle["lateral_min_m"] <= -0.19
+        assert abs(decision.lateral_offset_m) >= 0.19 + TWIN.robot_radius_m + 0.10
+
+
+# -- a waypoint Nav2 would call reached where the robot stands ----------------
+
+
+def test_the_waypoint_lies_beyond_the_arrival_tolerance():
+    # A thin post dead ahead: its own extent puts the waypoint 0.2 m to the
+    # side, inside the 0.25 m tolerance, where Nav2 reports it reached without
+    # moving (run 9: the waypoint leg "succeeded" in 20 ms).
+    post = box(0.40, 0.04, 0.04) + room()
+    decision = decide(post)
+    assert decision.feasible
+    assert abs(decision.lateral_offset_m) >= ARRIVAL + 0.10 - 1e-9
+    assert decision.to_dict()["arrival_tolerance_m"] == ARRIVAL
+    loose = decide(post, arrival_tolerance_m=0.5)
+    assert abs(loose.lateral_offset_m) >= 0.5 + 0.10 - 1e-9
+
+
+def test_a_wide_obstacle_is_not_moved_by_the_arrival_tolerance():
+    tight = decide(OBSERVED, arrival_tolerance_m=0.0)
+    assert decide(OBSERVED).lateral_offset_m == tight.lateral_offset_m
+
+
+def test_arrival_tolerance_comes_from_every_goal_checker():
+    params = {
+        "/controller_server": {
+            "goal_checker_plugins": {"type": 9, "string_array_value": ["precise", "general"]},
+            "precise.xy_goal_tolerance": _double(0.05),
+            "general.xy_goal_tolerance": _double(0.30),
+        }
+    }
+    nodes = ("/controller_server",)
+    assert escape.read_arrival_tolerance(reader_for(params), nodes) == (0.30, "parameters")
+    fallback = (escape.DEFAULT_ARRIVAL_TOLERANCE_M, "fallback")
+    assert escape.read_arrival_tolerance(reader_for({}), nodes) == fallback
+    assert escape.read_arrival_tolerance(None, nodes) == fallback
+
+
+def test_the_adapter_places_the_waypoint_from_the_live_goal_checker():
+    backend = EscapeBackend(box(0.40, 0.04, 0.04) + room())
+    result = navigate(make(backend))
+    assert result.outcome == OUTCOME_COMPLETED
+    waypoint = backend.calls[1][2]
+    assert abs(waypoint["y"]) >= ARRIVAL + 0.10 - 1e-3
+    assert result.evidence["navigation_escape"]["arrival_tolerance_m"] == ARRIVAL
