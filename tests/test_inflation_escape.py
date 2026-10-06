@@ -39,6 +39,8 @@ MAX_RANGE = 3.5
 TWIN = escape.CostmapGeometry(0.5, 0.1, source="parameters")
 # The twin's controller_server goal checker xy_goal_tolerance (read live 2026-10-06).
 ARRIVAL = 0.25
+# ... and its yaw_goal_tolerance (burger.yaml, the same on the robot).
+HEADING = 0.25
 
 
 # -- scenes ------------------------------------------------------------------
@@ -103,6 +105,7 @@ def plan(sweep, geometry=TWIN, **overrides):
         "margin_m": 0.10,
         "max_lateral_m": 1.0,
         "arrival_tolerance_m": ARRIVAL,
+        "heading_tolerance_rad": HEADING,
     }
     options.update(overrides)
     return escape.plan_escape(sweep, geometry, **options)
@@ -151,6 +154,7 @@ CONTROLLER_PARAMS = {
     "/controller_server": {
         "goal_checker_plugins": {"type": 9, "string_array_value": ["goal_checker"]},
         "goal_checker.xy_goal_tolerance": _double(ARRIVAL),
+        "goal_checker.yaw_goal_tolerance": _double(HEADING),
     }
 }
 
@@ -349,13 +353,12 @@ def test_no_sweep_means_no_decision():
     assert decision is None
 
 
-def test_waypoint_pose_is_placed_from_the_start_map_pose_and_faces_the_goal():
+def test_waypoint_pose_is_placed_from_the_start_map_pose():
     decision = decide(OBSERVED)
     start = {"x": 0.01, "y": 0.0, "yaw": 0.0}
     pose = escape.waypoint_pose(start, decision, (1.20, 0.0))
     assert pose["x"] == pytest.approx(0.01 - decision.backoff_m, abs=1e-3)
     assert pose["y"] == pytest.approx(decision.lateral_offset_m, abs=1e-3)
-    assert pose["yaw_radians"] == pytest.approx(math.atan2(-pose["y"], 1.20 - pose["x"]), abs=1e-3)
     turned = escape.to_map({"x": 1.0, "y": 2.0, "yaw": math.pi / 2}, (1.0, 0.0))
     assert turned == pytest.approx((1.0, 3.0))
 
@@ -691,3 +694,130 @@ def test_the_adapter_places_the_waypoint_from_the_live_goal_checker():
     waypoint = backend.calls[1][2]
     assert abs(waypoint["y"]) >= ARRIVAL + 0.10 - 1e-3
     assert result.evidence["navigation_escape"]["arrival_tolerance_m"] == ARRIVAL
+
+
+# -- the heading the waypoint leg may end at -----------------------------------
+
+
+def _ray_clearance(origin, heading, segments, length=2.0, steps=400):
+    """Nearest approach of a straight drive from ``origin`` at ``heading`` to ``segments``."""
+
+    def to_segment(px, py, segment):
+        (ax, ay), (bx, by) = segment
+        ex, ey = bx - ax, by - ay
+        t = max(0.0, min(1.0, ((px - ax) * ex + (py - ay) * ey) / (ex * ex + ey * ey)))
+        return math.hypot(px - ax - t * ex, py - ay - t * ey)
+
+    ox, oy = origin
+    return min(
+        to_segment(ox + math.cos(heading) * d, oy + math.sin(heading) * d, segment)
+        for d in (length * i / steps for i in range(steps + 1))
+        for segment in segments
+    )
+
+
+BOX = box(0.40, 0.30, 0.40)
+
+
+def test_every_heading_the_waypoint_leg_may_end_at_drives_past_the_box():
+    """Twin 2026-10-06, t-c3e495596129a8d4: the box 0.40 m ahead, goal 1.2 m ahead.
+
+    The waypoint was sent facing the goal (-0.278 rad), the leg ended at
+    -0.523 rad (inside the 0.25 rad tolerance) facing the box, and the goal
+    leg failed to make progress eight times (119 s). Every heading Nav2 may
+    accept must now drive past the box by the robot's radius.
+    """
+    decision = decide(OBSERVED)
+    start = {"x": 0.0, "y": 0.0, "yaw": 0.0}
+    chosen = escape.waypoint_heading(start, decision, (1.20, 0.0))
+    toward_goal = chosen["toward_goal_rad"]
+    assert toward_goal == pytest.approx(-0.278, abs=0.02)
+    assert chosen["limited_by"] == "obstacle"
+    heading = chosen["heading_rad"]
+    origin = decision.waypoint_robot
+    # The old heading's tolerance band reached into the box.
+    assert _ray_clearance(origin, toward_goal - HEADING, BOX) < TWIN.robot_radius_m
+    for offset in (-HEADING, -HEADING / 2, 0.0, HEADING / 2, HEADING):
+        assert _ray_clearance(origin, heading + offset, BOX) >= TWIN.robot_radius_m
+    # The band never turns back across the line of travel toward the box's side.
+    assert heading - HEADING >= -1e-9
+    pose = escape.waypoint_pose(start, decision, (1.20, 0.0))
+    assert pose["yaw_radians"] == pytest.approx(heading, abs=1e-4)
+
+
+def test_the_right_side_is_the_mirror_image():
+    scene = box(0.40, 0.30, 0.40) + wall_left(0.5) + room()
+    decision = decide(scene)
+    assert decision.side == "right"
+    chosen = escape.waypoint_heading({"x": 0.0, "y": 0.0, "yaw": 0.0}, decision, (1.20, 0.0))
+    assert chosen["toward_goal_rad"] > 0.0
+    assert chosen["heading_rad"] + HEADING <= decision.clear_heading_rad + 1e-9
+    assert decision.clear_heading_rad <= 0.0
+    for offset in (-HEADING, 0.0, HEADING):
+        heading = chosen["heading_rad"] + offset
+        assert _ray_clearance(decision.waypoint_robot, heading, BOX) >= TWIN.robot_radius_m
+
+
+def test_a_goal_already_on_the_open_side_is_faced_directly():
+    decision = decide(OBSERVED)
+    assert decision.side == "left"
+    chosen = escape.waypoint_heading({"x": 0.0, "y": 0.0, "yaw": 0.0}, decision, (0.6, 1.5))
+    assert chosen["limited_by"] == "goal"
+    assert chosen["heading_rad"] == chosen["toward_goal_rad"]
+
+
+def test_the_heading_follows_the_live_tolerance_and_the_start_pose():
+    loose = decide(OBSERVED, heading_tolerance_rad=0.6)
+    tight = decide(OBSERVED, heading_tolerance_rad=0.1)
+    start = {"x": 0.0, "y": 0.0, "yaw": 0.0}
+    goal = (1.20, 0.0)
+    assert escape.waypoint_heading(start, loose, goal)["heading_rad"] == pytest.approx(
+        loose.clear_heading_rad + 0.6, abs=1e-4
+    )
+    assert escape.waypoint_heading(start, tight, goal)["heading_rad"] == pytest.approx(
+        tight.clear_heading_rad + 0.1, abs=1e-4
+    )
+    # The same scene from a start turned a quarter turn left, goal turned with it.
+    turned = {"x": 1.0, "y": 2.0, "yaw": math.pi / 2}
+    turned_goal = escape.to_map(turned, goal)
+    assert escape.to_robot(turned, turned_goal) == pytest.approx(goal)
+    plain = escape.waypoint_pose(start, tight, goal)
+    pose = escape.waypoint_pose(turned, tight, turned_goal)
+    assert pose["yaw_radians"] == pytest.approx(plain["yaw_radians"] + math.pi / 2, abs=1e-3)
+
+
+def test_heading_tolerance_comes_from_every_goal_checker():
+    params = {
+        "/controller_server": {
+            "goal_checker_plugins": {"type": 9, "string_array_value": ["precise", "general"]},
+            "precise.yaw_goal_tolerance": _double(0.05),
+            "general.yaw_goal_tolerance": _double(0.40),
+        }
+    }
+    nodes = ("/controller_server",)
+    assert escape.read_heading_tolerance(reader_for(params), nodes) == (0.40, "parameters")
+    fallback = (escape.DEFAULT_HEADING_TOLERANCE_RAD, "fallback")
+    assert escape.read_heading_tolerance(reader_for({}), nodes) == fallback
+    assert escape.read_heading_tolerance(None, nodes) == fallback
+    # A quarter turn or more is no heading constraint and is not believed.
+    params["/controller_server"]["general.yaw_goal_tolerance"] = _double(math.pi)
+    assert escape.read_heading_tolerance(reader_for(params), nodes) == (0.05, "parameters")
+
+
+def test_the_adapter_sends_the_waypoint_at_a_heading_clear_of_the_box():
+    params = {**TWIN_PARAMS, **CONTROLLER_PARAMS}
+    params["/controller_server"] = {
+        **CONTROLLER_PARAMS["/controller_server"],
+        "goal_checker.yaw_goal_tolerance": _double(0.4),
+    }
+    backend = EscapeBackend(OBSERVED, params=params)
+    result = navigate(make(backend))
+    assert result.outcome == OUTCOME_COMPLETED
+    evidence = result.evidence["navigation_escape"]
+    assert evidence["heading_tolerance_rad"] == 0.4
+    chosen = evidence["waypoint_heading"]
+    assert chosen["tolerance_rad"] == 0.4
+    assert chosen["limited_by"] == "obstacle"
+    waypoint = backend.calls[1][2]
+    assert waypoint["yaw_radians"] == pytest.approx(chosen["heading_rad"], abs=1e-3)
+    assert waypoint["yaw_radians"] - 0.4 >= evidence["clear_heading_rad"] - 1e-3

@@ -1925,6 +1925,9 @@ class GenericROS2Adapter:
         arrival_tolerance, _ = inflation_escape.read_arrival_tolerance(
             reader if callable(reader) else None, _controller_nodes()
         )
+        heading_tolerance, _ = inflation_escape.read_heading_tolerance(
+            reader if callable(reader) else None, _controller_nodes()
+        )
         decision = inflation_escape.plan_escape(
             sweep,
             geometry,
@@ -1937,6 +1940,7 @@ class GenericROS2Adapter:
             margin_m=_env_metres("FLYTO_ROS2_ESCAPE_MARGIN_M", 0.10, low=0.0, high=1.0),
             max_lateral_m=_env_metres("FLYTO_ROS2_ESCAPE_MAX_LATERAL_M", 1.0, low=0.1, high=3.0),
             arrival_tolerance_m=arrival_tolerance,
+            heading_tolerance_rad=heading_tolerance,
         )
         if decision is None:
             return None
@@ -1984,9 +1988,9 @@ class GenericROS2Adapter:
         """
         deadline = time.monotonic() + deadline_seconds
         start = self._escape_starts.get(call_id) or {}
-        waypoint = inflation_escape.waypoint_pose(
-            start, decision, (float(target["x"]), float(target["y"]))
-        )
+        goal_xy = (float(target["x"]), float(target["y"]))
+        waypoint = inflation_escape.waypoint_pose(start, decision, goal_xy)
+        heading = inflation_escape.waypoint_heading(start, decision, goal_xy)
         legs: list[dict[str, Any]] = []
 
         def ended(leg: str, result: CallResult) -> CallResult:
@@ -1997,7 +2001,11 @@ class GenericROS2Adapter:
                 outcome,
                 evidence={
                     **dict(result.evidence or {}),
-                    "navigation_escape": {"waypoint_map": waypoint, "legs": legs},
+                    "navigation_escape": {
+                        "waypoint_map": waypoint,
+                        "waypoint_heading": heading,
+                        "legs": legs,
+                    },
                 },
                 detail=f"inflation escape {leg} {result.outcome}: {result.detail}".strip(),
             )
@@ -2038,7 +2046,11 @@ class GenericROS2Adapter:
             result.outcome,
             evidence={
                 **dict(result.evidence or {}),
-                "navigation_escape": {"waypoint_map": waypoint, "legs": legs},
+                "navigation_escape": {
+                    "waypoint_map": waypoint,
+                    "waypoint_heading": heading,
+                    "legs": legs,
+                },
             },
             detail=result.detail,
         )
