@@ -113,6 +113,39 @@ GUARD_TRIP_STALE = "stale"  # no scan arrived in time
 # Half-width of the wedge read the way the robot was travelling.
 TRAVEL_HALF_WIDTH_RAD = math.radians(20.0)
 # Where that wedge is centred, relative to the robot's heading.
+#: The base counts as standing still below these odometry speeds.
+STILL_LINEAR_MPS = 0.01
+STILL_ANGULAR_RADPS = 0.05
+#: A still spell this long while a goal runs is recorded as a stall. Shorter
+#: than Nav2's default progress window (10 s), so a stall is on record before
+#: the controller gives up on it.
+STALL_MIN_S = 2.0
+#: Bounds on what one motion keeps.
+MAX_STALLS = 16
+MAX_RECOVERY_TIMES = 32
+
+
+@dataclass
+class _Commanded:
+    """Velocity commands seen on one topic during a still spell."""
+
+    samples: int = 0
+    max_linear_mps: float = 0.0
+    max_angular_radps: float = 0.0
+
+    def saw(self, linear: float, angular: float) -> None:
+        self.samples += 1
+        self.max_linear_mps = max(self.max_linear_mps, abs(linear))
+        self.max_angular_radps = max(self.max_angular_radps, abs(angular))
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "samples": self.samples,
+            "max_linear_mps": round(self.max_linear_mps, 4),
+            "max_angular_radps": round(self.max_angular_radps, 4),
+        }
+
+
 _TRAVEL_DIRECTION = {
     "motion.advance": 0.0,
     "motion.retreat": math.pi,
@@ -142,6 +175,15 @@ class MotionTrack:
     # the speed it commanded and why it stopped the robot, if it did (see
     # braking_envelope). Filled in by the adapter when the track ends.
     braking: dict[str, Any] | None = None
+    # Spells the base stood still while the goal ran, and what was commanded
+    # meanwhile on each velocity topic watched: a stall with commands near
+    # zero is the controller choosing to stand; one with real commands is
+    # something between the controller and the wheels.
+    stalls: list[dict[str, Any]] = field(default_factory=list)
+    recoveries_at_s: list[float] = field(default_factory=list)
+    _still_since: float | None = None
+    _still_pose: Mapping[str, Any] | None = None
+    _still_commands: dict[str, _Commanded] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         seeded = self.collision_now
@@ -155,9 +197,69 @@ class MotionTrack:
         if self.minimum_range_during_m is None or minimum_range_m < self.minimum_range_during_m:
             self.minimum_range_during_m = float(minimum_range_m)
 
-    def saw_feedback(self, values: Mapping[str, Any] | None) -> None:
+    def saw_base(
+        self,
+        velocity: tuple[float, float] | None,
+        at: float,
+        pose: Mapping[str, Any] | None = None,
+    ) -> None:
+        """Odometry speed (linear, angular) at monotonic time ``at``."""
+        if velocity is None:
+            return
+        linear, angular = velocity
+        if not (math.isfinite(linear) and math.isfinite(angular)):
+            return
+        if abs(linear) < STILL_LINEAR_MPS and abs(angular) < STILL_ANGULAR_RADPS:
+            if self._still_since is None:
+                self._still_since = at
+                self._still_pose = dict(pose) if isinstance(pose, Mapping) else None
+                self._still_commands = {}
+            return
+        self.close_still(at)
+
+    def saw_command(self, topic: str, linear: float, angular: float) -> None:
+        """A velocity command on ``topic``; kept only while the base stands still."""
+        if self._still_since is None:
+            return
+        if not (math.isfinite(linear) and math.isfinite(angular)):
+            return
+        if topic not in self._still_commands and len(self._still_commands) >= 4:
+            return
+        self._still_commands.setdefault(topic, _Commanded()).saw(linear, angular)
+
+    def close_still(self, at: float) -> None:
+        """End the current still spell at ``at``, recording it if it was a stall."""
+        since = self._still_since
+        if since is None:
+            return
+        self._still_since = None
+        duration = at - since
+        if duration < STALL_MIN_S or len(self.stalls) >= MAX_STALLS:
+            return
+        stall: dict[str, Any] = {
+            "at_s": round(max(0.0, since - self.started_at), 3),
+            "duration_s": round(duration, 3),
+            "commanded": {
+                topic: seen.to_dict() for topic, seen in sorted(self._still_commands.items())
+            },
+        }
+        pose = _pose(self._still_pose)
+        if pose is not None:
+            stall["pose"] = pose
+        self.stalls.append(stall)
+
+    def saw_feedback(self, values: Mapping[str, Any] | None, at: float | None = None) -> None:
         if not isinstance(values, Mapping):
             return
+        recoveries = values.get("number_of_recoveries")
+        if (
+            at is not None
+            and isinstance(recoveries, (int, float))
+            and math.isfinite(float(recoveries))
+            and float(recoveries) > self.feedback.get("number_of_recoveries", 0.0)
+            and len(self.recoveries_at_s) < MAX_RECOVERY_TIMES
+        ):
+            self.recoveries_at_s.append(round(max(0.0, at - self.started_at), 3))
         for key in ("distance_traveled", "angular_distance_traveled", "distance_remaining",
                     "number_of_recoveries"):
             value = values.get(key)
@@ -434,6 +536,12 @@ def summarize(
         summary["collision_monitor_at_stop"] = {"action_type": kind, "polygon": name}
     if track.feedback:
         summary["feedback"] = dict(track.feedback)
+    if status is not None:
+        track.close_still(ended_at)
+    if track.stalls:
+        summary["stalls"] = [dict(stall) for stall in track.stalls]
+    if track.recoveries_at_s:
+        summary["recoveries_at_s"] = list(track.recoveries_at_s)
     if start is not None and end is not None:
         if track.capability_id == "motion.rotate":
             summary["yaw_turned_rad"] = round(
