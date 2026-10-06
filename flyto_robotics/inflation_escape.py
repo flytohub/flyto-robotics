@@ -37,6 +37,9 @@ DEFAULT_ROBOT_RADIUS_M = 0.1
 #: Nav2's SimpleGoalChecker default ``xy_goal_tolerance``: a goal this close
 #: to the robot counts as reached, used when the controller cannot be asked.
 DEFAULT_ARRIVAL_TOLERANCE_M = 0.25
+#: Nav2's SimpleGoalChecker default ``yaw_goal_tolerance``: a goal whose
+#: heading is this close counts as reached, used when it cannot be read.
+DEFAULT_HEADING_TOLERANCE_RAD = 0.25
 #: A radius outside this band is a misread, not a robot.
 MAX_PLAUSIBLE_RADIUS_M = 5.0
 
@@ -211,6 +214,27 @@ def read_costmap_geometry(
     )
 
 
+def _largest_goal_checker_value(
+    reader: ParameterReader | None,
+    nodes: Iterable[str],
+    key: str,
+    plausible: Callable[[float | None], bool],
+) -> float | None:
+    """The largest ``<plugin>.<key>`` over every goal checker the controllers load."""
+    if reader is None:
+        return None
+    found: list[float] = []
+    for node in nodes:
+        try:
+            for plugin in parameter_strings(reader(node, "goal_checker_plugins")):
+                value = parameter_number(reader(node, f"{plugin}.{key}"))
+                if plausible(value):
+                    found.append(float(value))  # type: ignore[arg-type]
+        except Exception:  # noqa: BLE001 - one unreadable node falls back
+            continue
+    return max(found) if found else None
+
+
 def read_arrival_tolerance(
     reader: ParameterReader | None, nodes: Iterable[str]
 ) -> tuple[float, str]:
@@ -221,20 +245,31 @@ def read_arrival_tolerance(
     whichever is loosest. Falls back to Nav2's default when none can be read.
     Returns the tolerance and where it came from (``parameters``/``fallback``).
     """
-    if reader is None:
+    value = _largest_goal_checker_value(reader, nodes, "xy_goal_tolerance", _plausible)
+    if value is None:
         return DEFAULT_ARRIVAL_TOLERANCE_M, "fallback"
-    found: list[float] = []
-    for node in nodes:
-        try:
-            for plugin in parameter_strings(reader(node, "goal_checker_plugins")):
-                value = parameter_number(reader(node, f"{plugin}.xy_goal_tolerance"))
-                if _plausible(value):
-                    found.append(float(value))  # type: ignore[arg-type]
-        except Exception:  # noqa: BLE001 - one unreadable node falls back
-            continue
-    if not found:
-        return DEFAULT_ARRIVAL_TOLERANCE_M, "fallback"
-    return max(found), "parameters"
+    return value, "parameters"
+
+
+def _plausible_heading(value: float | None) -> bool:
+    return value is not None and math.isfinite(value) and 0.0 <= value < math.pi / 2
+
+
+def read_heading_tolerance(
+    reader: ParameterReader | None, nodes: Iterable[str]
+) -> tuple[float, str]:
+    """How far from a goal's heading Nav2 still counts it reached (radians).
+
+    The largest ``yaw_goal_tolerance`` of the controllers' goal checkers: a leg
+    can end facing anywhere within it of the heading it was sent, so the
+    loosest checker is the one that bounds where the robot may be facing.
+    A tolerance of a quarter turn or more is not a heading constraint and is
+    not believed; Nav2's default is used when none can be read.
+    """
+    value = _largest_goal_checker_value(reader, nodes, "yaw_goal_tolerance", _plausible_heading)
+    if value is None:
+        return DEFAULT_HEADING_TOLERANCE_RAD, "fallback"
+    return value, "parameters"
 
 
 # -- scan geometry -----------------------------------------------------------
@@ -427,6 +462,38 @@ def lateral_offset(
     return min(0.0, min(lateral)) - robot_radius_m - margin_m
 
 
+def clear_heading(
+    cluster: Sequence[Beam],
+    waypoint: tuple[float, float],
+    side: str,
+    clearance_m: float,
+) -> float:
+    """The heading, in the start's robot frame, that bounds a way past the obstacle.
+
+    From the waypoint on ``side`` (left: y > 0), a heading on the open side of
+    the returned one passes every obstacle return by at least ``clearance_m``
+    (the tangent to a circle of that radius round each return), and never
+    turns back across the start's line of travel: the LiDAR sees only the
+    obstacle's near face, so its side may run on behind it, and a heading
+    that crosses that line would meet it sooner or later. Left: the result is
+    a lower bound (``>= 0``); right: an upper bound (``<= 0``).
+    """
+    wx, wy = waypoint
+    bound = 0.0
+    for beam in cluster:
+        point = beam.point()
+        if point is None:
+            continue
+        dx, dy = point[0] - wx, point[1] - wy
+        distance = math.hypot(dx, dy)
+        if distance <= 0.0:
+            continue
+        bearing = math.atan2(dy, dx)
+        widen = math.asin(min(1.0, clearance_m / distance))
+        bound = max(bound, bearing + widen) if side == "left" else min(bound, bearing - widen)
+    return bound
+
+
 # -- the decision ------------------------------------------------------------
 
 
@@ -446,6 +513,12 @@ class EscapeDecision:
     side: str | None = None
     lateral_offset_m: float = 0.0
     arrival_tolerance_m: float = 0.0
+    #: How far from a goal's heading Nav2 still counts it reached (radians).
+    heading_tolerance_rad: float = 0.0
+    #: Bound on the waypoint's heading in the start's robot frame: every
+    #: heading on the open side of it points past the obstacle (see
+    #: :func:`clear_heading`). Left escapes need ``>=``, right ``<=``.
+    clear_heading_rad: float = 0.0
     obstacle: Mapping[str, Any] | None = None
     sides_tried: tuple[Mapping[str, Any], ...] = field(default_factory=tuple)
 
@@ -466,6 +539,7 @@ class EscapeDecision:
             "clearances_m": {key: metres(value) for key, value in self.clearances.items()},
             "costmap": self.geometry.to_dict(),
             "arrival_tolerance_m": metres(self.arrival_tolerance_m),
+            "heading_tolerance_rad": round(self.heading_tolerance_rad, 4),
         }
         if self.pinned:
             data["backoff_m"] = metres(self.backoff_m)
@@ -480,6 +554,7 @@ class EscapeDecision:
             data["side"] = self.side
             data["lateral_offset_m"] = metres(self.lateral_offset_m)
             data["waypoint_robot_frame"] = {"x": metres(x), "y": metres(y)}
+            data["clear_heading_rad"] = round(self.clear_heading_rad, 4)
         return data
 
     def describe(self) -> str:
@@ -511,6 +586,7 @@ def plan_escape(
     margin_m: float,
     max_lateral_m: float,
     arrival_tolerance_m: float,
+    heading_tolerance_rad: float,
 ) -> EscapeDecision | None:
     """Decide from one sweep; None when the sweep has no usable geometry.
 
@@ -520,6 +596,11 @@ def plan_escape(
     moved: a waypoint inside the tolerance is "reached" where the robot
     stands (twin 2026-10-06: a 0.22 m waypoint against a 0.25 m tolerance
     succeeded in 20 ms and the goal leg started from right behind the box).
+
+    ``heading_tolerance_rad`` is how far from the waypoint's heading Nav2
+    lets the leg end; the decision keeps it with the heading bound past the
+    obstacle so :func:`waypoint_heading` can keep every accepted arrival
+    heading clear of it.
     """
     beams = sweep_beams(sweep)
     if not beams:
@@ -533,6 +614,7 @@ def plan_escape(
         "clearances": clearances,
         "geometry": geometry,
         "arrival_tolerance_m": max(0.0, arrival_tolerance_m),
+        "heading_tolerance_rad": max(0.0, heading_tolerance_rad),
     }
     if front is None or front >= threshold:
         # Nothing ahead inside inflation (an unreadable front is the
@@ -586,6 +668,9 @@ def plan_escape(
                 backoff_limited_by=limited_by,
                 side=side,
                 lateral_offset_m=offset,
+                clear_heading_rad=clear_heading(
+                    cluster, (-backoff, offset), side, geometry.robot_radius_m + margin_m
+                ),
                 obstacle=obstacle,
                 sides_tried=tuple(tried),
                 **base,
@@ -616,12 +701,64 @@ def to_map(
     )
 
 
+def to_robot(start_map_pose: Mapping[str, Any], map_xy: tuple[float, float]) -> tuple[float, float]:
+    """A map-frame point in the start's robot frame (the inverse of :func:`to_map`)."""
+    yaw = float(start_map_pose["yaw"])
+    dx = map_xy[0] - float(start_map_pose["x"])
+    dy = map_xy[1] - float(start_map_pose["y"])
+    return (
+        math.cos(yaw) * dx + math.sin(yaw) * dy,
+        -math.sin(yaw) * dx + math.cos(yaw) * dy,
+    )
+
+
+def waypoint_heading(
+    start_map_pose: Mapping[str, Any],
+    decision: EscapeDecision,
+    goal_xy: tuple[float, float],
+) -> dict[str, Any]:
+    """The heading to send with the lateral waypoint, and what decided it.
+
+    Nav2 ends the waypoint leg anywhere within ``heading_tolerance_rad`` of
+    the heading it was sent, and the goal leg starts from there. The heading
+    toward the final goal runs past the obstacle's near corner, so the
+    tolerance alone can leave the robot facing the obstacle: twin 2026-10-06,
+    a waypoint sent at -0.278 rad ended at -0.523 (inside 0.25 rad), the goal
+    leg then failed to make progress eight times and took 119 s, while every
+    leg that started within 0.07 rad of the line of travel took 9-19 s.
+
+    The heading is therefore the goal's bearing, turned toward the open side
+    until the whole accepted band, heading +/- tolerance, lies on the open
+    side of :attr:`EscapeDecision.clear_heading_rad`. Robot-frame values are
+    radians from the start's line of travel, left positive.
+    """
+    gx, gy = to_robot(start_map_pose, goal_xy)
+    wx, wy = decision.waypoint_robot
+    toward_goal = math.atan2(gy - wy, gx - wx)
+    tolerance = decision.heading_tolerance_rad
+    if decision.side == "right":
+        limit = decision.clear_heading_rad - tolerance
+        heading = min(toward_goal, limit)
+    else:
+        limit = decision.clear_heading_rad + tolerance
+        heading = max(toward_goal, limit)
+    return {
+        "heading_rad": round(heading, 4),
+        "toward_goal_rad": round(toward_goal, 4),
+        "clear_heading_rad": round(decision.clear_heading_rad, 4),
+        "tolerance_rad": round(tolerance, 4),
+        "limited_by": "goal" if heading == toward_goal else "obstacle",
+        "frame": "start_robot",
+    }
+
+
 def waypoint_pose(
     start_map_pose: Mapping[str, Any],
     decision: EscapeDecision,
     goal_xy: tuple[float, float],
 ) -> dict[str, float]:
-    """The lateral waypoint in the map frame, heading toward the final goal."""
+    """The lateral waypoint in the map frame, at :func:`waypoint_heading`."""
     x, y = to_map(start_map_pose, decision.waypoint_robot)
-    yaw = math.atan2(goal_xy[1] - y, goal_xy[0] - x)
+    heading = waypoint_heading(start_map_pose, decision, goal_xy)["heading_rad"]
+    yaw = math.remainder(float(start_map_pose["yaw"]) + heading, math.tau)
     return {"x": round(x, 4), "y": round(y, 4), "yaw_radians": round(yaw, 4)}
