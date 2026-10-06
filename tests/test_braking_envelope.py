@@ -425,7 +425,17 @@ def connected(socket, monkeypatch):
     return backend
 
 
-def arm(backend, call_id, *, speed=0.12, distance=2.0, room=2.65):
+#: A server that takes a preempting goal for a straight drive. No Nav2 release
+#: is one (see braking.PREEMPTION_BY_IMPLEMENTATION); the resend path is kept for
+#: servers that declare it.
+PREEMPTIVE = braking.decide_governance(
+    "example_msgs/action/PreemptibleDrive",
+    transport_resends=True,
+    table={"example_msgs/action/PreemptibleDrive": True},
+)
+
+
+def arm(backend, call_id, *, speed=0.12, distance=2.0, room=2.65, governance=None):
     backend.arm_braking_guard(
         call_id,
         "motion.advance",
@@ -434,6 +444,7 @@ def arm(backend, call_id, *, speed=0.12, distance=2.0, room=2.65):
         requested_speed_mps=speed,
         distance_m=distance,
         start_room_m=room,
+        governance=governance,
     )
 
 
@@ -485,7 +496,7 @@ def test_guard_slows_the_drive_as_the_room_shrinks(monkeypatch):
 
     socket = ApproachRosbridge(lambda goal: list(approach(goal)))
     backend = connected(socket, monkeypatch)
-    arm(backend, "adv", speed=0.2, distance=0.8, room=2.65)
+    arm(backend, "adv", speed=0.2, distance=0.8, room=2.65, governance=PREEMPTIVE)
     with backend._condition:
         backend._guards["adv"].last_slowdown_at = time.monotonic() - 10
     result = backend.invoke(
