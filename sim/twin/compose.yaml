@@ -14,5 +14,8 @@ services:
       TWIN_X: ${TWIN_X:--2.0}
       TWIN_Y: ${TWIN_Y:--0.5}
       TWIN_YAW: ${TWIN_YAW:-0.0}
+    volumes:
+      # Demo worlds kept in this repository, e.g. worlds/flyto_demo_room.world.
+      - ./worlds:/opt/flyto-twin/worlds:ro
     shm_size: "1gb"
     restart: "no"

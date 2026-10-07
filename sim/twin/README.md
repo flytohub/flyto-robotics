@@ -31,6 +31,14 @@ Stop with `docker compose down`. Choose another world or start pose with
 `TWIN_WORLD` (a world file inside the container), `TWIN_X`, `TWIN_Y`,
 `TWIN_YAW`.
 
+`worlds/` is mounted read-only at `/opt/flyto-twin/worlds`. The demo room
+(one 5 m x 4 m room, one box 0.75 m ahead of the start pose) is started with:
+
+```bash
+TWIN_WORLD=/opt/flyto-twin/worlds/flyto_demo_room.world TWIN_X=-1.8 TWIN_Y=0 \
+  docker compose up -d
+```
+
 ## Connecting, and never confusing the twin with the robot
 
 The robot is reached through `ssh -L 19090:127.0.0.1:9090 ubuntu@flyto-robot.local`.
