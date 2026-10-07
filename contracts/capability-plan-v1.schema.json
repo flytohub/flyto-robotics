@@ -1,25 +1,25 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://flyto2.com/contracts/robotics/plan-v1.schema.json",
-  "title": "Flyto Robotics AI-Composed Capability Plan v1",
+  "$id": "https://flyto2.com/contracts/capability-plan-v1.schema.json",
+  "title": "Flyto AI-Composed Capability Plan v1",
   "type": "object",
   "additionalProperties": false,
   "required": [
     "contract_version",
     "plan_id",
-    "robot_id",
+    "resource_id",
     "goal",
     "generated_by",
     "steps"
   ],
   "properties": {
     "contract_version": {
-      "const": "flyto.robotics.plan.v1"
+      "const": "flyto.capability-plan.v1"
     },
     "plan_id": {
       "$ref": "#/$defs/identifier"
     },
-    "robot_id": {
+    "resource_id": {
       "$ref": "#/$defs/identifier"
     },
     "goal": {

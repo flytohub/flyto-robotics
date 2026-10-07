@@ -5,7 +5,11 @@ The JSON contracts, the semantic pairing with ROS 2, and the stress gate.
 The stable external API is file-based and language-neutral:
 
 - `contracts/job-v1.schema.json` validates input jobs;
-- `contracts/plan-v1.schema.json` validates AI-composed capability plans;
+- `contracts/capability-plan-v1.schema.json` validates AI-composed capability
+  plans (`flyto.capability-plan.v1`, commanded equipment named `resource_id`).
+  The planner request that asks for one is `flyto.robotics.planner-request.v2`;
+  `tests/fixtures/capability-plan-exchange.v1.json` is the exchange flyto-ai's
+  planner is tested against, byte-identical in both repositories;
 - `contracts/input-event-v1.schema.json` validates keyboard, joystick, and
   external input lifecycle events without accepting motor values;
 - `contracts/facility-resource-plan-v1.schema.json` documents the exact
