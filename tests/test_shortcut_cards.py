@@ -57,7 +57,7 @@ def test_every_card_parses_compiles_and_matches_the_job_robot() -> None:
     job = load_job(JOB)
     for name in CARDS:
         plan = load_plan(ROOT / f"examples/plans/{name}.json")
-        assert plan.robot_id == job.robot_id
+        assert plan.resource_id == job.robot_id
         steps = compile_workflow(plan).steps
         assert steps[-1].kind is PrimitiveKind.SAFE_STOP
 

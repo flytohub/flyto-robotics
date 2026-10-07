@@ -1,7 +1,7 @@
 {
-  "contract_version": "flyto.robotics.plan.v1",
+  "contract_version": "flyto.capability-plan.v1",
   "plan_id": "ai4all-branching-orange-purple-fixture.v1",
-  "robot_id": "flyto-rover-sim-001",
+  "resource_id": "flyto-rover-sim-001",
   "goal": "合成測試資料：經橘色第一分岔與中央匯流點前往紫區護理站，交付前取得人員確認，最後安全停止。",
   "generated_by": {
     "kind": "deterministic_demo",

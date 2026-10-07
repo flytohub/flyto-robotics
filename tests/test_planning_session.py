@@ -55,9 +55,9 @@ class FakeLivePlanner:
         candidates = request["observations"]["route_candidates"]
         selected = candidates[0]
         plan = {
-            "contract_version": "flyto.robotics.plan.v1",
+            "contract_version": "flyto.capability-plan.v1",
             "plan_id": f"test-live-plan-{len(self.requests)}",
-            "robot_id": request["robot_id"],
+            "resource_id": request["resource_id"],
             "goal": request["goal"],
             "generated_by": {
                 "kind": "llm",

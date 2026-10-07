@@ -95,8 +95,8 @@ class MissionNode(Node):
         semantic_map_store: SemanticLocationStore | None = None
         if configured_plan is not None:
             plan = load_plan(configured_plan)
-            if plan.robot_id != self.job.robot_id:
-                raise PlanValidationError("plan.robot_id must match job.robot_id")
+            if plan.resource_id != self.job.robot_id:
+                raise PlanValidationError("plan.resource_id must match job.robot_id")
             semantic_capabilities = {
                 "navigate_to_location",
                 "save_current_location",

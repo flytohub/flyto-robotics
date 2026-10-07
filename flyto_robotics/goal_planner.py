@@ -7,7 +7,13 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
-from .ai_planner import PlanValidationError, compile_workflow, parse_plan, plan_to_dict
+from .ai_planner import (
+    PLAN_CONTRACT_VERSION,
+    PlanValidationError,
+    compile_workflow,
+    parse_plan,
+    plan_to_dict,
+)
 from .capabilities import (
     CapabilityRoutingContext,
     CapabilityValidationError,
@@ -122,14 +128,14 @@ def compose_delivery_plan(
     approval_id: str,
     confirmation_timeout_seconds: float,
 ) -> dict[str, Any]:
-    """Build one flyto.robotics.plan.v1 payload for a resolved destination."""
+    """Build one flyto.capability-plan.v1 payload for a resolved destination."""
     pickup_dwell = max(0.0, job.safety.pickup_dwell_seconds)
     dropoff_dwell = max(0.0, job.safety.dropoff_dwell_seconds)
     mission_timeout = job.safety.mission_timeout_seconds
     return {
-        "contract_version": "flyto.robotics.plan.v1",
+        "contract_version": PLAN_CONTRACT_VERSION,
         "plan_id": plan_id,
-        "robot_id": job.robot_id,
+        "resource_id": job.robot_id,
         "goal": goal,
         "generated_by": {
             "kind": "deterministic_demo",
@@ -525,7 +531,7 @@ class DeterministicDeliveryGoalPlanner:
         timeline.record(
             stage="plan_validated",
             actor="plan_contract",
-            detail=f"{len(plan.steps)} steps, flyto.robotics.plan.v1",
+            detail=f"{len(plan.steps)} steps, {PLAN_CONTRACT_VERSION}",
         )
         workflow = compile_workflow(plan, semantic_map=self._semantic_map)
         timeline.record(

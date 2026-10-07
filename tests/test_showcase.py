@@ -70,7 +70,7 @@ def synthetic_live_session(
     goal = str(plan["goal"])
     request = planner_request(
         goal=goal,
-        robot_id="flyto-rover-sim-001",
+        resource_id="flyto-rover-sim-001",
         goal_frame=GoalFrame.from_mapping(load_json(GOAL_FRAME_FILE)),
     )
     selected_locations = [

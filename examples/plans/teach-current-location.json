@@ -1,7 +1,7 @@
 {
-  "contract_version": "flyto.robotics.plan.v1",
+  "contract_version": "flyto.capability-plan.v1",
   "plan_id": "teach-current-location.v1",
-  "robot_id": "flyto-rover-sim-001",
+  "resource_id": "flyto-rover-sim-001",
   "goal": "記住這裡是展示起點。",
   "generated_by": {
     "kind": "llm",

@@ -132,7 +132,7 @@ def validate_assets(root: Path = PROJECT_ROOT) -> list[str]:
         root / "contracts/result-v1.schema.json",
         root / "contracts/shortcut-result-v1.schema.json",
         root / "contracts/facility-resource-plan-v1.schema.json",
-        root / "contracts/plan-v1.schema.json",
+        root / "contracts/capability-plan-v1.schema.json",
         root / "contracts/input-event-v1.schema.json",
         root / "contracts/device-event-v1.schema.json",
         root / "contracts/human-decision-v1.schema.json",
@@ -349,8 +349,8 @@ def dry_run_plan(
     """Exercise a validated AI plan against deterministic capability observations."""
     job = load_job(job_path)
     plan = load_plan(plan_path)
-    if plan.robot_id != job.robot_id:
-        raise PlanValidationError("plan.robot_id must match job.robot_id")
+    if plan.resource_id != job.robot_id:
+        raise PlanValidationError("plan.resource_id must match job.robot_id")
     semantic_map = _semantic_map_store(semantic_map_path, semantic_map_id)
     controller = MissionController(
         job,
@@ -728,7 +728,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 json.dumps(
                     planner_request(
                         goal=args.goal,
-                        robot_id=args.robot_id,
+                        resource_id=args.robot_id,
                         goal_frame=goal_frame,
                         semantic_map=semantic_map,
                     ),
@@ -755,7 +755,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             plan = request_ai_plan(
                 transport,
                 goal=args.goal,
-                robot_id=args.robot_id,
+                resource_id=args.robot_id,
                 goal_frame=goal_frame,
                 semantic_map=semantic_map,
             )

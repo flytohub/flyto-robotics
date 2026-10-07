@@ -1,7 +1,7 @@
 {
-  "contract_version": "flyto.robotics.plan.v1",
+  "contract_version": "flyto.capability-plan.v1",
   "plan_id": "careflow-waypoints-human-gate.v1",
-  "robot_id": "flyto-rover-sim-001",
+  "resource_id": "flyto-rover-sim-001",
   "goal": "依序經過藍色與黃色區域，確認走道淨空並取得護理站收件核准後，前往紫色區域安全停止。",
   "generated_by": {
     "kind": "llm",

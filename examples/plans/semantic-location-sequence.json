@@ -1,7 +1,7 @@
 {
-  "contract_version": "flyto.robotics.plan.v1",
+  "contract_version": "flyto.capability-plan.v1",
   "plan_id": "semantic-location-sequence.v1",
-  "robot_id": "flyto-rover-sim-001",
+  "resource_id": "flyto-rover-sim-001",
   "goal": "先去藍線終點，再去黃線終點，最後去紫線終點並安全停止。",
   "generated_by": {
     "kind": "llm",

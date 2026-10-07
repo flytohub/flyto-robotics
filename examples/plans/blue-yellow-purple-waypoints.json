@@ -1,7 +1,7 @@
 {
-  "contract_version": "flyto.robotics.plan.v1",
+  "contract_version": "flyto.capability-plan.v1",
   "plan_id": "color-route-waypoints.v1",
-  "robot_id": "flyto-rover-sim-001",
+  "resource_id": "flyto-rover-sim-001",
   "goal": "先走完整段藍線，再走完整段黃線，最後走完整段紫線並安全停止。",
   "generated_by": {
     "kind": "llm",

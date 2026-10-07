@@ -263,9 +263,9 @@ def _case_payload(index: int, base_job: dict[str, Any]) -> dict[str, Any]:
         "tier": tier,
     }
     plan = {
-        "contract_version": "flyto.robotics.plan.v1",
+        "contract_version": "flyto.capability-plan.v1",
         "plan_id": f"{case_id}.plan.v1",
-        "robot_id": job["robot_id"],
+        "resource_id": job["robot_id"],
         "goal": goal,
         "generated_by": {
             "kind": "deterministic_demo",

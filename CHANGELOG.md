@@ -2,6 +2,12 @@
 
 All notable project changes are recorded here.
 
+## 0.7.0 — 2026-10-07
+
+- Breaking wire change, lab planner only. The plan contract is now `flyto.capability-plan.v1` (was `flyto.robotics.plan.v1`) and names the commanded equipment `resource_id` (was `robot_id`); the planner request is `flyto.robotics.planner-request.v2` and carries `resource_id`. This matches flyto-ai's planner, which emits that contract and refuses a v1 request by name, so a 0.6.6 lab tool paired with a current planner fails with a reason instead of a mismatch. `contracts/plan-v1.schema.json` is now `contracts/capability-plan-v1.schema.json`; the example plans, `goal_planner` and the MCP benchmark use the new shape. Python callers pass `planner_request(resource_id=...)` / `request_ai_plan(resource_id=...)` and read `RobotPlan.resource_id`.
+- Jobs, results, planning sessions and the MCP `robot.plan.prepare` tool keep `robot_id`: those are the executor's own contracts, not the planner's. A plan's `resource_id` must equal the job's `robot_id`, as before.
+- No released Desktop is affected: flyto-cloud loads this package for the adapter provider and never imports the planner client, so no compatibility window is kept. `tests/fixtures/capability-plan-exchange.v1.json` is a byte-identical copy of flyto-ai's and both repos pin its digest.
+
 ## 0.6.6 — 2026-10-07
 
 - A motion cut short by what stands ahead no longer reports `completed`. Twin, task t-41169022a09d95b6 (0.6.5): `motion.advance` asked for 1.2 m with a box ahead; speed governance measured 0.0901 m of room to the floor at send and shortened the goal to 0.0211 m, the braking guard also tripped on clearance, Nav2 DriveOnHeading succeeded, and `motion_outcome` said `completed` / `succeeded` with 0.0345 of 1.2 m travelled. Cloud saw a completed step, planned no way round, and the task failed as not proven. A run that started a little further back drove, was tripped mid-drive with a `canceled` status, reported `obstacle_blocked` and was routed round: the verdict depended on where the robot stood. 0.6.4's planned-stop rule only fired when the guard had not tripped, and the action status was checked before the guard's cause.

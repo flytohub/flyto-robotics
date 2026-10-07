@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from .ai_planner import (
+    PLANNER_RESPONSE_CONTRACT,
     HTTPJsonPlannerTransport,
     PlanValidationError,
     parse_plan,
@@ -23,7 +24,7 @@ from .semantic_map import SemanticLocationStore
 
 SCENARIO_CONTRACT = "flyto.robotics.route-scenario.v1"
 SESSION_CONTRACT = "flyto.robotics.planning-session.v1"
-AI_RESPONSE_CONTRACT = "flyto.ai.robotics-plan-response.v1"
+AI_RESPONSE_CONTRACT = PLANNER_RESPONSE_CONTRACT
 AI_ATTESTATION_CONTRACT = "flyto.ai.robotics-planning-attestation.v1"
 MAX_INPUT_BYTES = 512 * 1024
 
@@ -110,7 +111,7 @@ def _verify_attestation(
         parsed = parse_plan(plan_data)
     except PlanValidationError as exc:
         raise PlanningSessionError(str(exc)) from exc
-    if parsed.robot_id != robot_id or parsed.goal != goal:
+    if parsed.resource_id != robot_id or parsed.goal != goal:
         raise PlanningSessionError(
             "planner plan does not match the requested robot and goal"
         )
@@ -156,7 +157,7 @@ def _planner_round(
         raise PlanningSessionError("route evaluation has no executable candidates")
     request = planner_request(
         goal=goal,
-        robot_id=robot_id,
+        resource_id=robot_id,
         goal_frame=goal_frame,
         routing_context=routing_context,
         semantic_map=semantic_map,

@@ -25,9 +25,9 @@ EXAMPLE_JOB = PROJECT_ROOT / "examples/jobs/pharmacy-to-ward.json"
 
 def relative_plan(*, distance_m: float = 0.3) -> dict[str, object]:
     return {
-        "contract_version": "flyto.robotics.plan.v1",
+        "contract_version": "flyto.capability-plan.v1",
         "plan_id": "shortcut.forward.30cm.v1",
-        "robot_id": "flyto-rover-sim-001",
+        "resource_id": "flyto-rover-sim-001",
         "goal": "前進三十公分後安全停止",
         "generated_by": {
             "kind": "human",

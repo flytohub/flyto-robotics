@@ -1,7 +1,7 @@
 {
-  "contract_version": "flyto.robotics.plan.v1",
+  "contract_version": "flyto.capability-plan.v1",
   "plan_id": "careflow-human-gate.v1",
-  "robot_id": "flyto-rover-sim-001",
+  "resource_id": "flyto-rover-sim-001",
   "goal": "沿藍線與黃線運送耗材，確認路徑安全並取得護理站人員核准後，沿紫線離開並安全停止。",
   "generated_by": {
     "kind": "llm",
