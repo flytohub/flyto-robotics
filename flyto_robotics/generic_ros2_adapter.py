@@ -1545,18 +1545,27 @@ def _motion_result(
     return CallResult(call_id, outcome, evidence=merged, detail=detail)
 
 
-def _ended_at_planned_stop(summary: Mapping[str, Any] | None) -> bool:
-    """A straight drive that ended at the stop point planned before sending.
+def _succeeded_outcome(summary: Mapping[str, Any] | None) -> str:
+    """The outcome of a goal its server ended as succeeded, or one the stop rule settled.
 
-    Its server reports success, but the drive went less far than asked because
-    the floor was in the way: the call failed, ``obstacle_blocked``, exactly
-    as if the guard had stopped it, so a caller can plan a way round.
+    The server's "succeeded" is about the goal it was sent, which speed
+    governance may have shortened to a few centimetres. Whether the call did
+    what was asked is ``motion_outcome``'s reason, decided from the motion's
+    facts (``motion_outcome.STOP_RULES``): anything but ``completed`` -- an
+    ``obstacle_blocked`` drive planned or tripped short of the request, a
+    ``path_blocked`` one with no room at all -- is a failed call, so a caller
+    plans a way round instead of trusting an arrival that did not happen.
     """
-    record = summary.get("braking") if isinstance(summary, Mapping) else None
-    return (
-        isinstance(record, Mapping)
-        and record.get("ended") == motion_outcome.GUARD_END_PLANNED_STOP
-    )
+    if not isinstance(summary, Mapping):
+        return OUTCOME_COMPLETED
+    reason = summary.get("reason")
+    return OUTCOME_COMPLETED if reason == motion_outcome.REASON_COMPLETED else OUTCOME_FAILED
+
+
+def _rule_reached(summary: Mapping[str, Any] | None) -> bool:
+    """A planned or guarded stop the stop rule found still arrived."""
+    rule = summary.get("stop_rule") if isinstance(summary, Mapping) else None
+    return isinstance(rule, Mapping) and rule.get("reason") == motion_outcome.REASON_COMPLETED
 
 
 def _with_artifacts(result: CallResult) -> CallResult:
@@ -2022,7 +2031,10 @@ class GenericROS2Adapter:
                 call_id,
                 OUTCOME_REFUSED,
                 evidence={
-                    "reason_code": motion_outcome.REASON_OBSTACLE_BLOCKED,
+                    # Refused before moving: there is no room to drive any
+                    # distance and still stop at the floor, so the swept path
+                    # is not clear (motion_outcome STOP_RULES "no_room_to_drive").
+                    "reason_code": motion_outcome.REASON_PATH_BLOCKED,
                     "braking": {
                         "profile": profile.to_dict(),
                         "governance": governance.to_dict(),
@@ -3395,11 +3407,12 @@ class RclpyROS2Backend(_ObservationState):
             status=status,
             result_values=_message_fields(getattr(response, "result", None)),
         )
-        if status == GoalStatus.STATUS_SUCCEEDED and not _ended_at_planned_stop(summary):
+        if status == GoalStatus.STATUS_SUCCEEDED or _rule_reached(summary):
+            # A failed one leads its detail with motion_outcome.describe().
             result = _motion_result(
-                call_id, OUTCOME_COMPLETED, self._evidence(capability_id), summary
+                call_id, _succeeded_outcome(summary), self._evidence(capability_id), summary
             )
-        elif braked or _ended_at_planned_stop(summary):
+        elif braked:
             result = _motion_result(
                 call_id,
                 OUTCOME_FAILED,
@@ -4380,12 +4393,18 @@ class RosbridgeROS2Backend(_ObservationState):
             status=status,
             result_values=values if isinstance(values, Mapping) else None,
         )
-        planned_stop = _ended_at_planned_stop(summary)
-        if result_message.get("result") is True and status == 4 and not planned_stop:
+        succeeded = result_message.get("result") is True and status == 4
+        if succeeded or _rule_reached(summary):
+            outcome = _succeeded_outcome(summary)
             result = _motion_result(
-                call_id, OUTCOME_COMPLETED, self._evidence(capability_id), summary
+                call_id,
+                outcome,
+                # A failed motion does not wait for quiet sensors before the
+                # host's safe stop; a completed one reads where it settled.
+                self._evidence(capability_id, wait=outcome == OUTCOME_COMPLETED),
+                summary,
             )
-        elif braked or planned_stop:
+        elif braked:
             result = _motion_result(
                 call_id,
                 OUTCOME_FAILED,
