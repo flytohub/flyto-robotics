@@ -367,7 +367,7 @@ def test_too_little_room_to_drive_and_stop_is_refused_with_the_plan():
     backend = GraphBackend(sweep_with({0: FLOOR + 0.02}))
     result = advance(backend, distance_m=1.0, speed_mps=0.2)
     assert result.outcome == OUTCOME_REFUSED
-    assert result.evidence["reason_code"] == mo.REASON_OBSTACLE_BLOCKED
+    assert result.evidence["reason_code"] == mo.REASON_PATH_BLOCKED
     assert result.evidence["braking"]["governance"]["mode"] == braking.GOVERNANCE_PLANNED
     assert "clearance floor" in result.detail
     assert backend.calls == [] and backend.armed == []

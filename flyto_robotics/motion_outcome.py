@@ -12,15 +12,25 @@ the nearest LiDAR return.
 Reasons, most specific first:
 
 ``completed``
-    the action server reported success.
+    the action server reported success and, for a motion with a requested
+    distance, the robot got there (see :data:`STOP_RULES`).
+``path_blocked``
+    a straight drive had no room to go any distance before the clearance
+    floor: nothing the odometry could see was commanded.
 ``cancelled``
     the goal was cancelled (an operator stop, a halt, a cancel).
 ``obstacle_blocked``
     the action reported a collision ahead, the collision monitor stopped the
     base for one of its polygons, this adapter's braking guard stopped a
     straight drive because the room left to the clearance floor was inside
-    its stopping distance, or the nearest return the way the robot was going
-    is inside the clearance floor at the stop.
+    its stopping distance, the drive was planned before sending to end short
+    of the request for the same reason, or the nearest return the way the
+    robot was going is inside the clearance floor at the stop.
+
+Whether a motion with a requested distance stopped short because of what
+stands ahead is decided first, by one table (:data:`STOP_RULES`) over the
+motion's facts, never by the action status: Nav2 reports "succeeded" for a
+drive that went the 2 cm it was sent when 1.2 m was asked.
 ``sensor_stale``
     the collision monitor stopped the base because its sensor data was late
     or missing ("invalid source"), or this adapter's braking guard stopped a
@@ -44,14 +54,16 @@ Reasons, most specific first:
 from __future__ import annotations
 
 import math
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
 from . import braking_envelope as braking
 from . import sim_time
+from .mission import relative_move_tolerance
 
 REASON_COMPLETED = "completed"
+REASON_PATH_BLOCKED = "path_blocked"
 REASON_CANCELLED = "cancelled"
 REASON_OBSTACLE_BLOCKED = "obstacle_blocked"
 REASON_SENSOR_STALE = "sensor_stale"
@@ -64,6 +76,7 @@ REASON_UNKNOWN = "unknown"
 
 REASONS = (
     REASON_COMPLETED,
+    REASON_PATH_BLOCKED,
     REASON_CANCELLED,
     REASON_OBSTACLE_BLOCKED,
     REASON_SENSOR_STALE,
@@ -394,6 +407,152 @@ def _error_code(result_values: Mapping[str, Any] | None) -> int | None:
     return code or None
 
 
+
+# -- the stop rule -----------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class StopFacts:
+    """What a motion with a requested distance measured, for :data:`STOP_RULES`.
+
+    ``requested_m`` is what the caller asked for, ``commanded_m`` what was sent
+    after speed governance, ``travelled_m`` the odometry displacement from the
+    start pose to the stop. ``shortened`` is the before-send plan's verdict,
+    ``trip`` the braking guard's cause if it stopped the drive, and
+    ``ahead_inside_floor`` whether the nearest return the way the robot was
+    going lies inside the clearance floor at the stop.
+    """
+
+    requested_m: float
+    commanded_m: float
+    travelled_m: float
+    shortened: bool
+    trip: str | None
+    ahead_inside_floor: bool
+
+    @property
+    def arrival_tolerance_m(self) -> float:
+        # The relative-move arrival rule this repository already applies to a
+        # straight move (mission.relative_move_tolerance): min(0.03 m, d/10).
+        return relative_move_tolerance(self.requested_m)
+
+    @property
+    def shortfall_m(self) -> float:
+        return self.requested_m - self.travelled_m
+
+    @property
+    def reached(self) -> bool:
+        return self.shortfall_m <= self.arrival_tolerance_m
+
+    @property
+    def governed(self) -> bool:
+        """The adapter, not the server, decided where this drive stopped."""
+        return self.shortened or self.trip is not None
+
+
+@dataclass(frozen=True)
+class StopRule:
+    name: str
+    applies: Callable[[StopFacts], bool]
+    reason: str
+    basis: str
+
+
+#: First match wins. Every row names the physical fact it reads and the
+#: threshold's basis. A motion no row matches is left to :func:`_reason`'s
+#: account of the server's own end (status, error code, collision monitor).
+STOP_RULES: tuple[StopRule, ...] = (
+    StopRule(
+        "no_room_to_drive",
+        lambda f: f.commanded_m < braking.MIN_DISTANCE_M <= f.requested_m,
+        REASON_PATH_BLOCKED,
+        "commanded distance below braking_envelope.MIN_DISTANCE_M (0.01 m, the "
+        "shortest drive odometry can tell from standing still): the room ahead "
+        "was used up by the stopping distance before the drive could start",
+    ),
+    StopRule(
+        "reached_request",
+        lambda f: f.governed and f.reached,
+        REASON_COMPLETED,
+        "travelled within mission.relative_move_tolerance (min(0.03 m, d/10)) of "
+        "the requested distance: a planned or guarded stop that still arrived",
+    ),
+    StopRule(
+        "guard_blind",
+        lambda f: f.trip in (GUARD_TRIP_BLIND, GUARD_TRIP_STALE),
+        REASON_SENSOR_STALE,
+        "the braking guard stopped the drive because the LiDAR was unreadable "
+        "or late: the robot was blind, not blocked",
+    ),
+    StopRule(
+        "stopped_short_by_clearance",
+        lambda f: not f.reached and (f.shortened or f.trip == GUARD_TRIP_CLEARANCE),
+        REASON_OBSTACLE_BLOCKED,
+        "short of the request by more than mission.relative_move_tolerance, and "
+        "the clearance ahead was within the stopping budget (floor + v t + "
+        "v^2/2a, braking_envelope) before sending (plan.shortened) or while "
+        "driving (guard trip 'clearance')",
+    ),
+    StopRule(
+        "stopped_short_facing_obstacle",
+        lambda f: not f.reached and f.ahead_inside_floor,
+        REASON_OBSTACLE_BLOCKED,
+        "short of the request by more than mission.relative_move_tolerance, "
+        "with the nearest return the way the robot was going inside the "
+        "clearance floor at the stop (stop_clearance.travel_floor_held false)",
+    ),
+)
+
+
+def stop_rule(facts: StopFacts | None) -> StopRule | None:
+    """The first row of :data:`STOP_RULES` that holds for ``facts``."""
+    if facts is None:
+        return None
+    return next((rule for rule in STOP_RULES if rule.applies(facts)), None)
+
+
+def _number_or_none(value: Any) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    number = float(value)
+    return number if math.isfinite(number) else None
+
+
+def stop_facts(
+    track: MotionTrack,
+    *,
+    travelled_m: float | None,
+    clearance: Mapping[str, Any] | None,
+) -> StopFacts | None:
+    """The facts of a motion with a requested distance; None for any other.
+
+    The ask is the before-send plan's when there is one (the adapter sends the
+    governed distance), else the call's own ``distance_m``. Nothing is assumed
+    when odometry gave no displacement.
+    """
+    record = track.braking if isinstance(track.braking, Mapping) else {}
+    plan = record.get("plan") if isinstance(record.get("plan"), Mapping) else {}
+    commanded = _number_or_none(track.arguments.get("distance_m"))
+    requested = _number_or_none(plan.get("requested_distance_m"))
+    planned = _number_or_none(plan.get("commanded_distance_m"))
+    if planned is not None:
+        commanded = planned
+    if requested is None:
+        requested = commanded
+    if requested is None or commanded is None or travelled_m is None:
+        return None
+    trip = record.get("tripped")
+    clearance = clearance if isinstance(clearance, Mapping) else {}
+    return StopFacts(
+        requested_m=abs(requested),
+        commanded_m=abs(commanded),
+        travelled_m=abs(travelled_m),
+        shortened=bool(plan.get("shortened")),
+        trip=trip if isinstance(trip, str) else None,
+        ahead_inside_floor=clearance.get("travel_floor_held") is False,
+    )
+
+
 def _blocks(kind: int, name: str) -> bool:
     return kind in (COLLISION_STOP, COLLISION_APPROACH) and name != INVALID_SOURCE
 
@@ -411,19 +570,19 @@ def _reason(
     stop_range: float | None,
     clearance_floor_m: float,
     guard_trip: str | None = None,
-    guard_end: str | None = None,
+    rule: StopRule | None = None,
 ) -> str:
     """Most specific first.
 
-    What holds at the stop (Nav2's collision code, the monitor's state now,
-    the range ahead) beats a specific Nav2 error, which beats an event the
-    monitor raised and then cleared during the run: a slowdown for a box
-    passed earlier must not turn "no path to the goal" into "blocked".
+    A motion whose facts match a :data:`STOP_RULES` row takes that row's
+    reason, whatever status its server ended with. Otherwise what holds at
+    the stop (Nav2's collision code, the monitor's state now, the range
+    ahead) beats a specific Nav2 error, which beats an event the monitor
+    raised and then cleared during the run: a slowdown for a box passed
+    earlier must not turn "no path to the goal" into "blocked".
     """
-    # A drive planned to end short of an obstacle succeeded at what it was
-    # sent, but not at what was asked: the obstacle is why, as for a guard stop.
-    if status == STATUS_SUCCEEDED and guard_end == GUARD_END_PLANNED_STOP:
-        return REASON_OBSTACLE_BLOCKED
+    if rule is not None:
+        return rule.reason
     if status == STATUS_SUCCEEDED:
         return REASON_COMPLETED
     # The adapter's own braking guard cancels the goal it stops, so the
@@ -502,7 +661,18 @@ def summarize(
     if isinstance(result_values, Mapping):
         error_msg = str(result_values.get("error_msg") or "")[:200]
     guard_trip = (track.braking or {}).get("tripped")
-    guard_end = (track.braking or {}).get("ended")
+    clearance = stop_clearance(
+        track.capability_id, sweep, minimum_at_stop, clearance_floor_m
+    )
+    travelled: float | None = None
+    if start is not None and end is not None and track.capability_id != "motion.rotate":
+        travelled = math.hypot(end["x"] - start["x"], end["y"] - start["y"])
+    facts = (
+        stop_facts(track, travelled_m=travelled, clearance=clearance)
+        if status is not None
+        else None
+    )
+    rule = stop_rule(facts)
     reason = _reason(
         status=status,
         error_code=error_code,
@@ -511,7 +681,7 @@ def summarize(
         stop_range=stop_range,
         clearance_floor_m=clearance_floor_m,
         guard_trip=guard_trip if isinstance(guard_trip, str) else None,
-        guard_end=guard_end if isinstance(guard_end, str) else None,
+        rule=rule,
     )
     summary: dict[str, Any] = {
         "reason": reason,
@@ -541,11 +711,20 @@ def summarize(
         summary["final_map_pose"] = end_map
     if ahead is not None:
         summary["travel_direction_range_m"] = round(ahead, 3)
-    clearance = stop_clearance(
-        track.capability_id, sweep, minimum_at_stop, clearance_floor_m
-    )
     if clearance is not None:
         summary["stop_clearance"] = clearance
+    if rule is not None and facts is not None:
+        # Which row decided, on what numbers, and why its threshold is that.
+        summary["stop_rule"] = {
+            "name": rule.name,
+            "reason": rule.reason,
+            "basis": rule.basis,
+            "requested_m": round(facts.requested_m, 4),
+            "commanded_m": round(facts.commanded_m, 4),
+            "travelled_m": round(facts.travelled_m, 4),
+            "shortfall_m": round(facts.shortfall_m, 4),
+            "arrival_tolerance_m": round(facts.arrival_tolerance_m, 4),
+        }
     if track.braking:
         summary["braking"] = dict(track.braking)
     if error_code is not None:
