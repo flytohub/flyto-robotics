@@ -1,0 +1,69 @@
+<?xml version="1.0"?>
+<!--
+  Flyto demo room: one 5 m x 4 m room and one box.
+  The robot starts at (-1.8, 0) facing +x; the box stands 0.75 m ahead of it,
+  with clear floor on both sides so a detour can go round it, and plain
+  walls so a SLAM map of the room reads at a glance.
+  Use: TWIN_WORLD=/opt/flyto-twin/worlds/flyto_demo_room.world TWIN_X=-1.8 TWIN_Y=0
+-->
+<sdf version="1.8">
+  <world name="default">
+    <physics type="ode">
+      <real_time_update_rate>1000.0</real_time_update_rate>
+      <max_step_size>0.001</max_step_size>
+      <real_time_factor>1</real_time_factor>
+    </physics>
+    <plugin filename="gz-sim-physics-system" name="gz::sim::systems::Physics"/>
+    <plugin filename="gz-sim-user-commands-system" name="gz::sim::systems::UserCommands"/>
+    <plugin filename="gz-sim-scene-broadcaster-system" name="gz::sim::systems::SceneBroadcaster"/>
+    <plugin filename="gz-sim-sensors-system" name="gz::sim::systems::Sensors">
+      <render_engine>ogre2</render_engine>
+    </plugin>
+    <plugin filename="gz-sim-imu-system" name="gz::sim::systems::Imu"/>
+
+    <include>
+      <uri>https://fuel.gazebosim.org/1.0/OpenRobotics/models/Ground Plane</uri>
+    </include>
+    <include>
+      <uri>https://fuel.gazebosim.org/1.0/OpenRobotics/models/Sun</uri>
+    </include>
+
+    <model name="room">
+      <static>true</static>
+      <link name="north">
+        <pose>0 2.06 0.25 0 0 0</pose>
+        <collision name="c"><geometry><box><size>5.24 0.12 0.5</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>5.24 0.12 0.5</size></box></geometry>
+          <material><ambient>0.82 0.84 0.88 1</ambient><diffuse>0.82 0.84 0.88 1</diffuse></material></visual>
+      </link>
+      <link name="south">
+        <pose>0 -2.06 0.25 0 0 0</pose>
+        <collision name="c"><geometry><box><size>5.24 0.12 0.5</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>5.24 0.12 0.5</size></box></geometry>
+          <material><ambient>0.82 0.84 0.88 1</ambient><diffuse>0.82 0.84 0.88 1</diffuse></material></visual>
+      </link>
+      <link name="east">
+        <pose>2.56 0 0.25 0 0 0</pose>
+        <collision name="c"><geometry><box><size>0.12 4.0 0.5</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>0.12 4.0 0.5</size></box></geometry>
+          <material><ambient>0.82 0.84 0.88 1</ambient><diffuse>0.82 0.84 0.88 1</diffuse></material></visual>
+      </link>
+      <link name="west">
+        <pose>-2.56 0 0.25 0 0 0</pose>
+        <collision name="c"><geometry><box><size>0.12 4.0 0.5</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>0.12 4.0 0.5</size></box></geometry>
+          <material><ambient>0.82 0.84 0.88 1</ambient><diffuse>0.82 0.84 0.88 1</diffuse></material></visual>
+      </link>
+    </model>
+
+    <model name="obstacle">
+      <static>true</static>
+      <link name="box">
+        <pose>-0.9 0 0.175 0 0 0</pose>
+        <collision name="c"><geometry><box><size>0.3 0.4 0.35</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>0.3 0.4 0.35</size></box></geometry>
+          <material><ambient>1.0 0.45 0.1 1</ambient><diffuse>1.0 0.45 0.1 1</diffuse></material></visual>
+      </link>
+    </model>
+  </world>
+</sdf>
