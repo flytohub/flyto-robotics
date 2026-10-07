@@ -185,7 +185,7 @@ def _prepare(arguments: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("route_limit must be an integer")
     request = planner_request(
         goal=arguments["goal"],
-        robot_id=arguments["robot_id"],
+        resource_id=arguments["robot_id"],
         observations=observations,
         goal_frame=arguments.get("goal_frame"),
         routing_context=arguments.get("routing_context"),
@@ -233,8 +233,8 @@ def _dry_run(arguments: dict[str, Any]) -> dict[str, Any]:
     _exact_fields(arguments, allowed={"job", "plan"}, required={"job", "plan"})
     job = parse_job(arguments["job"])
     validation, plan = _workflow_payload(arguments["plan"])
-    if plan.robot_id != job.robot_id:
-        raise PlanValidationError("plan.robot_id must match job.robot_id")
+    if plan.resource_id != job.robot_id:
+        raise PlanValidationError("plan.resource_id must match job.robot_id")
 
     with tempfile.TemporaryDirectory(prefix="flyto2-robot-mcp-") as directory:
         root = Path(directory)

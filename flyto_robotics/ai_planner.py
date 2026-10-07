@@ -32,7 +32,11 @@ from .workflow import (
     WorkflowStep,
 )
 
-PLAN_CONTRACT_VERSION = "flyto.robotics.plan.v1"
+PLAN_CONTRACT_VERSION = "flyto.capability-plan.v1"
+# v2 renamed the commanded identity robot_id -> resource_id. flyto-ai's planner
+# refuses v1 by name, so a client older than 0.7.0 fails loudly, not silently.
+PLANNER_REQUEST_CONTRACT = "flyto.robotics.planner-request.v2"
+PLANNER_RESPONSE_CONTRACT = "flyto.ai.robotics-plan-response.v1"
 MAX_PLAN_BYTES = 128 * 1024
 MAX_PLAN_STEPS = 64
 ALLOWED_FAILURE_POLICIES = frozenset({"abort", "request_replan"})
@@ -71,7 +75,7 @@ class CapabilityCall:
 class RobotPlan:
     contract_version: str
     plan_id: str
-    robot_id: str
+    resource_id: str
     goal: str
     generated_by: PlanSource
     steps: tuple[CapabilityCall, ...]
@@ -174,10 +178,7 @@ class HTTPJsonPlannerTransport:
             "plan",
             "attestation",
         }:
-            if (
-                decoded["contract_version"]
-                != "flyto.ai.robotics-plan-response.v1"
-            ):
+            if decoded["contract_version"] != PLANNER_RESPONSE_CONTRACT:
                 raise PlanValidationError(
                     "planner service returned an unsupported response contract"
                 )
@@ -304,7 +305,7 @@ def parse_plan(
     allowed = {
         "contract_version",
         "plan_id",
-        "robot_id",
+        "resource_id",
         "goal",
         "generated_by",
         "steps",
@@ -381,7 +382,7 @@ def parse_plan(
     return RobotPlan(
         contract_version=PLAN_CONTRACT_VERSION,
         plan_id=_identifier(data["plan_id"], "plan_id"),
-        robot_id=_identifier(data["robot_id"], "robot_id"),
+        resource_id=_identifier(data["resource_id"], "resource_id"),
         goal=_bounded_text(data["goal"], "goal", 2000),
         generated_by=source,
         steps=tuple(steps),
@@ -429,7 +430,7 @@ def plan_to_dict(plan: RobotPlan) -> dict[str, Any]:
     return {
         "contract_version": plan.contract_version,
         "plan_id": plan.plan_id,
-        "robot_id": plan.robot_id,
+        "resource_id": plan.resource_id,
         "goal": plan.goal,
         "generated_by": {
             "kind": plan.generated_by.kind,
@@ -452,7 +453,7 @@ def plan_to_dict(plan: RobotPlan) -> dict[str, Any]:
 def planner_request(
     *,
     goal: str,
-    robot_id: str,
+    resource_id: str,
     registry: CapabilityRegistry | None = None,
     observations: dict[str, object] | None = None,
     goal_frame: GoalFrame | dict[str, object] | None = None,
@@ -483,9 +484,9 @@ def planner_request(
         except SemanticMapValidationError as exc:
             raise PlanValidationError(str(exc)) from exc
     return {
-        "planner_contract": "flyto.robotics.planner-request.v1",
+        "planner_contract": PLANNER_REQUEST_CONTRACT,
         "instructions": (
-            "Return one JSON object only using flyto.robotics.plan.v1. Select and order "
+            f"Return one JSON object only using {PLAN_CONTRACT_VERSION}. Select and order "
             "only the shortlisted capabilities below and emit each capability's "
             "runtime_name in plan steps. Never emit wheel speeds, PWM, shell commands, "
             "ROS topics, source code, canonical IDs, or unregistered tools. Every motion "
@@ -499,7 +500,7 @@ def planner_request(
         "goal_frame": (
             route.goal_frame.to_dict() if route.goal_frame is not None else None
         ),
-        "robot_id": _identifier(robot_id, "robot_id"),
+        "resource_id": _identifier(resource_id, "resource_id"),
         "capability_route": route.to_dict(),
         "capabilities": active_registry.catalog_for(route.names),
         "observations": active_observations,
@@ -510,7 +511,7 @@ def request_ai_plan(
     transport: PlannerTransport,
     *,
     goal: str,
-    robot_id: str,
+    resource_id: str,
     registry: CapabilityRegistry | None = None,
     observations: dict[str, object] | None = None,
     goal_frame: GoalFrame | dict[str, object] | None = None,
@@ -522,7 +523,7 @@ def request_ai_plan(
     active_registry = registry or default_capability_registry()
     request = planner_request(
         goal=goal,
-        robot_id=robot_id,
+        resource_id=resource_id,
         registry=active_registry,
         observations=observations,
         goal_frame=goal_frame,
@@ -534,8 +535,10 @@ def request_ai_plan(
         transport.complete(request),
         registry=active_registry,
     )
-    if plan.robot_id != robot_id:
-        raise PlanValidationError("AI plan robot_id does not match the requested robot")
+    if plan.resource_id != resource_id:
+        raise PlanValidationError(
+            "AI plan resource_id does not match the requested resource"
+        )
     route = _object(request["capability_route"], "capability_route")
     raw_candidates = route.get("candidates", [])
     allowed = tuple(

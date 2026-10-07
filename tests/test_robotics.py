@@ -121,9 +121,9 @@ def test_controller_accepts_a_custom_composition() -> None:
 def test_move_relative_plan_is_validated_and_closes_odometry_loop() -> None:
     plan = parse_plan(
         {
-            "contract_version": "flyto.robotics.plan.v1",
+            "contract_version": "flyto.capability-plan.v1",
             "plan_id": "shortcut.forward.30cm.v1",
-            "robot_id": "flyto-rover-sim-001",
+            "resource_id": "flyto-rover-sim-001",
             "goal": "前進三十公分後安全停止",
             "generated_by": {
                 "kind": "human",
@@ -175,9 +175,9 @@ def test_move_relative_requires_terminal_safe_stop() -> None:
     with pytest.raises(PlanValidationError, match="must end with safe_stop"):
         parse_plan(
             {
-                "contract_version": "flyto.robotics.plan.v1",
+                "contract_version": "flyto.capability-plan.v1",
                 "plan_id": "unsafe.shortcut.v1",
-                "robot_id": "flyto-rover-sim-001",
+                "resource_id": "flyto-rover-sim-001",
                 "goal": "前進三十公分",
                 "generated_by": {
                     "kind": "human",
@@ -262,7 +262,7 @@ def test_static_assets_are_parseable_and_self_contained() -> None:
     assert "worlds/hospital-logistics.sdf" in checked
     assert "models/flyto_rover/model.sdf" in checked
     assert "worlds/atomic-color-route.sdf" in checked
-    assert "contracts/plan-v1.schema.json" in checked
+    assert "contracts/capability-plan-v1.schema.json" in checked
     assert "contracts/input-event-v1.schema.json" in checked
     assert "contracts/shortcut-result-v1.schema.json" in checked
     assert "contracts/facility-resource-plan-v1.schema.json" in checked
@@ -425,7 +425,7 @@ def test_semantic_navigation_routing_is_identical_across_languages_and_hides_pos
         planner_request(
             goal=goal,
             goal_frame=frame,
-            robot_id="flyto-rover-sim-001",
+            resource_id="flyto-rover-sim-001",
             semantic_map=store,
             route_limit=4,
         )
@@ -464,9 +464,9 @@ def test_named_navigation_fails_closed_when_location_is_missing(tmp_path: Path) 
         map_id="hospital.demo.1",
     )
     decoded = {
-        "contract_version": "flyto.robotics.plan.v1",
+        "contract_version": "flyto.capability-plan.v1",
         "plan_id": "semantic-navigation.missing",
-        "robot_id": "flyto-rover-sim-001",
+        "resource_id": "flyto-rover-sim-001",
         "goal": "去不存在的地點",
         "generated_by": {
             "kind": "llm",
@@ -508,9 +508,9 @@ def test_named_navigation_uses_trusted_store_pose_not_llm_coordinates(
         pose=Pose2D(4.25, 2.1, 1.57),
     )
     decoded = {
-        "contract_version": "flyto.robotics.plan.v1",
+        "contract_version": "flyto.capability-plan.v1",
         "plan_id": "semantic-navigation.test",
-        "robot_id": "flyto-rover-sim-001",
+        "resource_id": "flyto-rover-sim-001",
         "goal": "去護理站",
         "generated_by": {
             "kind": "llm",
@@ -558,9 +558,9 @@ def test_save_current_location_atom_persists_current_odometry_pose(
         map_id="hospital.demo.1",
     )
     decoded = {
-        "contract_version": "flyto.robotics.plan.v1",
+        "contract_version": "flyto.capability-plan.v1",
         "plan_id": "teach-location.test",
-        "robot_id": "flyto-rover-sim-001",
+        "resource_id": "flyto-rover-sim-001",
         "goal": "記住這裡是護理站",
         "generated_by": {
             "kind": "llm",
@@ -689,7 +689,7 @@ def test_planner_request_carries_goal_frame_without_language_metadata() -> None:
     request = planner_request(
         goal="輸入文字可以是任何語言",
         goal_frame=frame,
-        robot_id="flyto-rover-sim-001",
+        resource_id="flyto-rover-sim-001",
         route_limit=4,
     )
 
@@ -761,7 +761,7 @@ def test_large_registry_is_bounded_before_the_llm_sees_it() -> None:
 
     request = planner_request(
         goal="先走藍線再安全停止",
-        robot_id="flyto-rover-sim-001",
+        resource_id="flyto-rover-sim-001",
         registry=registry,
         route_limit=6,
     )
@@ -797,7 +797,7 @@ def test_ai_selects_and_orders_registered_capabilities() -> None:
     plan = request_ai_plan(
         CallablePlannerTransport(fake_llm),
         goal="先走藍線，再走黃線，最後走紫線並安全停止。",
-        robot_id="flyto-rover-sim-001",
+        resource_id="flyto-rover-sim-001",
     )
     workflow = compile_workflow(plan)
 
@@ -826,18 +826,18 @@ def test_ai_cannot_inject_raw_motor_or_unregistered_capability() -> None:
         request_ai_plan(
             CallablePlannerTransport(lambda _request: decoded),
             goal="全速前進",
-            robot_id="flyto-rover-sim-001",
+            resource_id="flyto-rover-sim-001",
         )
 
 
-def test_ai_plan_must_target_the_requested_robot() -> None:
+def test_ai_plan_must_target_the_requested_resource() -> None:
     decoded = json.loads(EXAMPLE_PLAN.read_text(encoding="utf-8"))
 
-    with pytest.raises(PlanValidationError, match="requested robot"):
+    with pytest.raises(PlanValidationError, match="requested resource"):
         request_ai_plan(
             CallablePlannerTransport(lambda _request: decoded),
             goal="巡檢 A 區",
-            robot_id="different-robot",
+            resource_id="different-robot",
         )
 
 
@@ -867,7 +867,7 @@ def test_https_adapter_contract_works_with_loopback_planner() -> None:
                 f"http://127.0.0.1:{server.server_port}/robot-plan"
             ),
             goal="先走藍線，再走黃線，最後走紫線並安全停止。",
-            robot_id="flyto-rover-sim-001",
+            resource_id="flyto-rover-sim-001",
         )
     finally:
         server.shutdown()
@@ -875,8 +875,8 @@ def test_https_adapter_contract_works_with_loopback_planner() -> None:
         thread.join(timeout=2.0)
 
     assert plan.plan_id == "color-route-demo.v1"
-    assert requests[0]["planner_contract"] == "flyto.robotics.planner-request.v1"
-    assert requests[0]["robot_id"] == "flyto-rover-sim-001"
+    assert requests[0]["planner_contract"] == "flyto.robotics.planner-request.v2"
+    assert requests[0]["resource_id"] == "flyto-rover-sim-001"
 
 
 def test_conditional_capability_arguments_are_enforced() -> None:
@@ -887,7 +887,7 @@ def test_conditional_capability_arguments_are_enforced() -> None:
         request_ai_plan(
             CallablePlannerTransport(lambda _request: decoded),
             goal="先走藍線",
-            robot_id="flyto-rover-sim-001",
+            resource_id="flyto-rover-sim-001",
         )
 
 
@@ -899,7 +899,7 @@ def test_motion_plan_requires_terminal_safe_stop() -> None:
         request_ai_plan(
             CallablePlannerTransport(lambda _request: decoded),
             goal="沿路線前進但沒有停止條件",
-            robot_id="flyto-rover-sim-001",
+            resource_id="flyto-rover-sim-001",
         )
 
 
@@ -911,7 +911,7 @@ def test_contradictory_line_transition_is_rejected() -> None:
         request_ai_plan(
             CallablePlannerTransport(lambda _request: decoded),
             goal="模糊且矛盾的路線",
-            robot_id="flyto-rover-sim-001",
+            resource_id="flyto-rover-sim-001",
         )
 
 
@@ -925,7 +925,7 @@ def test_orphan_resume_is_rejected() -> None:
         request_ai_plan(
             CallablePlannerTransport(lambda _request: decoded),
             goal="未取得核准就恢復",
-            robot_id="flyto-rover-sim-001",
+            resource_id="flyto-rover-sim-001",
         )
 
 
