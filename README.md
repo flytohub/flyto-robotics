@@ -4,6 +4,10 @@
 
 # Flyto2 Robotics
 
+The optional [read-only ROS2 mobile readiness adapter](docs/mobile-readiness-adapter.md)
+exposes actual local ROS2 graph status/evidence through a versioned installed
+capability process. It neither requires Cloud nor enables robot motion.
+
 External ROS 2 adapter, deterministic control, simulation, safety, and evidence
 toolkit for Flyto2.
 

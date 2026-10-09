@@ -1,5 +1,13 @@
 # Flyto2 Robotics State
 
+## 2026-10-10 — Local read-only mobile status bridge
+
+Implemented a host-side ROS2 readiness capability provider exposing actual
+fresh observations and their SHA-256 evidence, with stale/unready distinction,
+without hosted Cloud. It does not provide autonomous motion authority or
+prove end-to-end robot navigation. Robotics remains independent from the
+separate cybersecurity Engine.
+
 ## Adapter provider ownership closure (2026-09-22)
 
 Physical/vendor adapter implementation now lives outside Flyto2 Cloud. `flyto-robotics` exposes Generic ROS2/rosbridge plus extracted OpenRMF and vision-stream providers through host-neutral plugin/process boundaries. The selected AI Space execution host owns provider lifecycle and assignment-scoped authority; Flyto2 Runtime is optional. Discovery is evidence only and grants no motion authority. The latest read-only TurtleBot3 preflight measured 0.143 m minimum LiDAR clearance, so the unchanged 0.35 m motion floor correctly prevented a new positive-movement acceptance.

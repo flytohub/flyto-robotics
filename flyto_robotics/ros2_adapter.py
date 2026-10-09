@@ -13,6 +13,7 @@ import os
 import re
 import signal
 import threading
+import time
 from collections.abc import Callable, Sequence
 from contextlib import suppress
 from pathlib import Path
@@ -187,6 +188,7 @@ def run_adapter(
     stop_event: threading.Event | None = None,
     max_cycles: int | None = None,
     wait: Callable[[float], None] | None = None,
+    clock: Callable[[], float] = time.monotonic,
 ) -> dict[str, Any]:
     """Observe until stopped; ``max_cycles`` exists solely for bounded tests."""
 
@@ -195,6 +197,7 @@ def run_adapter(
     pause = wait or stopped.wait
     last: dict[str, Any] = {}
     previous_status: dict[str, Any] | None = None
+    last_written_at = float("-inf")
     cycles = 0
     while not stopped.is_set():
         try:
@@ -202,10 +205,17 @@ def run_adapter(
         except Exception:  # ROS graph discovery failures are readiness, not process failure
             observation = None
         last = readiness_document(required, observation)
-        if last != previous_status:
+        changed = last != previous_status
+        observed_at = clock()
+        # Freshness is part of the read-only mobile evidence contract. A
+        # stable/healthy graph must still refresh its observation timestamp;
+        # otherwise an operator cannot distinguish health from a dead adapter.
+        if changed or observed_at - last_written_at >= 5.0:
             write_status(state_dir, last)
-            print(json.dumps(last, separators=(",", ":"), sort_keys=True), flush=True)
+            if changed:
+                print(json.dumps(last, separators=(",", ":"), sort_keys=True), flush=True)
             previous_status = last
+            last_written_at = observed_at
         cycles += 1
         if max_cycles is not None and cycles >= max_cycles:
             break

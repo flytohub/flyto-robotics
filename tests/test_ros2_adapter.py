@@ -244,6 +244,31 @@ def test_runtime_failure_replaces_stale_ready_without_exception_text(
     assert "sensitive runtime detail" not in output.out + output.err
 
 
+def test_unchanged_readiness_refreshes_heartbeat_without_new_event(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    observations = [
+        [(name, [topic_type]) for name, topic_type in adapter.DEFAULT_REQUIRED_TOPICS]
+        for _ in range(2)
+    ]
+    node = GraphNode(observations)
+    writes: list[dict] = []
+    real_write = adapter.write_status
+
+    def counted_write(state_dir, document):
+        writes.append(document)
+        return real_write(state_dir, document)
+
+    monkeypatch.setattr(adapter, "write_status", counted_write)
+    times = iter((0.0, 6.0))
+    adapter.run_adapter(
+        node, state_dir=tmp_path, required_topics=adapter.DEFAULT_REQUIRED_TOPICS,
+        max_cycles=2, wait=lambda _: None, clock=lambda: next(times),
+    )
+    assert len(writes) == 2
+    assert len(capsys.readouterr().out.strip().splitlines()) == 1
+
+
 def test_main_restores_the_true_pre_init_handlers(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

@@ -1,5 +1,14 @@
 # Roadmap
 
+## Local mobile/AI Space integration
+
+- [x] Read-only ROS2 graph capability and freshness/evidence contract
+  available as an installed local Runtime provider.
+- [ ] Actual device-side signed/approved motion authority and command
+  parameter policy, safe stop and independent pose/obstacle acceptance.
+- [ ] Device-ground-truth evidence to Core AI Space task verification and
+  Cloud-optional mobile application, with offline fault-injection tests.
+
 ## Near term
 
 1. **External Generic ROS 2 Adapter closure**

@@ -1,5 +1,14 @@
 # Decisions
 
+## 2026-10-10 — ROS2 mobile capability starts read-only
+
+The first local mobile integration reads only the external ROS2 readiness
+adapter's bounded, fresh status. It returns actual observation evidence,
+not navigation success. No motor publisher, ROS2 execution daemon on
+the robot, hosted Flyto2 Cloud account or cybersecurity Engine is needed.
+Physical movement is prohibited until host grant and device-side safety
+tests establish independently verified control authority.
+
 ## 2026-09-22 — Equipment transports are adapter providers, not Cloud or Runtime core
 
 Decision: ROS2, rosbridge, OpenRMF, camera-stream and vendor transport implementations belong in adapter packages such as `flyto-robotics`. Any compatible AI Space execution host may load those providers and bind one assignment's approved resource/capability authority. Flyto2 Runtime is one optional host, not a required layer. Provider discovery is passive evidence; execution authority is a separate allowlisted assignment contract.

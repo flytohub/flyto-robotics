@@ -1,5 +1,14 @@
 # Flyto2 Robotics Architecture
 
+## Local mobile status adapter
+
+The passive ROS2 graph readiness process supplies a five-second observation
+heartbeat. An independently installed read-only mobile provider validates the
+status, 15-second freshness and schema, then returns a versioned Runtime
+capability result with a content SHA-256 evidence reference. This is a
+host-side observation, not a robot-side Flyto2 runtime or navigation
+permission. See docs/mobile-readiness-adapter.md.
+
 ## Current product boundary
 
 Flyto2 Robotics is the **external physical-execution adapter and verification

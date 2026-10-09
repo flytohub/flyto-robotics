@@ -1,5 +1,10 @@
 # Tasks
 
+- [x] Add read-only local ROS2 status provider and live observation freshness.
+- [x] Fail closed on stale, missing, malformed or unapproved capability data.
+- [ ] Connect approved movement adapters and mission evidence to mobile
+  task lifecycle; prove hardware safe stop, not only unit tests.
+
 ## Current zero-runtime architecture
 
 - [x] Remove Flyto2 runtime, credentials and Flyto-specific services from the
