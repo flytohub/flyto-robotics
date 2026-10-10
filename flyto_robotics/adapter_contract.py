@@ -36,13 +36,50 @@ _CAPABILITY_METADATA: Mapping[str, Mapping[str, Any]] = {
         "display_name": "Navigate",
         "description": "Travel to a map coordinate or resolved destination and arrive there",
         "safety_class": "movement",
+        # What the motion sweeps, for the clearance check before it starts
+        # (flyto_robotics.path_clearance.SWEPT_PATHS).
+        "motion_kind": "planned",
         "required_permissions": ("robot.motion",),
         "requires_safe_stop": True,
+    },
+    "vision.observe": {
+        "display_name": "Observe",
+        "description": "See what is in a place, as a picture: one photo from the robot's camera",
+        "safety_class": "read_only",
+        "required_permissions": (),
+        "requires_safe_stop": False,
+        "cancellable": False,
+    },
+    "sensing.map": {
+        "display_name": "Capture Map",
+        "description": "Take the map the robot has built so far",
+        "safety_class": "read_only",
+        "required_permissions": (),
+        "requires_safe_stop": False,
+        "cancellable": False,
+    },
+    # Named places, kept on the execution host (flyto_robotics.places).
+    "places.list": {
+        "display_name": "Places",
+        "description": "List the named places saved on this robot's map",
+        "safety_class": "read_only",
+        "required_permissions": (),
+        "requires_safe_stop": False,
+        "cancellable": False,
+    },
+    "places.mark": {
+        "display_name": "Mark Place",
+        "description": "Save the robot's current map position under a name",
+        "safety_class": "controlled",
+        "required_permissions": (),
+        "requires_safe_stop": False,
+        "cancellable": False,
     },
     "motion.advance": {
         "display_name": "Advance",
         "description": "Move forward by a bounded relative distance",
         "safety_class": "movement",
+        "motion_kind": "advance",
         "required_permissions": ("robot.motion",),
         "requires_safe_stop": True,
     },
@@ -50,6 +87,7 @@ _CAPABILITY_METADATA: Mapping[str, Mapping[str, Any]] = {
         "display_name": "Retreat",
         "description": "Move backward by a bounded relative distance",
         "safety_class": "movement",
+        "motion_kind": "retreat",
         "required_permissions": ("robot.motion",),
         "requires_safe_stop": True,
     },
@@ -57,6 +95,7 @@ _CAPABILITY_METADATA: Mapping[str, Mapping[str, Any]] = {
         "display_name": "Rotate",
         "description": "Rotate in place by a bounded angle",
         "safety_class": "movement",
+        "motion_kind": "rotate",
         "required_permissions": ("robot.motion",),
         "requires_safe_stop": True,
     },
@@ -67,6 +106,15 @@ _CAPABILITY_METADATA: Mapping[str, Mapping[str, Any]] = {
         "required_permissions": ("robot.motion",),
         "requires_safe_stop": False,
         "cancellable": False,
+        "revision": 1,
+    },
+    "motion.navigate_to_waypoint": {
+        "display_name": "Navigate to Waypoint",
+        "description": "Travel to a named waypoint on a shared map; the fleet picks the robot",
+        "safety_class": "movement",
+        "required_permissions": ("robot.motion",),
+        "requires_safe_stop": True,
+        "cancellable": True,
         "revision": 1,
     },
     "motion.dock": {
@@ -128,6 +176,8 @@ class DeclaredArgument:
     minimum: float | None = None
     maximum: float | None = None
     unit: str = ""
+    # Text arguments only: the most characters the value may have.
+    max_length: int | None = None
 
     @property
     def narrows(self) -> bool:
@@ -136,7 +186,7 @@ class DeclaredArgument:
         )
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        result: dict[str, Any] = {
             "name": self.name,
             "type": self.type,
             "required": self.required,
@@ -145,6 +195,11 @@ class DeclaredArgument:
             "maximum": self.maximum,
             "unit": self.unit,
         }
+        # Only when set, so every declaration without text arguments keeps
+        # the schema hash it had before text arguments existed.
+        if self.max_length is not None:
+            result["max_length"] = self.max_length
+        return result
 
 
 @dataclass(frozen=True)
@@ -265,6 +320,10 @@ def arguments_to_json_schema(arguments: Sequence[DeclaredArgument]) -> dict[str,
             schema["description"] = item.description
         if item.unit:
             schema["x-unit"] = item.unit
+        if item.type == "string":
+            schema["minLength"] = 1
+            if item.max_length is not None:
+                schema["maxLength"] = item.max_length
         properties[item.name] = schema
         if item.required:
             required.append(item.name)

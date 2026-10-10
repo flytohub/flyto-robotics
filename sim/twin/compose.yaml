@@ -1,0 +1,21 @@
+services:
+  twin:
+    build: .
+    image: flyto-turtlebot3-twin:jazzy
+    container_name: flyto-turtlebot3-twin
+    ports:
+      # Same local endpoint the adapter uses through the robot's SSH tunnel
+      # (ssh -L 19090:127.0.0.1:9090 ubuntu@flyto-robot.local).
+      - "127.0.0.1:19090:9090"
+      - "127.0.0.1:6080:6080"
+    environment:
+      # A Gazebo world file inside the container; the default is turtlebot3_world.
+      TWIN_WORLD: ${TWIN_WORLD:-/opt/ros/jazzy/share/turtlebot3_gazebo/worlds/turtlebot3_world.world}
+      TWIN_X: ${TWIN_X:--2.0}
+      TWIN_Y: ${TWIN_Y:--0.5}
+      TWIN_YAW: ${TWIN_YAW:-0.0}
+    volumes:
+      # Demo worlds kept in this repository, e.g. worlds/flyto_demo_room.world.
+      - ./worlds:/opt/flyto-twin/worlds:ro
+    shm_size: "1gb"
+    restart: "no"

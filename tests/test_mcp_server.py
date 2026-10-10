@@ -100,7 +100,7 @@ def test_stdio_handshake_discovery_prepare_and_real_controller_dry_run() -> None
         "robot.ros2.execution.authorize",
     }
     prepared = responses[2]["result"]["structuredContent"]
-    assert prepared["request"]["planner_contract"] == "flyto.robotics.planner-request.v1"
+    assert prepared["request"]["planner_contract"] == "flyto.robotics.planner-request.v2"
     dry_run = responses[3]["result"]["structuredContent"]
     assert dry_run["result"]["simulation"]["mode"] == "deterministic_capability_dry_run"
     assert dry_run["result"]["status"] == "succeeded"
@@ -109,9 +109,9 @@ def test_stdio_handshake_discovery_prepare_and_real_controller_dry_run() -> None
 
 def test_stdio_rejects_actuator_injection_as_a_bounded_tool_error() -> None:
     unsafe = {
-        "contract_version": "flyto.robotics.plan.v1",
+        "contract_version": "flyto.capability-plan.v1",
         "plan_id": "unsafe.raw.v1",
-        "robot_id": "flyto-rover-sim-001",
+        "resource_id": "flyto-rover-sim-001",
         "goal": "bypass controller",
         "generated_by": {"kind": "ai", "provider": "local", "model": "test"},
         "steps": [

@@ -1,0 +1,2064 @@
+{
+ "_source": "flyto-robot.local, 2026-10-02, tools/fingerprint.py (6 s window, all topics subscribed at once, so rates are lower than unloaded)",
+ "actions": [
+  "/assisted_teleop [nav2_msgs/action/AssistedTeleop]",
+  "/backup [nav2_msgs/action/BackUp]",
+  "/compute_and_track_route [nav2_msgs/action/ComputeAndTrackRoute]",
+  "/compute_path_through_poses [nav2_msgs/action/ComputePathThroughPoses]",
+  "/compute_path_to_pose [nav2_msgs/action/ComputePathToPose]",
+  "/compute_route [nav2_msgs/action/ComputeRoute]",
+  "/dock_robot [nav2_msgs/action/DockRobot]",
+  "/drive_on_heading [nav2_msgs/action/DriveOnHeading]",
+  "/follow_gps_waypoints [nav2_msgs/action/FollowGPSWaypoints]",
+  "/follow_path [nav2_msgs/action/FollowPath]",
+  "/follow_waypoints [nav2_msgs/action/FollowWaypoints]",
+  "/navigate_through_poses [nav2_msgs/action/NavigateThroughPoses]",
+  "/navigate_to_pose [nav2_msgs/action/NavigateToPose]",
+  "/smooth_path [nav2_msgs/action/SmoothPath]",
+  "/spin [nav2_msgs/action/Spin]",
+  "/undock_robot [nav2_msgs/action/UndockRobot]",
+  "/wait [nav2_msgs/action/Wait]"
+ ],
+ "nodes": [
+  "/behavior_server",
+  "/bt_navigator",
+  "/bt_navigator_navigate_through_poses_rclcpp_node",
+  "/bt_navigator_navigate_to_pose_rclcpp_node",
+  "/camera/v4l2_camera",
+  "/collision_monitor",
+  "/controller_server",
+  "/diff_drive_controller",
+  "/docking_server",
+  "/global_costmap/global_costmap",
+  "/laser_scan_stabilizer",
+  "/launch_ros_1354",
+  "/lidar_node",
+  "/lifecycle_manager_navigation",
+  "/local_costmap/local_costmap",
+  "/planner_server",
+  "/robot_state_publisher",
+  "/rosapi",
+  "/rosbridge_websocket",
+  "/route_server",
+  "/slam_toolbox",
+  "/smoother_server",
+  "/transform_listener_impl_aaaab61c6d80",
+  "/transform_listener_impl_aaaadc97a030",
+  "/transform_listener_impl_aaab04efde60",
+  "/turtlebot3_node",
+  "/velocity_smoother",
+  "/waypoint_follower"
+ ],
+ "services": [
+  "/assisted_teleop/_action/cancel_goal",
+  "/assisted_teleop/_action/get_result",
+  "/assisted_teleop/_action/send_goal",
+  "/backup/_action/cancel_goal",
+  "/backup/_action/get_result",
+  "/backup/_action/send_goal",
+  "/behavior_server/change_state",
+  "/behavior_server/get_available_states",
+  "/behavior_server/get_available_transitions",
+  "/behavior_server/get_state",
+  "/behavior_server/get_transition_graph",
+  "/bt_navigator/change_state",
+  "/bt_navigator/get_available_states",
+  "/bt_navigator/get_available_transitions",
+  "/bt_navigator/get_state",
+  "/bt_navigator/get_transition_graph",
+  "/camera/v4l2_camera/set_camera_info",
+  "/collision_monitor/change_state",
+  "/collision_monitor/get_available_states",
+  "/collision_monitor/get_available_transitions",
+  "/collision_monitor/get_state",
+  "/collision_monitor/get_transition_graph",
+  "/collision_monitor/toggle",
+  "/compute_and_track_route/_action/cancel_goal",
+  "/compute_and_track_route/_action/get_result",
+  "/compute_and_track_route/_action/send_goal",
+  "/compute_path_through_poses/_action/cancel_goal",
+  "/compute_path_through_poses/_action/get_result",
+  "/compute_path_through_poses/_action/send_goal",
+  "/compute_path_to_pose/_action/cancel_goal",
+  "/compute_path_to_pose/_action/get_result",
+  "/compute_path_to_pose/_action/send_goal",
+  "/compute_route/_action/cancel_goal",
+  "/compute_route/_action/get_result",
+  "/compute_route/_action/send_goal",
+  "/controller_server/change_state",
+  "/controller_server/get_available_states",
+  "/controller_server/get_available_transitions",
+  "/controller_server/get_state",
+  "/controller_server/get_transition_graph",
+  "/dock_robot/_action/cancel_goal",
+  "/dock_robot/_action/get_result",
+  "/dock_robot/_action/send_goal",
+  "/docking_server/change_state",
+  "/docking_server/get_available_states",
+  "/docking_server/get_available_transitions",
+  "/docking_server/get_state",
+  "/docking_server/get_transition_graph",
+  "/docking_server/reload_database",
+  "/drive_on_heading/_action/cancel_goal",
+  "/drive_on_heading/_action/get_result",
+  "/drive_on_heading/_action/send_goal",
+  "/follow_gps_waypoints/_action/cancel_goal",
+  "/follow_gps_waypoints/_action/get_result",
+  "/follow_gps_waypoints/_action/send_goal",
+  "/follow_path/_action/cancel_goal",
+  "/follow_path/_action/get_result",
+  "/follow_path/_action/send_goal",
+  "/follow_waypoints/_action/cancel_goal",
+  "/follow_waypoints/_action/get_result",
+  "/follow_waypoints/_action/send_goal",
+  "/fromLL",
+  "/global_costmap/clear_around_global_costmap",
+  "/global_costmap/clear_around_pose_global_costmap",
+  "/global_costmap/clear_entirely_global_costmap",
+  "/global_costmap/clear_except_global_costmap",
+  "/global_costmap/get_cost_global_costmap",
+  "/global_costmap/get_costmap",
+  "/global_costmap/get_obstacle_layer",
+  "/global_costmap/get_static_layer",
+  "/global_costmap/get_voxel_layer",
+  "/global_costmap/global_costmap/change_state",
+  "/global_costmap/global_costmap/get_available_states",
+  "/global_costmap/global_costmap/get_available_transitions",
+  "/global_costmap/global_costmap/get_state",
+  "/global_costmap/global_costmap/get_transition_graph",
+  "/is_path_valid",
+  "/lifecycle_manager_navigation/is_active",
+  "/lifecycle_manager_navigation/manage_nodes",
+  "/local_costmap/clear_around_local_costmap",
+  "/local_costmap/clear_around_pose_local_costmap",
+  "/local_costmap/clear_entirely_local_costmap",
+  "/local_costmap/clear_except_local_costmap",
+  "/local_costmap/get_cost_local_costmap",
+  "/local_costmap/get_costmap",
+  "/local_costmap/get_obstacle_layer",
+  "/local_costmap/get_voxel_layer",
+  "/local_costmap/local_costmap/change_state",
+  "/local_costmap/local_costmap/get_available_states",
+  "/local_costmap/local_costmap/get_available_transitions",
+  "/local_costmap/local_costmap/get_state",
+  "/local_costmap/local_costmap/get_transition_graph",
+  "/motor_power",
+  "/navigate_through_poses/_action/cancel_goal",
+  "/navigate_through_poses/_action/get_result",
+  "/navigate_through_poses/_action/send_goal",
+  "/navigate_to_pose/_action/cancel_goal",
+  "/navigate_to_pose/_action/get_result",
+  "/navigate_to_pose/_action/send_goal",
+  "/planner_server/change_state",
+  "/planner_server/get_available_states",
+  "/planner_server/get_available_transitions",
+  "/planner_server/get_state",
+  "/planner_server/get_transition_graph",
+  "/reset",
+  "/reset_odometry",
+  "/rosapi/action_feedback_details",
+  "/rosapi/action_goal_details",
+  "/rosapi/action_result_details",
+  "/rosapi/action_servers",
+  "/rosapi/action_type",
+  "/rosapi/delete_param",
+  "/rosapi/get_param",
+  "/rosapi/get_param_names",
+  "/rosapi/get_ros_version",
+  "/rosapi/get_time",
+  "/rosapi/has_param",
+  "/rosapi/interfaces",
+  "/rosapi/message_details",
+  "/rosapi/node_details",
+  "/rosapi/nodes",
+  "/rosapi/publishers",
+  "/rosapi/service_node",
+  "/rosapi/service_providers",
+  "/rosapi/service_request_details",
+  "/rosapi/service_response_details",
+  "/rosapi/service_type",
+  "/rosapi/services",
+  "/rosapi/services_for_type",
+  "/rosapi/set_param",
+  "/rosapi/subscribers",
+  "/rosapi/topic_type",
+  "/rosapi/topics",
+  "/rosapi/topics_and_raw_types",
+  "/rosapi/topics_for_type",
+  "/route_server/DynamicEdgesScorer/adjust_edges",
+  "/route_server/ReroutingService/reroute",
+  "/route_server/change_state",
+  "/route_server/get_available_states",
+  "/route_server/get_available_transitions",
+  "/route_server/get_state",
+  "/route_server/get_transition_graph",
+  "/route_server/set_route_graph",
+  "/slam_toolbox/change_state",
+  "/slam_toolbox/clear_changes",
+  "/slam_toolbox/deserialize_map",
+  "/slam_toolbox/dynamic_map",
+  "/slam_toolbox/get_available_states",
+  "/slam_toolbox/get_available_transitions",
+  "/slam_toolbox/get_interactive_markers",
+  "/slam_toolbox/get_state",
+  "/slam_toolbox/get_transition_graph",
+  "/slam_toolbox/manual_loop_closure",
+  "/slam_toolbox/pause_new_measurements",
+  "/slam_toolbox/reset",
+  "/slam_toolbox/save_map",
+  "/slam_toolbox/serialize_map",
+  "/slam_toolbox/toggle_interactive_mode",
+  "/smooth_path/_action/cancel_goal",
+  "/smooth_path/_action/get_result",
+  "/smooth_path/_action/send_goal",
+  "/smoother_server/change_state",
+  "/smoother_server/get_available_states",
+  "/smoother_server/get_available_transitions",
+  "/smoother_server/get_state",
+  "/smoother_server/get_transition_graph",
+  "/sound",
+  "/spin/_action/cancel_goal",
+  "/spin/_action/get_result",
+  "/spin/_action/send_goal",
+  "/undock_robot/_action/cancel_goal",
+  "/undock_robot/_action/get_result",
+  "/undock_robot/_action/send_goal",
+  "/velocity_smoother/change_state",
+  "/velocity_smoother/get_available_states",
+  "/velocity_smoother/get_available_transitions",
+  "/velocity_smoother/get_state",
+  "/velocity_smoother/get_transition_graph",
+  "/wait/_action/cancel_goal",
+  "/wait/_action/get_result",
+  "/wait/_action/send_goal",
+  "/waypoint_follower/change_state",
+  "/waypoint_follower/get_available_states",
+  "/waypoint_follower/get_available_transitions",
+  "/waypoint_follower/get_state",
+  "/waypoint_follower/get_transition_graph"
+ ],
+ "topics": {
+  "/assisted_teleop/_action/feedback": {
+   "hz": 0.0,
+   "qos": {
+    "durability": "VOLATILE",
+    "nodes": [
+     "/behavior_server"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "type": "nav2_msgs/action/AssistedTeleop_FeedbackMessage"
+  },
+  "/assisted_teleop/_action/status": {
+   "hz": 0.0,
+   "qos": {
+    "durability": "TRANSIENT_LOCAL",
+    "nodes": [
+     "/behavior_server"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "type": "action_msgs/msg/GoalStatusArray"
+  },
+  "/backup/_action/feedback": {
+   "hz": 0.0,
+   "qos": {
+    "durability": "VOLATILE",
+    "nodes": [
+     "/behavior_server"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "type": "nav2_msgs/action/BackUp_FeedbackMessage"
+  },
+  "/backup/_action/status": {
+   "hz": 0.0,
+   "qos": {
+    "durability": "TRANSIENT_LOCAL",
+    "nodes": [
+     "/behavior_server"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "type": "action_msgs/msg/GoalStatusArray"
+  },
+  "/battery_state": {
+   "hz": 18.5,
+   "qos": {
+    "durability": "VOLATILE",
+    "nodes": [
+     "/turtlebot3_node"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "sample": {
+    "frame_id": "",
+    "voltage": 11.21
+   },
+   "type": "sensor_msgs/msg/BatteryState"
+  },
+  "/behavior_server/transition_event": {
+   "hz": 0.0,
+   "qos": {
+    "durability": "VOLATILE",
+    "nodes": [
+     "/behavior_server"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "type": "lifecycle_msgs/msg/TransitionEvent"
+  },
+  "/behavior_tree_log": {
+   "hz": 0.0,
+   "qos": {
+    "durability": "VOLATILE",
+    "nodes": [
+     "/bt_navigator_navigate_through_poses_rclcpp_node",
+     "/bt_navigator_navigate_to_pose_rclcpp_node"
+    ],
+    "publishers": 2,
+    "reliability": "RELIABLE"
+   },
+   "type": "nav2_msgs/msg/BehaviorTreeLog"
+  },
+  "/bond": {
+   "hz": 36.7,
+   "qos": {
+    "durability": "VOLATILE",
+    "nodes": [
+     "/behavior_server",
+     "/bt_navigator",
+     "/collision_monitor",
+     "/controller_server",
+     "/docking_server",
+     "/lifecycle_manager_navigation",
+     "/planner_server",
+     "/route_server",
+     "/smoother_server",
+     "/velocity_smoother",
+     "/waypoint_follower"
+    ],
+    "publishers": 20,
+    "reliability": "RELIABLE"
+   },
+   "sample": {
+    "frame_id": ""
+   },
+   "type": "bond/msg/Status"
+  },
+  "/bt_navigator/transition_event": {
+   "hz": 0.0,
+   "qos": {
+    "durability": "VOLATILE",
+    "nodes": [
+     "/bt_navigator"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "type": "lifecycle_msgs/msg/TransitionEvent"
+  },
+  "/camera/camera_info": {
+   "hz": 3.5,
+   "qos": {
+    "durability": "VOLATILE",
+    "nodes": [
+     "/camera/v4l2_camera"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "sample": {
+    "distortion_model": "",
+    "frame_id": "camera",
+    "height": 480,
+    "k_nonzero": false,
+    "width": 640
+   },
+   "type": "sensor_msgs/msg/CameraInfo"
+  },
+  "/camera/image_raw": {
+   "hz": 3.5,
+   "qos": {
+    "durability": "VOLATILE",
+    "nodes": [
+     "/camera/v4l2_camera"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "sample": {
+    "encoding": "yuv422_yuy2",
+    "frame_id": "camera",
+    "height": 480,
+    "width": 640
+   },
+   "type": "sensor_msgs/msg/Image"
+  },
+  "/camera/image_raw/compressed": {
+   "hz": 3.5,
+   "qos": {
+    "durability": "VOLATILE",
+    "nodes": [
+     "/camera/v4l2_camera"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "sample": {
+    "format": "yuv422_yuy2; jpeg compressed bgr8",
+    "frame_id": "camera"
+   },
+   "type": "sensor_msgs/msg/CompressedImage"
+  },
+  "/camera/image_raw/compressedDepth": {
+   "hz": 0.0,
+   "qos": {
+    "durability": "VOLATILE",
+    "nodes": [
+     "/camera/v4l2_camera"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "type": "sensor_msgs/msg/CompressedImage"
+  },
+  "/camera/image_raw/theora": {
+   "hz": 4.0,
+   "qos": {
+    "durability": "VOLATILE",
+    "nodes": [
+     "/camera/v4l2_camera"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "sample": {
+    "frame_id": "camera"
+   },
+   "type": "theora_image_transport/msg/Packet"
+  },
+  "/camera/image_raw/zstd": {
+   "hz": 3.3,
+   "qos": {
+    "durability": "VOLATILE",
+    "nodes": [
+     "/camera/v4l2_camera"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "sample": {
+    "format": "zstd",
+    "frame_id": "camera"
+   },
+   "type": "sensor_msgs/msg/CompressedImage"
+  },
+  "/client_count": {
+   "hz": 0.2,
+   "qos": {
+    "durability": "TRANSIENT_LOCAL",
+    "nodes": [
+     "/rosbridge_websocket"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "sample": {},
+   "type": "std_msgs/msg/Int32"
+  },
+  "/cmd_vel": {
+   "hz": 0.0,
+   "qos": {
+    "durability": "VOLATILE",
+    "nodes": [
+     "/collision_monitor",
+     "/docking_server"
+    ],
+    "publishers": 2,
+    "reliability": "RELIABLE"
+   },
+   "type": "geometry_msgs/msg/TwistStamped"
+  },
+  "/cmd_vel_nav": {
+   "hz": 0.0,
+   "qos": {
+    "durability": "VOLATILE",
+    "nodes": [
+     "/behavior_server",
+     "/controller_server"
+    ],
+    "publishers": 6,
+    "reliability": "RELIABLE"
+   },
+   "type": "geometry_msgs/msg/TwistStamped"
+  },
+  "/cmd_vel_smoothed": {
+   "hz": 0.0,
+   "qos": {
+    "durability": "VOLATILE",
+    "nodes": [
+     "/velocity_smoother"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "type": "geometry_msgs/msg/TwistStamped"
+  },
+  "/cmd_vel_teleop": {
+   "hz": 0.0,
+   "qos": null,
+   "type": "geometry_msgs/msg/TwistStamped"
+  },
+  "/collision_monitor/collision_points_marker": {
+   "hz": 0.0,
+   "qos": {
+    "durability": "VOLATILE",
+    "nodes": [
+     "/collision_monitor"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "type": "visualization_msgs/msg/MarkerArray"
+  },
+  "/collision_monitor/transition_event": {
+   "hz": 0.0,
+   "qos": {
+    "durability": "VOLATILE",
+    "nodes": [
+     "/collision_monitor"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "type": "lifecycle_msgs/msg/TransitionEvent"
+  },
+  "/collision_monitor_state": {
+   "hz": 0.0,
+   "qos": {
+    "durability": "VOLATILE",
+    "nodes": [
+     "/collision_monitor"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "type": "nav2_msgs/msg/CollisionMonitorState"
+  },
+  "/compute_and_track_route/_action/feedback": {
+   "hz": 0.0,
+   "qos": {
+    "durability": "VOLATILE",
+    "nodes": [
+     "/route_server"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "type": "nav2_msgs/action/ComputeAndTrackRoute_FeedbackMessage"
+  },
+  "/compute_and_track_route/_action/status": {
+   "hz": 0.0,
+   "qos": {
+    "durability": "TRANSIENT_LOCAL",
+    "nodes": [
+     "/route_server"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "type": "action_msgs/msg/GoalStatusArray"
+  },
+  "/compute_path_through_poses/_action/feedback": {
+   "hz": 0.0,
+   "qos": {
+    "durability": "VOLATILE",
+    "nodes": [
+     "/planner_server"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "type": "nav2_msgs/action/ComputePathThroughPoses_FeedbackMessage"
+  },
+  "/compute_path_through_poses/_action/status": {
+   "hz": 0.0,
+   "qos": {
+    "durability": "TRANSIENT_LOCAL",
+    "nodes": [
+     "/planner_server"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "type": "action_msgs/msg/GoalStatusArray"
+  },
+  "/compute_path_to_pose/_action/feedback": {
+   "hz": 0.0,
+   "qos": {
+    "durability": "VOLATILE",
+    "nodes": [
+     "/planner_server"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "type": "nav2_msgs/action/ComputePathToPose_FeedbackMessage"
+  },
+  "/compute_path_to_pose/_action/status": {
+   "hz": 0.0,
+   "qos": {
+    "durability": "TRANSIENT_LOCAL",
+    "nodes": [
+     "/planner_server"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "type": "action_msgs/msg/GoalStatusArray"
+  },
+  "/compute_route/_action/feedback": {
+   "hz": 0.0,
+   "qos": {
+    "durability": "VOLATILE",
+    "nodes": [
+     "/route_server"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "type": "nav2_msgs/action/ComputeRoute_FeedbackMessage"
+  },
+  "/compute_route/_action/status": {
+   "hz": 0.0,
+   "qos": {
+    "durability": "TRANSIENT_LOCAL",
+    "nodes": [
+     "/route_server"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "type": "action_msgs/msg/GoalStatusArray"
+  },
+  "/connected_clients": {
+   "hz": 0.2,
+   "qos": {
+    "durability": "TRANSIENT_LOCAL",
+    "nodes": [
+     "/rosbridge_websocket"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "sample": {},
+   "type": "rosbridge_msgs/msg/ConnectedClients"
+  },
+  "/controller_selector": {
+   "hz": 0.0,
+   "qos": null,
+   "type": "std_msgs/msg/String"
+  },
+  "/controller_server/transition_event": {
+   "hz": 0.0,
+   "qos": {
+    "durability": "VOLATILE",
+    "nodes": [
+     "/controller_server"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "type": "lifecycle_msgs/msg/TransitionEvent"
+  },
+  "/cost_cloud": {
+   "hz": 0.0,
+   "qos": {
+    "durability": "VOLATILE",
+    "nodes": [
+     "/controller_server"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "type": "sensor_msgs/msg/PointCloud2"
+  },
+  "/diagnostics": {
+   "hz": 0.8,
+   "qos": {
+    "durability": "VOLATILE",
+    "nodes": [
+     "/lifecycle_manager_navigation"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "sample": {
+    "frame_id": ""
+   },
+   "type": "diagnostic_msgs/msg/DiagnosticArray"
+  },
+  "/dock_pose": {
+   "hz": 0.0,
+   "qos": {
+    "durability": "VOLATILE",
+    "nodes": [
+     "/docking_server"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "type": "geometry_msgs/msg/PoseStamped"
+  },
+  "/dock_robot/_action/feedback": {
+   "hz": 0.0,
+   "qos": {
+    "durability": "VOLATILE",
+    "nodes": [
+     "/docking_server"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "type": "nav2_msgs/action/DockRobot_FeedbackMessage"
+  },
+  "/dock_robot/_action/status": {
+   "hz": 0.0,
+   "qos": {
+    "durability": "TRANSIENT_LOCAL",
+    "nodes": [
+     "/docking_server"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "type": "action_msgs/msg/GoalStatusArray"
+  },
+  "/docking_server/transition_event": {
+   "hz": 0.0,
+   "qos": {
+    "durability": "VOLATILE",
+    "nodes": [
+     "/docking_server"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "type": "lifecycle_msgs/msg/TransitionEvent"
+  },
+  "/docking_trajectory": {
+   "hz": 0.0,
+   "qos": {
+    "durability": "VOLATILE",
+    "nodes": [
+     "/docking_server"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "type": "nav_msgs/msg/Path"
+  },
+  "/drive_on_heading/_action/feedback": {
+   "hz": 0.0,
+   "qos": {
+    "durability": "VOLATILE",
+    "nodes": [
+     "/behavior_server"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "type": "nav2_msgs/action/DriveOnHeading_FeedbackMessage"
+  },
+  "/drive_on_heading/_action/status": {
+   "hz": 0.2,
+   "qos": {
+    "durability": "TRANSIENT_LOCAL",
+    "nodes": [
+     "/behavior_server"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "sample": {},
+   "type": "action_msgs/msg/GoalStatusArray"
+  },
+  "/evaluation": {
+   "hz": 0.0,
+   "qos": {
+    "durability": "VOLATILE",
+    "nodes": [
+     "/controller_server"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "type": "dwb_msgs/msg/LocalPlanEvaluation"
+  },
+  "/filtered_dock_pose": {
+   "hz": 0.0,
+   "qos": {
+    "durability": "VOLATILE",
+    "nodes": [
+     "/docking_server"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "type": "geometry_msgs/msg/PoseStamped"
+  },
+  "/follow_gps_waypoints/_action/feedback": {
+   "hz": 0.0,
+   "qos": {
+    "durability": "VOLATILE",
+    "nodes": [
+     "/waypoint_follower"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "type": "nav2_msgs/action/FollowGPSWaypoints_FeedbackMessage"
+  },
+  "/follow_gps_waypoints/_action/status": {
+   "hz": 0.0,
+   "qos": {
+    "durability": "TRANSIENT_LOCAL",
+    "nodes": [
+     "/waypoint_follower"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "type": "action_msgs/msg/GoalStatusArray"
+  },
+  "/follow_path/_action/feedback": {
+   "hz": 0.0,
+   "qos": {
+    "durability": "VOLATILE",
+    "nodes": [
+     "/controller_server"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "type": "nav2_msgs/action/FollowPath_FeedbackMessage"
+  },
+  "/follow_path/_action/status": {
+   "hz": 0.0,
+   "qos": {
+    "durability": "TRANSIENT_LOCAL",
+    "nodes": [
+     "/controller_server"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "type": "action_msgs/msg/GoalStatusArray"
+  },
+  "/follow_waypoints/_action/feedback": {
+   "hz": 0.0,
+   "qos": {
+    "durability": "VOLATILE",
+    "nodes": [
+     "/waypoint_follower"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "type": "nav2_msgs/action/FollowWaypoints_FeedbackMessage"
+  },
+  "/follow_waypoints/_action/status": {
+   "hz": 0.0,
+   "qos": {
+    "durability": "TRANSIENT_LOCAL",
+    "nodes": [
+     "/waypoint_follower"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "type": "action_msgs/msg/GoalStatusArray"
+  },
+  "/global_costmap/clearing_endpoints": {
+   "hz": 0.8,
+   "qos": {
+    "durability": "TRANSIENT_LOCAL",
+    "nodes": [
+     "/global_costmap/global_costmap"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "sample": {
+    "frame_id": "map",
+    "height": 1,
+    "width": 388
+   },
+   "type": "sensor_msgs/msg/PointCloud2"
+  },
+  "/global_costmap/costmap": {
+   "hz": 0.5,
+   "qos": {
+    "durability": "TRANSIENT_LOCAL",
+    "nodes": [
+     "/global_costmap/global_costmap"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "sample": {
+    "frame_id": "map",
+    "map": [
+     135,
+     58,
+     0.05
+    ]
+   },
+   "type": "nav_msgs/msg/OccupancyGrid"
+  },
+  "/global_costmap/costmap_raw": {
+   "hz": 0.7,
+   "qos": {
+    "durability": "TRANSIENT_LOCAL",
+    "nodes": [
+     "/global_costmap/global_costmap"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "sample": {
+    "frame_id": "map"
+   },
+   "type": "nav2_msgs/msg/Costmap"
+  },
+  "/global_costmap/costmap_raw_updates": {
+   "hz": 0.0,
+   "qos": {
+    "durability": "TRANSIENT_LOCAL",
+    "nodes": [
+     "/global_costmap/global_costmap"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "type": "nav2_msgs/msg/CostmapUpdate"
+  },
+  "/global_costmap/costmap_updates": {
+   "hz": 0.0,
+   "qos": {
+    "durability": "TRANSIENT_LOCAL",
+    "nodes": [
+     "/global_costmap/global_costmap"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "type": "map_msgs/msg/OccupancyGridUpdate"
+  },
+  "/global_costmap/footprint": {
+   "hz": 0.0,
+   "qos": null,
+   "type": "geometry_msgs/msg/Polygon"
+  },
+  "/global_costmap/global_costmap/transition_event": {
+   "hz": 0.0,
+   "qos": {
+    "durability": "VOLATILE",
+    "nodes": [
+     "/global_costmap/global_costmap"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "type": "lifecycle_msgs/msg/TransitionEvent"
+  },
+  "/global_costmap/obstacle_layer": {
+   "hz": 0.5,
+   "qos": {
+    "durability": "TRANSIENT_LOCAL",
+    "nodes": [
+     "/global_costmap/global_costmap"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "sample": {
+    "frame_id": "map",
+    "map": [
+     135,
+     58,
+     0.05
+    ]
+   },
+   "type": "nav_msgs/msg/OccupancyGrid"
+  },
+  "/global_costmap/obstacle_layer_raw": {
+   "hz": 0.5,
+   "qos": {
+    "durability": "TRANSIENT_LOCAL",
+    "nodes": [
+     "/global_costmap/global_costmap"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "sample": {
+    "frame_id": "map"
+   },
+   "type": "nav2_msgs/msg/Costmap"
+  },
+  "/global_costmap/obstacle_layer_raw_updates": {
+   "hz": 0.0,
+   "qos": {
+    "durability": "TRANSIENT_LOCAL",
+    "nodes": [
+     "/global_costmap/global_costmap"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "type": "nav2_msgs/msg/CostmapUpdate"
+  },
+  "/global_costmap/obstacle_layer_updates": {
+   "hz": 0.0,
+   "qos": {
+    "durability": "TRANSIENT_LOCAL",
+    "nodes": [
+     "/global_costmap/global_costmap"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "type": "map_msgs/msg/OccupancyGridUpdate"
+  },
+  "/global_costmap/published_footprint": {
+   "hz": 0.8,
+   "qos": {
+    "durability": "VOLATILE",
+    "nodes": [
+     "/global_costmap/global_costmap"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "sample": {
+    "frame_id": "map"
+   },
+   "type": "geometry_msgs/msg/PolygonStamped"
+  },
+  "/global_costmap/static_layer": {
+   "hz": 0.5,
+   "qos": {
+    "durability": "TRANSIENT_LOCAL",
+    "nodes": [
+     "/global_costmap/global_costmap"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "sample": {
+    "frame_id": "map",
+    "map": [
+     135,
+     58,
+     0.05
+    ]
+   },
+   "type": "nav_msgs/msg/OccupancyGrid"
+  },
+  "/global_costmap/static_layer_raw": {
+   "hz": 0.5,
+   "qos": {
+    "durability": "TRANSIENT_LOCAL",
+    "nodes": [
+     "/global_costmap/global_costmap"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "sample": {
+    "frame_id": "map"
+   },
+   "type": "nav2_msgs/msg/Costmap"
+  },
+  "/global_costmap/static_layer_raw_updates": {
+   "hz": 0.0,
+   "qos": {
+    "durability": "TRANSIENT_LOCAL",
+    "nodes": [
+     "/global_costmap/global_costmap"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "type": "nav2_msgs/msg/CostmapUpdate"
+  },
+  "/global_costmap/static_layer_updates": {
+   "hz": 0.0,
+   "qos": {
+    "durability": "TRANSIENT_LOCAL",
+    "nodes": [
+     "/global_costmap/global_costmap"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "type": "map_msgs/msg/OccupancyGridUpdate"
+  },
+  "/global_costmap/voxel_grid": {
+   "hz": 0.8,
+   "qos": {
+    "durability": "TRANSIENT_LOCAL",
+    "nodes": [
+     "/global_costmap/global_costmap"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "sample": {
+    "frame_id": "map"
+   },
+   "type": "nav2_msgs/msg/VoxelGrid"
+  },
+  "/global_costmap/voxel_layer": {
+   "hz": 0.5,
+   "qos": {
+    "durability": "TRANSIENT_LOCAL",
+    "nodes": [
+     "/global_costmap/global_costmap"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "sample": {
+    "frame_id": "map",
+    "map": [
+     135,
+     58,
+     0.05
+    ]
+   },
+   "type": "nav_msgs/msg/OccupancyGrid"
+  },
+  "/global_costmap/voxel_layer_raw": {
+   "hz": 0.5,
+   "qos": {
+    "durability": "TRANSIENT_LOCAL",
+    "nodes": [
+     "/global_costmap/global_costmap"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "sample": {
+    "frame_id": "map"
+   },
+   "type": "nav2_msgs/msg/Costmap"
+  },
+  "/global_costmap/voxel_layer_raw_updates": {
+   "hz": 0.0,
+   "qos": {
+    "durability": "TRANSIENT_LOCAL",
+    "nodes": [
+     "/global_costmap/global_costmap"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "type": "nav2_msgs/msg/CostmapUpdate"
+  },
+  "/global_costmap/voxel_layer_updates": {
+   "hz": 0.0,
+   "qos": {
+    "durability": "TRANSIENT_LOCAL",
+    "nodes": [
+     "/global_costmap/global_costmap"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "type": "map_msgs/msg/OccupancyGridUpdate"
+  },
+  "/goal_pose": {
+   "hz": 0.0,
+   "qos": null,
+   "type": "geometry_msgs/msg/PoseStamped"
+  },
+  "/imu": {
+   "hz": 14.7,
+   "qos": {
+    "durability": "VOLATILE",
+    "nodes": [
+     "/turtlebot3_node"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "sample": {
+    "frame_id": "imu_link"
+   },
+   "type": "sensor_msgs/msg/Imu"
+  },
+  "/joint_states": {
+   "hz": 14.7,
+   "qos": {
+    "durability": "VOLATILE",
+    "nodes": [
+     "/turtlebot3_node"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "sample": {
+    "frame_id": "base_link",
+    "names": [
+     "wheel_left_joint",
+     "wheel_right_joint"
+    ]
+   },
+   "type": "sensor_msgs/msg/JointState"
+  },
+  "/local_costmap/clearing_endpoints": {
+   "hz": 3.7,
+   "qos": {
+    "durability": "TRANSIENT_LOCAL",
+    "nodes": [
+     "/local_costmap/local_costmap"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "sample": {
+    "frame_id": "odom",
+    "height": 1,
+    "width": 388
+   },
+   "type": "sensor_msgs/msg/PointCloud2"
+  },
+  "/local_costmap/costmap": {
+   "hz": 1.3,
+   "qos": {
+    "durability": "TRANSIENT_LOCAL",
+    "nodes": [
+     "/local_costmap/local_costmap"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "sample": {
+    "frame_id": "odom",
+    "map": [
+     60,
+     60,
+     0.05
+    ]
+   },
+   "type": "nav_msgs/msg/OccupancyGrid"
+  },
+  "/local_costmap/costmap_raw": {
+   "hz": 1.3,
+   "qos": {
+    "durability": "TRANSIENT_LOCAL",
+    "nodes": [
+     "/local_costmap/local_costmap"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "sample": {
+    "frame_id": "odom"
+   },
+   "type": "nav2_msgs/msg/Costmap"
+  },
+  "/local_costmap/costmap_raw_updates": {
+   "hz": 0.0,
+   "qos": {
+    "durability": "TRANSIENT_LOCAL",
+    "nodes": [
+     "/local_costmap/local_costmap"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "type": "nav2_msgs/msg/CostmapUpdate"
+  },
+  "/local_costmap/costmap_updates": {
+   "hz": 0.0,
+   "qos": {
+    "durability": "TRANSIENT_LOCAL",
+    "nodes": [
+     "/local_costmap/local_costmap"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "type": "map_msgs/msg/OccupancyGridUpdate"
+  },
+  "/local_costmap/footprint": {
+   "hz": 0.0,
+   "qos": null,
+   "type": "geometry_msgs/msg/Polygon"
+  },
+  "/local_costmap/local_costmap/transition_event": {
+   "hz": 0.0,
+   "qos": {
+    "durability": "VOLATILE",
+    "nodes": [
+     "/local_costmap/local_costmap"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "type": "lifecycle_msgs/msg/TransitionEvent"
+  },
+  "/local_costmap/obstacle_layer": {
+   "hz": 1.2,
+   "qos": {
+    "durability": "TRANSIENT_LOCAL",
+    "nodes": [
+     "/local_costmap/local_costmap"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "sample": {
+    "frame_id": "odom",
+    "map": [
+     60,
+     60,
+     0.05
+    ]
+   },
+   "type": "nav_msgs/msg/OccupancyGrid"
+  },
+  "/local_costmap/obstacle_layer_raw": {
+   "hz": 1.2,
+   "qos": {
+    "durability": "TRANSIENT_LOCAL",
+    "nodes": [
+     "/local_costmap/local_costmap"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "sample": {
+    "frame_id": "odom"
+   },
+   "type": "nav2_msgs/msg/Costmap"
+  },
+  "/local_costmap/obstacle_layer_raw_updates": {
+   "hz": 0.0,
+   "qos": {
+    "durability": "TRANSIENT_LOCAL",
+    "nodes": [
+     "/local_costmap/local_costmap"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "type": "nav2_msgs/msg/CostmapUpdate"
+  },
+  "/local_costmap/obstacle_layer_updates": {
+   "hz": 0.0,
+   "qos": {
+    "durability": "TRANSIENT_LOCAL",
+    "nodes": [
+     "/local_costmap/local_costmap"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "type": "map_msgs/msg/OccupancyGridUpdate"
+  },
+  "/local_costmap/published_footprint": {
+   "hz": 3.5,
+   "qos": {
+    "durability": "VOLATILE",
+    "nodes": [
+     "/local_costmap/local_costmap"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "sample": {
+    "frame_id": "odom"
+   },
+   "type": "geometry_msgs/msg/PolygonStamped"
+  },
+  "/local_costmap/voxel_grid": {
+   "hz": 3.7,
+   "qos": {
+    "durability": "TRANSIENT_LOCAL",
+    "nodes": [
+     "/local_costmap/local_costmap"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "sample": {
+    "frame_id": "odom"
+   },
+   "type": "nav2_msgs/msg/VoxelGrid"
+  },
+  "/local_costmap/voxel_layer": {
+   "hz": 1.2,
+   "qos": {
+    "durability": "TRANSIENT_LOCAL",
+    "nodes": [
+     "/local_costmap/local_costmap"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "sample": {
+    "frame_id": "odom",
+    "map": [
+     60,
+     60,
+     0.05
+    ]
+   },
+   "type": "nav_msgs/msg/OccupancyGrid"
+  },
+  "/local_costmap/voxel_layer_raw": {
+   "hz": 1.2,
+   "qos": {
+    "durability": "TRANSIENT_LOCAL",
+    "nodes": [
+     "/local_costmap/local_costmap"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "sample": {
+    "frame_id": "odom"
+   },
+   "type": "nav2_msgs/msg/Costmap"
+  },
+  "/local_costmap/voxel_layer_raw_updates": {
+   "hz": 0.0,
+   "qos": {
+    "durability": "TRANSIENT_LOCAL",
+    "nodes": [
+     "/local_costmap/local_costmap"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "type": "nav2_msgs/msg/CostmapUpdate"
+  },
+  "/local_costmap/voxel_layer_updates": {
+   "hz": 0.0,
+   "qos": {
+    "durability": "TRANSIENT_LOCAL",
+    "nodes": [
+     "/local_costmap/local_costmap"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "type": "map_msgs/msg/OccupancyGridUpdate"
+  },
+  "/local_plan": {
+   "hz": 0.0,
+   "qos": {
+    "durability": "VOLATILE",
+    "nodes": [
+     "/controller_server"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "type": "nav_msgs/msg/Path"
+  },
+  "/magnetic_field": {
+   "hz": 14.5,
+   "qos": {
+    "durability": "VOLATILE",
+    "nodes": [
+     "/turtlebot3_node"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "sample": {
+    "frame_id": "imu_link"
+   },
+   "type": "sensor_msgs/msg/MagneticField"
+  },
+  "/map": {
+   "hz": 0.3,
+   "qos": {
+    "durability": "TRANSIENT_LOCAL",
+    "nodes": [
+     "/slam_toolbox"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "sample": {
+    "frame_id": "map",
+    "map": [
+     135,
+     58,
+     0.05
+    ]
+   },
+   "type": "nav_msgs/msg/OccupancyGrid"
+  },
+  "/map_metadata": {
+   "hz": 0.3,
+   "qos": {
+    "durability": "TRANSIENT_LOCAL",
+    "nodes": [
+     "/slam_toolbox"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "sample": {
+    "height": 58,
+    "width": 135
+   },
+   "type": "nav_msgs/msg/MapMetaData"
+  },
+  "/marker": {
+   "hz": 0.0,
+   "qos": {
+    "durability": "VOLATILE",
+    "nodes": [
+     "/controller_server"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "type": "visualization_msgs/msg/MarkerArray"
+  },
+  "/navigate_through_poses/_action/feedback": {
+   "hz": 0.0,
+   "qos": {
+    "durability": "VOLATILE",
+    "nodes": [
+     "/bt_navigator"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "type": "nav2_msgs/action/NavigateThroughPoses_FeedbackMessage"
+  },
+  "/navigate_through_poses/_action/status": {
+   "hz": 0.0,
+   "qos": {
+    "durability": "TRANSIENT_LOCAL",
+    "nodes": [
+     "/bt_navigator"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "type": "action_msgs/msg/GoalStatusArray"
+  },
+  "/navigate_to_pose/_action/feedback": {
+   "hz": 0.0,
+   "qos": {
+    "durability": "VOLATILE",
+    "nodes": [
+     "/bt_navigator"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "type": "nav2_msgs/action/NavigateToPose_FeedbackMessage"
+  },
+  "/navigate_to_pose/_action/status": {
+   "hz": 0.0,
+   "qos": {
+    "durability": "TRANSIENT_LOCAL",
+    "nodes": [
+     "/bt_navigator"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "type": "action_msgs/msg/GoalStatusArray"
+  },
+  "/odom": {
+   "hz": 14.3,
+   "qos": {
+    "durability": "VOLATILE",
+    "nodes": [
+     "/diff_drive_controller"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "sample": {
+    "child_frame_id": "base_footprint",
+    "frame_id": "odom"
+   },
+   "type": "nav_msgs/msg/Odometry"
+  },
+  "/plan": {
+   "hz": 0.0,
+   "qos": {
+    "durability": "VOLATILE",
+    "nodes": [
+     "/planner_server",
+     "/route_server"
+    ],
+    "publishers": 2,
+    "reliability": "RELIABLE"
+   },
+   "type": "nav_msgs/msg/Path"
+  },
+  "/plan_smoothed": {
+   "hz": 0.0,
+   "qos": {
+    "durability": "VOLATILE",
+    "nodes": [
+     "/smoother_server"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "type": "nav_msgs/msg/Path"
+  },
+  "/planner_selector": {
+   "hz": 0.0,
+   "qos": null,
+   "type": "std_msgs/msg/String"
+  },
+  "/planner_server/transition_event": {
+   "hz": 0.0,
+   "qos": {
+    "durability": "VOLATILE",
+    "nodes": [
+     "/planner_server"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "type": "lifecycle_msgs/msg/TransitionEvent"
+  },
+  "/polygon_slowdown": {
+   "hz": 0.0,
+   "qos": {
+    "durability": "VOLATILE",
+    "nodes": [
+     "/collision_monitor"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "type": "geometry_msgs/msg/PolygonStamped"
+  },
+  "/polygon_stop": {
+   "hz": 0.0,
+   "qos": {
+    "durability": "VOLATILE",
+    "nodes": [
+     "/collision_monitor"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "type": "geometry_msgs/msg/PolygonStamped"
+  },
+  "/pose": {
+   "hz": 1.2,
+   "qos": {
+    "durability": "VOLATILE",
+    "nodes": [
+     "/slam_toolbox"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "sample": {
+    "frame_id": "map"
+   },
+   "type": "geometry_msgs/msg/PoseWithCovarianceStamped"
+  },
+  "/preempt_teleop": {
+   "hz": 0.0,
+   "qos": null,
+   "type": "std_msgs/msg/Empty"
+  },
+  "/received_global_plan": {
+   "hz": 0.0,
+   "qos": {
+    "durability": "VOLATILE",
+    "nodes": [
+     "/controller_server"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "type": "nav_msgs/msg/Path"
+  },
+  "/robot_description": {
+   "hz": 0.2,
+   "qos": {
+    "durability": "TRANSIENT_LOCAL",
+    "nodes": [
+     "/robot_state_publisher"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "sample": {},
+   "type": "std_msgs/msg/String"
+  },
+  "/route_graph": {
+   "hz": 0.2,
+   "qos": {
+    "durability": "TRANSIENT_LOCAL",
+    "nodes": [
+     "/route_server"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "sample": {},
+   "type": "visualization_msgs/msg/MarkerArray"
+  },
+  "/route_server/transition_event": {
+   "hz": 0.0,
+   "qos": {
+    "durability": "VOLATILE",
+    "nodes": [
+     "/route_server"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "type": "lifecycle_msgs/msg/TransitionEvent"
+  },
+  "/scan": {
+   "hz": 7.2,
+   "qos": {
+    "durability": "VOLATILE",
+    "nodes": [
+     "/lidar_node"
+    ],
+    "publishers": 1,
+    "reliability": "BEST_EFFORT"
+   },
+   "sample": {
+    "angle_increment": 0.01563,
+    "angle_max": 6.28319,
+    "angle_min": 0.0,
+    "frame_id": "base_scan",
+    "n_ranges": 401,
+    "range_max": 100.0,
+    "range_min": 0.1
+   },
+   "type": "sensor_msgs/msg/LaserScan"
+  },
+  "/scan_stable": {
+   "hz": 7.5,
+   "qos": {
+    "durability": "VOLATILE",
+    "nodes": [
+     "/laser_scan_stabilizer"
+    ],
+    "publishers": 1,
+    "reliability": "BEST_EFFORT"
+   },
+   "sample": {
+    "angle_increment": 0.01571,
+    "angle_max": 3.12588,
+    "angle_min": -3.14159,
+    "frame_id": "base_scan",
+    "n_ranges": 400,
+    "range_max": 100.0,
+    "range_min": 0.1
+   },
+   "type": "sensor_msgs/msg/LaserScan"
+  },
+  "/sensor_state": {
+   "hz": 13.8,
+   "qos": {
+    "durability": "VOLATILE",
+    "nodes": [
+     "/turtlebot3_node"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "sample": {
+    "frame_id": ""
+   },
+   "type": "turtlebot3_msgs/msg/SensorState"
+  },
+  "/slam_toolbox/feedback": {
+   "hz": 0.0,
+   "qos": null,
+   "type": "visualization_msgs/msg/InteractiveMarkerFeedback"
+  },
+  "/slam_toolbox/graph_visualization": {
+   "hz": 0.2,
+   "qos": {
+    "durability": "VOLATILE",
+    "nodes": [
+     "/slam_toolbox"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "sample": {},
+   "type": "visualization_msgs/msg/MarkerArray"
+  },
+  "/slam_toolbox/scan_visualization": {
+   "hz": 0.0,
+   "qos": {
+    "durability": "VOLATILE",
+    "nodes": [
+     "/slam_toolbox"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "type": "sensor_msgs/msg/LaserScan"
+  },
+  "/slam_toolbox/transition_event": {
+   "hz": 0.0,
+   "qos": {
+    "durability": "VOLATILE",
+    "nodes": [
+     "/slam_toolbox"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "type": "lifecycle_msgs/msg/TransitionEvent"
+  },
+  "/slam_toolbox/update": {
+   "hz": 0.0,
+   "qos": {
+    "durability": "VOLATILE",
+    "nodes": [
+     "/slam_toolbox"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "type": "visualization_msgs/msg/InteractiveMarkerUpdate"
+  },
+  "/smooth_path/_action/feedback": {
+   "hz": 0.0,
+   "qos": {
+    "durability": "VOLATILE",
+    "nodes": [
+     "/smoother_server"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "type": "nav2_msgs/action/SmoothPath_FeedbackMessage"
+  },
+  "/smooth_path/_action/status": {
+   "hz": 0.0,
+   "qos": {
+    "durability": "TRANSIENT_LOCAL",
+    "nodes": [
+     "/smoother_server"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "type": "action_msgs/msg/GoalStatusArray"
+  },
+  "/smoother_server/transition_event": {
+   "hz": 0.0,
+   "qos": {
+    "durability": "VOLATILE",
+    "nodes": [
+     "/smoother_server"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "type": "lifecycle_msgs/msg/TransitionEvent"
+  },
+  "/speed_limit": {
+   "hz": 0.0,
+   "qos": {
+    "durability": "VOLATILE",
+    "nodes": [
+     "/route_server"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "type": "nav2_msgs/msg/SpeedLimit"
+  },
+  "/spin/_action/feedback": {
+   "hz": 0.0,
+   "qos": {
+    "durability": "VOLATILE",
+    "nodes": [
+     "/behavior_server"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "type": "nav2_msgs/action/Spin_FeedbackMessage"
+  },
+  "/spin/_action/status": {
+   "hz": 0.0,
+   "qos": {
+    "durability": "TRANSIENT_LOCAL",
+    "nodes": [
+     "/behavior_server"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "type": "action_msgs/msg/GoalStatusArray"
+  },
+  "/staging_pose": {
+   "hz": 0.0,
+   "qos": {
+    "durability": "VOLATILE",
+    "nodes": [
+     "/docking_server"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "type": "geometry_msgs/msg/PoseStamped"
+  },
+  "/tf": {
+   "hz": 36.3,
+   "pairs": [
+    "base_link->wheel_left_link",
+    "base_link->wheel_right_link",
+    "map->odom",
+    "odom->base_footprint"
+   ],
+   "qos": {
+    "durability": "VOLATILE",
+    "nodes": [
+     "/diff_drive_controller",
+     "/robot_state_publisher",
+     "/slam_toolbox"
+    ],
+    "publishers": 4,
+    "reliability": "RELIABLE"
+   },
+   "sample": {},
+   "type": "tf2_msgs/msg/TFMessage"
+  },
+  "/tf_static": {
+   "hz": 0.2,
+   "pairs": [
+    "base_footprint->base_link",
+    "base_link->base_scan",
+    "base_link->caster_back_link",
+    "base_link->imu_link"
+   ],
+   "qos": {
+    "durability": "TRANSIENT_LOCAL",
+    "nodes": [
+     "/robot_state_publisher"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "sample": {},
+   "type": "tf2_msgs/msg/TFMessage"
+  },
+  "/transformed_global_plan": {
+   "hz": 0.0,
+   "qos": {
+    "durability": "VOLATILE",
+    "nodes": [
+     "/controller_server"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "type": "nav_msgs/msg/Path"
+  },
+  "/undock_robot/_action/feedback": {
+   "hz": 0.0,
+   "qos": {
+    "durability": "VOLATILE",
+    "nodes": [
+     "/docking_server"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "type": "nav2_msgs/action/UndockRobot_FeedbackMessage"
+  },
+  "/undock_robot/_action/status": {
+   "hz": 0.0,
+   "qos": {
+    "durability": "TRANSIENT_LOCAL",
+    "nodes": [
+     "/docking_server"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "type": "action_msgs/msg/GoalStatusArray"
+  },
+  "/velocity_smoother/transition_event": {
+   "hz": 0.0,
+   "qos": {
+    "durability": "VOLATILE",
+    "nodes": [
+     "/velocity_smoother"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "type": "lifecycle_msgs/msg/TransitionEvent"
+  },
+  "/wait/_action/feedback": {
+   "hz": 0.0,
+   "qos": {
+    "durability": "VOLATILE",
+    "nodes": [
+     "/behavior_server"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "type": "nav2_msgs/action/Wait_FeedbackMessage"
+  },
+  "/wait/_action/status": {
+   "hz": 0.0,
+   "qos": {
+    "durability": "TRANSIENT_LOCAL",
+    "nodes": [
+     "/behavior_server"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "type": "action_msgs/msg/GoalStatusArray"
+  },
+  "/waypoint_follower/transition_event": {
+   "hz": 0.0,
+   "qos": {
+    "durability": "VOLATILE",
+    "nodes": [
+     "/waypoint_follower"
+    ],
+    "publishers": 1,
+    "reliability": "RELIABLE"
+   },
+   "type": "lifecycle_msgs/msg/TransitionEvent"
+  }
+ }
+}

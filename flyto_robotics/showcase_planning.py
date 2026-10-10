@@ -7,14 +7,19 @@ import json
 from collections.abc import Mapping
 from typing import Any
 
-from .ai_planner import PlanValidationError, parse_plan
+from .ai_planner import (
+    PLANNER_REQUEST_CONTRACT,
+    PLANNER_RESPONSE_CONTRACT,
+    PlanValidationError,
+    parse_plan,
+)
 from .capabilities import GoalFrame, default_capability_registry
 
 SHOWCASE_PLANNING_CONTRACT_VERSION = (
     "flyto.robotics.showcase-planning-evidence.v2"
 )
 PLANNING_SESSION_CONTRACT_VERSION = "flyto.robotics.planning-session.v1"
-AI_RESPONSE_CONTRACT_VERSION = "flyto.ai.robotics-plan-response.v1"
+AI_RESPONSE_CONTRACT_VERSION = PLANNER_RESPONSE_CONTRACT
 AI_ATTESTATION_CONTRACT_VERSION = (
     "flyto.ai.robotics-planning-attestation.v1"
 )
@@ -128,12 +133,9 @@ def build_showcase_planning_evidence(
     if final_round.get("sequence") != final_round_number:
         raise PlanValidationError("planning session round sequence is invalid")
     request = _object(final_round.get("request"), "final_round.request")
-    if (
-        request.get("planner_contract")
-        != "flyto.robotics.planner-request.v1"
-    ):
+    if request.get("planner_contract") != PLANNER_REQUEST_CONTRACT:
         raise PlanValidationError("final planner request contract is invalid")
-    if request.get("goal") != goal or request.get("robot_id") != robot_id:
+    if request.get("goal") != goal or request.get("resource_id") != robot_id:
         raise PlanValidationError(
             "final planner request does not match the planning session"
         )
@@ -175,7 +177,7 @@ def build_showcase_planning_evidence(
 
     registry = default_capability_registry()
     plan = parse_plan(plan_payload, registry=registry)
-    if plan.robot_id != robot_id or plan.goal != goal:
+    if plan.resource_id != robot_id or plan.goal != goal:
         raise PlanValidationError(
             "validated plan does not match the requested robot and goal"
         )

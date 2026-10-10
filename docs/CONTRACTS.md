@@ -5,7 +5,11 @@ The JSON contracts, the semantic pairing with ROS 2, and the stress gate.
 The stable external API is file-based and language-neutral:
 
 - `contracts/job-v1.schema.json` validates input jobs;
-- `contracts/plan-v1.schema.json` validates AI-composed capability plans;
+- `contracts/capability-plan-v1.schema.json` validates AI-composed capability
+  plans (`flyto.capability-plan.v1`, commanded equipment named `resource_id`).
+  The planner request that asks for one is `flyto.robotics.planner-request.v2`;
+  `tests/fixtures/capability-plan-exchange.v1.json` is the exchange flyto-ai's
+  planner is tested against, byte-identical in both repositories;
 - `contracts/input-event-v1.schema.json` validates keyboard, joystick, and
   external input lifecycle events without accepting motor values;
 - `contracts/facility-resource-plan-v1.schema.json` documents the exact
@@ -207,7 +211,10 @@ The same bundle is used for Gazebo and a physical robot:
 
 - `deployment_mode=simulation` or `hardware`;
 - pose in `map` or `odom`;
-- minimum-range evidence and sample count;
+- minimum-range evidence and sample count, plus an optional reduced `sweep`
+  (`angle_min_rad`, `angle_increment_rad`, `ranges_m` with at most 720 bins,
+  each the nearest valid return in its bin or `null` when nothing valid was
+  seen) so a person can see what the robot saw;
 - camera frame digest, dimensions and encoding;
 - explicit camera `calibrated` state plus calibration digest when present;
 - live `map -> odom` availability;

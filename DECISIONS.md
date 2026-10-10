@@ -9,6 +9,87 @@ the robot, hosted Flyto2 Cloud account or cybersecurity Engine is needed.
 Physical movement is prohibited until host grant and device-side safety
 tests establish independently verified control authority.
 
+## 2026-10-04 — A navigation that starts inside inflation escapes first, or is refused at once
+
+On the twin, a navigate sent from 0.40 m in front of a box (stock TurtleBot3
+Nav2 parameters: inflation 0.50 m, robot radius 0.10 m) never moved the robot;
+Nav2 recovered and aborted after about 170 s. The robot runs the same stock
+parameters, so tuning Nav2 was not an option. The adapter now decides from
+the LiDAR sweep and the costmaps' live parameters whether the start is inside
+inflation, and if so drives a computed way out (back-off, one lateral
+waypoint) before the original goal, or refuses with `no_escape_room` when no
+straight segment of that escape keeps the 0.35 m floor from every return.
+
+The pinned test uses the front sector only (plus or minus 45 degrees): side
+returns at the same distance would call every narrow corridor pinned. The
+geometry is pure (`inflation_escape.py`) and the ROS-facing part is a thin
+layer in the adapter. Rejected: retuning the twin's or the robot's Nav2
+parameters; lowering the floor; retrying the same goal; leaving Nav2 to time
+out.
+
+## 2026-10-04 — Named places live on the execution host; the adapter resolves them
+
+Places are kept beside the adapter, on the computer that drives the robot: the
+robot runs stock ROS 2 with no Flyto2 code, and Flyto2 Cloud stores no
+location list. The SLAM map itself stays on the robot, so the host keys its
+places by a map id it is configured with (`FLYTO_ROS2_MAP_ID`).
+
+The adapter is the one resolver. A navigation by place is resolved before any
+precondition or motion, and the goal handed to Nav2 is the stored pose. The
+result says which coordinates that was (`resolved_arguments`), because the
+pack's arrival evidence reads its target from the call's arguments
+(`distance_to` over `x`/`y`): a host judges a call by place against the
+authored arguments overlaid with `resolved_arguments`. Without that overlay
+the arrival is unprovable (no `x`), which fails closed.
+
+Rejected: resolving in the pack's step and dispatching `x`/`y` (a second
+resolver, and hosts that dispatch the capability directly would bypass it);
+silently replacing the request's arguments (the request would no longer say
+what was asked); recovering a corrupt file by starting empty (marking a place
+would then destroy every place that could not be read).
+
+## 2026-10-04 — Clarification: flyto-robotics is the host-side driver layer
+
+This clarifies the 2026-09-21 and 2026-09-22 entries; it reverses neither.
+
+Clarification: `flyto-robotics` is the driver layer that sits next to the
+equipment, on the execution host or on a companion computer beside the robot.
+It drives the robot's own native ROS 2 / Nav2 stack over standard interfaces
+(rclpy or rosbridge). It is never firmware, and nothing from Flyto2 is
+installed on the robot: the owner confirmed on 2026-10-04 that the robots stay
+stock TurtleBot3.
+
+Clarification: capabilities are declared to Flyto2 by the
+`flyto-modules-robotics` pack through flyto-core's `@register_module`
+capability contract (its `flyto.modules` entry point is `robotics`), not by
+this repository. The resource manifest this library's discoverer reports is
+passive inventory evidence. A host that asks for the `module_pack` manifest
+extension receives `"module_pack": "robotics"` so it can join the resource to
+the pack that drives it; a host that does not ask receives the manifest shape
+it was released against, because released hosts reject unknown fields.
+
+Clarification: this library owns the safety invariants that live at the
+equipment: the 0.35 m LiDAR clearance floor, refuse-never-clamp (an argument
+outside its declared bounds is refused, never reduced to fit; the one
+documented exception is the `operator_present` safety basis, which caps an
+advance or retreat speed at its 0.05 m/s ceiling), refusal when
+the configured deployment mode disagrees with the ROS graph (simulation versus
+physical), and the safe stop on timeout, cancel or failure.
+
+Limit: when the link between this library and the robot drops mid-motion, the
+cancel and the safe stop can no longer reach the robot. The motion in flight
+is then bounded only by the robot's own stack: the goal's declared distance or
+angle and, for advance, retreat and rotate, the Nav2 `time_allowance`
+(`FLYTO_ROS2_ACTION_ALLOWANCE_SECONDS`, default 30 s). `motion.navigate`
+carries no time allowance. While disconnected, every new call is refused.
+Running nothing of ours on the robot means there is no Flyto2 watchdog there
+to close that gap; placing this library on a companion computer wired to the
+robot shortens the link it depends on.
+
+Reason: several documents described the adapter only as running on "the AI
+Space computer", which read as if it could only be the cloud-facing host, and
+the manifest made it look like this repository declared capabilities to
+Flyto2. Neither is the design.
 ## 2026-09-22 — Equipment transports are adapter providers, not Cloud or Runtime core
 
 Decision: ROS2, rosbridge, OpenRMF, camera-stream and vendor transport implementations belong in adapter packages such as `flyto-robotics`. Any compatible AI Space execution host may load those providers and bind one assignment's approved resource/capability authority. Flyto2 Runtime is one optional host, not a required layer. Provider discovery is passive evidence; execution authority is a separate allowlisted assignment contract.

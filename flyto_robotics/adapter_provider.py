@@ -9,34 +9,60 @@ transport code.
 from __future__ import annotations
 
 import argparse
+import contextlib
+import importlib.util
 import json
 import os
-import re
 import socket
 import sys
-from collections.abc import Mapping
+import threading
+from collections.abc import Callable, Iterable, Mapping
 from datetime import datetime, timezone
 from typing import Any
 
 from . import adapter_contract as contract
-from .generic_ros2_adapter import GenericROS2Adapter, build
+from . import ssh_transport
+from .generic_ros2_adapter import (
+    SILENT_SECONDS,
+    GenericROS2Adapter,
+    build,
+    configured_resource_id,
+    configured_transport,
+)
 
 ADAPTER_ID = "ros2.generic"
 PROVIDER_PROTOCOL = "flyto2.adapter-provider.v1"
 
+# The ``flyto.modules`` entry-point name of the flyto-modules-robotics pack.
+# That pack, not this library, declares the capabilities to Flyto2 through
+# ``@register_module``; a host joins a discovered resource to the pack that
+# drives it by this name.
+MODULE_PACK = "robotics"
 
-def _safe_fragment(value: str) -> str:
-    text = re.sub(r"[^A-Za-z0-9_.-]+", "-", str(value or "").strip())
-    return text.strip("-._")[:48] or "resource"
+# Manifest fields a host must ask for. Released hosts validate the manifest
+# with ``extra="forbid"``, so a field they do not know would make them drop
+# the robot. Each one is emitted only when the host names it in
+# ``manifest_extensions``; without that the manifest keeps its old shape.
+MANIFEST_EXTENSIONS: tuple[str, ...] = ("module_pack", "transport")
+
+
+def _extensions(requested: Iterable[str] | None) -> frozenset[str]:
+    if requested is None or isinstance(requested, (str, bytes)):
+        return frozenset()
+    try:
+        names = {str(item) for item in requested}
+    except TypeError:
+        return frozenset()
+    return frozenset(names) & frozenset(MANIFEST_EXTENSIONS)
+
+
+class ResourceNotServed(RuntimeError):
+    """A host asked for an adapter for a resource this computer does not serve."""
 
 
 def _resource_identity() -> tuple[str, str]:
-    domain = os.getenv("ROS_DOMAIN_ID", "0").strip() or "0"
     hostname = socket.gethostname()
-    resource_id = (
-        os.getenv("FLYTO_ROS2_RESOURCE_ID", "").strip()
-        or f"ros2-{_safe_fragment(hostname)}-{_safe_fragment(domain)}"
-    )[:128]
+    resource_id = configured_resource_id()
     resource_name = (
         os.getenv("FLYTO_ROS2_RESOURCE_NAME", "").strip()
         or f"ROS 2 robot ({hostname})"
@@ -44,7 +70,31 @@ def _resource_identity() -> tuple[str, str]:
     return resource_id, resource_name
 
 
-def _manifest(adapter: GenericROS2Adapter, *, resource_name: str) -> dict[str, Any]:
+def _require_served(resource_id: str) -> str:
+    """The configured resource id, or a refusal naming both ids.
+
+    An adapter labels its results with the id it was built for, but its
+    transport reaches whatever this computer is wired to. Building one for
+    any other id would let a job for one resource (a simulated twin) run on
+    another (the physical robot) and be recorded as the first.
+    """
+    configured = configured_resource_id()
+    requested = str(resource_id or "").strip()
+    if requested != configured:
+        raise ResourceNotServed(
+            f"the {ADAPTER_ID} adapter on this computer serves {configured!r} "
+            f"(FLYTO_ROS2_RESOURCE_ID), not {requested or '(no resource id)'!r}; "
+            "refused rather than label it as another resource"
+        )
+    return configured
+
+
+def _manifest(
+    adapter: GenericROS2Adapter,
+    *,
+    resource_name: str,
+    extensions: Iterable[str] | None = None,
+) -> dict[str, Any]:
     declarations = tuple(adapter.describe())
     contracts: list[dict[str, Any]] = []
     for item in declarations:
@@ -60,7 +110,7 @@ def _manifest(adapter: GenericROS2Adapter, *, resource_name: str) -> dict[str, A
                 "requires_safe_stop": item.requires_safe_stop,
             }
         )
-    return {
+    manifest: dict[str, Any] = {
         "contract": "flyto.resource-manifest.v1",
         "resource_id": adapter.resource_id,
         "resource_type": "robot",
@@ -84,29 +134,77 @@ def _manifest(adapter: GenericROS2Adapter, *, resource_name: str) -> dict[str, A
         "observed_at": datetime.now(timezone.utc).isoformat(),
         "contract_hash": "",
     }
+    requested = _extensions(extensions)
+    if "module_pack" in requested:
+        manifest["module_pack"] = MODULE_PACK
+    if "transport" in requested:
+        manifest["transport"] = adapter.transport_status()
+    return manifest
 
 
-def discover_resource_manifests(*, execution_host_id: str) -> list[dict[str, Any]]:
-    """Discover one reachable standard ROS 2 graph without granting authority."""
-
-    _ = execution_host_id
+def _discovery_enabled() -> bool:
     disabled = os.getenv("FLYTO_ROS2_AUTODISCOVER", "").strip().lower()
     if disabled in {"0", "false", "off", "no"}:
-        return []
+        return False
+    transport = configured_transport()
+    if transport == "rosbridge" and not (
+        os.getenv("FLYTO_ROSBRIDGE_URL", "").strip()
+        or os.getenv(ssh_transport.ENV_HOST, "").strip()
+    ):
+        return False
+    return transport in {"rclpy", "rosbridge"}
 
-    transport = os.getenv("FLYTO_ROS2_TRANSPORT", "rclpy").strip().lower()
-    if transport == "rosbridge" and not os.getenv("FLYTO_ROSBRIDGE_URL", "").strip():
-        return []
-    if transport not in {"rclpy", "rosbridge"}:
+
+def discover_resource_manifests(
+    *,
+    execution_host_id: str,
+    manifest_extensions: Iterable[str] | None = None,
+) -> list[dict[str, Any]]:
+    """Discover one reachable standard ROS 2 graph without granting authority.
+
+    While a presence watch (``watch_resources``) holds a connection to the
+    robot, the pass reads the graph over it instead of connecting again.
+
+    ``manifest_extensions`` names optional manifest fields the host accepts
+    (see ``MANIFEST_EXTENSIONS``, also offered as this function's
+    ``manifest_extensions`` attribute). A host that passes nothing receives
+    the manifest shape it was released against.
+    """
+
+    _ = execution_host_id
+    if not _discovery_enabled():
         return []
 
     resource_id, resource_name = _resource_identity()
+    watched = _watched_adapter(resource_id)
+    if watched is not None:
+        try:
+            # A pass is asked for because something changed: read the graph
+            # as it is now, not as the presence connection last cached it.
+            watched._invalidate_discovery()
+            if not watched.describe():
+                return []
+            return [
+                _manifest(
+                    watched,
+                    resource_name=resource_name,
+                    extensions=manifest_extensions,
+                )
+            ]
+        except Exception:
+            return []
     adapter: GenericROS2Adapter | None = None
     try:
         adapter = build(resource_id)
         if not adapter.describe():
             return []
-        return [_manifest(adapter, resource_name=resource_name)]
+        return [
+            _manifest(
+                adapter,
+                resource_name=resource_name,
+                extensions=manifest_extensions,
+            )
+        ]
     except Exception:
         # Discovery is best effort.  An unavailable transport must not become
         # an authoritative "no equipment exists" statement.
@@ -116,10 +214,298 @@ def discover_resource_manifests(*, execution_host_id: str) -> list[dict[str, Any
             adapter.disconnect()
 
 
-def build_adapter(resource_id: str) -> GenericROS2Adapter:
-    """Python entry point used by hosts that load adapters in-process."""
+# Seconds between attempts to reach a robot whose transport is not up. Nothing
+# announces a remote rosbridge starting to listen, so this back-off is the
+# fallback that notices it. A robot that is reachable is followed on its own
+# messages and connection callbacks, and its absence is a deadline on its last
+# message, not a sweep.
+_REACH_BACKOFF_SECONDS = (1.0, 2.0, 5.0, 10.0)
 
-    return build(resource_id)
+
+class PresenceWatch:
+    """Tells the execution host the moment its robot appears, changes or goes.
+
+    It holds one light connection (odometry and Nav2 lifecycle events only;
+    it never commands the robot) and calls ``notify(reason)`` when:
+
+    - the transport connects or reconnects (``robot_connected``), or drops
+      (``robot_disconnected``), or cannot be reached (``robot_unreachable``);
+    - the robot's graph changes: its first odometry, odometry after a silence,
+      a Nav2 lifecycle transition (``odometry_appeared``, ``lifecycle:...``);
+    - the robot falls silent for ``SILENT_SECONDS`` over a transport that is
+      still up (``robot_silent``): an rclpy node stays up when the robot
+      powers off. That is a deadline re-armed from the last reading.
+
+    The host answers each with a discovery pass, so a robot that comes up
+    after the host registered is published at once, not on a heartbeat.
+    """
+
+    def __init__(
+        self,
+        *,
+        resource_id: str,
+        notify: Callable[[str], None],
+        build_adapter: Callable[[str], GenericROS2Adapter] | None = None,
+        wait: Callable[[threading.Event, float | None], bool] | None = None,
+        start: bool = True,
+    ) -> None:
+        self.resource_id = resource_id
+        self._notify_host = notify
+        self._build = build_adapter or (lambda rid: build(rid, presence_only=True))
+        self._wait = wait or (lambda event, timeout: event.wait(timeout))
+        self._stop = threading.Event()
+        # Set by a drop, a reading after silence, or close(): re-judge now.
+        self._changed = threading.Event()
+        self._adapter: GenericROS2Adapter | None = None
+        self._unreachable = False
+        self._silent = False
+        self._thread: threading.Thread | None = None
+        if start:
+            self._thread = threading.Thread(
+                target=self.run, name="ros2-presence-watch", daemon=True
+            )
+            self._thread.start()
+
+    @property
+    def adapter(self) -> GenericROS2Adapter | None:
+        adapter = self._adapter
+        return adapter if adapter is not None and adapter.connected else None
+
+    @property
+    def held_adapter(self) -> GenericROS2Adapter | None:
+        """The watch's adapter, connected or not (its link can be refreshed)."""
+        return self._adapter
+
+    def unreachable_resource_ids(self) -> set[str]:
+        """This robot, when the watch has positive evidence it is gone."""
+        return {self.resource_id} if (self._unreachable or self._silent) else set()
+
+    def close(self) -> None:
+        self._stop.set()
+        self._changed.set()
+
+    def _notify(self, reason: str) -> None:
+        # The host's discovery is advisory: its failure never stops the watch.
+        with contextlib.suppress(Exception):
+            self._notify_host(reason)
+
+    def _on_connection(self, connected: bool) -> None:
+        if connected:
+            return
+        self._changed.set()
+        if not self._stop.is_set():
+            self._notify("robot_disconnected")
+
+    def _on_transport(self, status: Mapping[str, Any]) -> None:
+        state = str(status.get("state") or "")
+        if state == ssh_transport.STATE_CONNECTED:
+            # The forward is back: try the robot now, not at the end of a back-off.
+            self._changed.set()
+        self._notify(f"transport_{state}")
+
+    def _on_graph(self, reason: str) -> None:
+        if reason.endswith(("_appeared", "_returned")):
+            # A reading arrived: the silence deadline is re-judged at once.
+            self._changed.set()
+        self._notify(reason)
+
+    def run(self) -> None:
+        attempt = 0
+        try:
+            while not self._stop.is_set():
+                if self.adapter is None:
+                    if self._reach():
+                        attempt = 0
+                        continue
+                    delay = _REACH_BACKOFF_SECONDS[min(attempt, len(_REACH_BACKOFF_SECONDS) - 1)]
+                    attempt += 1
+                    # Woken early by close() or by the forward coming back.
+                    if self._wait(self._changed, delay):
+                        self._changed.clear()
+                    if self._stop.is_set():
+                        return
+                    continue
+                self._follow()
+        finally:
+            adapter, self._adapter = self._adapter, None
+            if adapter is not None:
+                tunnel = getattr(adapter, "transport", None)
+                if tunnel is not None:
+                    tunnel.remove_listener(self._on_transport)
+                adapter.disconnect()
+
+    def _reach(self) -> bool:
+        try:
+            if self._adapter is None:
+                adapter = self._build(self.resource_id)
+                adapter.add_connection_listener(self._on_connection)
+                adapter.add_graph_listener(self._on_graph)
+                tunnel = getattr(adapter, "transport", None)
+                if tunnel is not None:
+                    tunnel.add_listener(self._on_transport)
+                self._adapter = adapter
+            if not self._adapter.connected:
+                # The ROS link only: the watch never refreshes the forward.
+                self._adapter.reopen()
+        except Exception:  # noqa: BLE001 - the robot side is not up
+            if not self._unreachable:
+                self._unreachable = True
+                self._notify("robot_unreachable")
+            return False
+        if self._stop.is_set() or self.adapter is None:
+            return False
+        self._unreachable = False
+        self._notify("robot_connected")
+        return True
+
+    def _follow(self) -> None:
+        """Wait on the connection until it drops, or the robot goes quiet."""
+        self._changed.clear()
+        adapter = self.adapter
+        if adapter is None:
+            return
+        silent = adapter.silent_seconds()
+        if silent is None:
+            return
+        if silent >= SILENT_SECONDS:
+            if not self._silent:
+                self._silent = True
+                self._notify("robot_silent")
+            # Nothing to time now: the next reading, a drop or close wakes it.
+            self._wait(self._changed, None)
+            return
+        self._silent = False
+        self._wait(self._changed, SILENT_SECONDS - silent)
+
+
+_watches: dict[str, PresenceWatch] = {}
+_watches_lock = threading.Lock()
+
+
+def _watched_adapter(resource_id: str) -> GenericROS2Adapter | None:
+    with _watches_lock:
+        watch = _watches.get(resource_id)
+    return watch.adapter if watch is not None else None
+
+
+def transport_status() -> dict[str, Any] | None:
+    """The managed SSH forward's state for the host's status surface.
+
+    ``{transport: "ssh", state: connected|reconnecting|failed|stopped, since,
+    attempts, last_error, error_code, host, resolved_address, forwards,
+    accepting_calls}``; None when no SSH transport is configured. A refused
+    configuration is ``failed`` with ``error_code: config_refused``.
+    """
+    try:
+        config = ssh_transport.config_from_env()
+    except ssh_transport.TransportConfigError as error:
+        return _idle_transport("failed", str(error), "config_refused")
+    if config is None:
+        return None
+    tunnel = ssh_transport.current(config)
+    if tunnel is None:
+        return _idle_transport("stopped", "", "", host=config.host)
+    return tunnel.status()
+
+
+def _idle_transport(state: str, error: str, code: str, *, host: str = "") -> dict[str, Any]:
+    return {
+        "transport": "ssh",
+        "state": state,
+        "since": None,
+        "attempts": 0,
+        "last_error": error,
+        "error_code": code,
+        "host": host,
+        "resolved_address": "",
+        "forwards": {},
+        "accepting_calls": False,
+    }
+
+
+def reconnect_resource(resource_id: str) -> dict[str, Any]:
+    """Operator refresh of this computer's link to ``resource_id``.
+
+    The Python entry point for a host route (Mission Station "reconnect").
+    Uses the presence watch's adapter when there is one, else a presence-only
+    adapter for the duration of the call, and returns
+    ``GenericROS2Adapter.reconnect()``'s status. Refuses (``ResourceNotServed``)
+    any id but the configured one.
+    """
+    served = _require_served(resource_id)
+    with _watches_lock:
+        watch = _watches.get(served)
+    adapter = watch.held_adapter if watch is not None else None
+    if adapter is not None:
+        return adapter.reconnect()
+    try:
+        adapter = build(served, presence_only=True)
+    except Exception as error:  # noqa: BLE001 - reported as a status, never raised
+        status = transport_status() or _idle_transport("failed", "", "", host="")
+        return {
+            **status,
+            "transport": status.get("transport") or "direct",
+            "state": "failed",
+            "last_error": f"{type(error).__name__}: {error}"[:300],
+            "refused": False,
+            "rosbridge_ok": False,
+            "topics_seen": None,
+            "served_identity": None,
+            "safe_stop": None,
+        }
+    try:
+        return adapter.reconnect()
+    finally:
+        adapter.disconnect()
+
+
+def watch_resources(
+    *, execution_host_id: str, notify: Callable[[str], None]
+) -> PresenceWatch | None:
+    """Start following this host's robot; ``notify(reason)`` on every change.
+
+    Returns the watch (``close()``, ``unreachable_resource_ids()``), or None
+    when discovery is off for this host. Hosts find it as the ``watch``
+    attribute of ``discover_resource_manifests``, so a host that predates it
+    keeps discovering on its own triggers.
+    """
+    _ = execution_host_id
+    if not _discovery_enabled():
+        return None
+    transport = configured_transport()
+    if transport == "rclpy" and importlib.util.find_spec("rclpy") is None:
+        # No ROS 2 on this computer: nothing to watch, and retrying the
+        # import on a back-off would only ever fail.
+        return None
+    resource_id, _name = _resource_identity()
+    with _watches_lock:
+        current = _watches.get(resource_id)
+        if current is not None and not current._stop.is_set():
+            # The host re-armed its discovery: changes now go to the new hook.
+            current._notify_host = notify
+            return current
+        watch = PresenceWatch(resource_id=resource_id, notify=notify)
+        _watches[resource_id] = watch
+        return watch
+
+
+discover_resource_manifests.watch = watch_resources  # type: ignore[attr-defined]
+# A host that predates these attributes ignores them; one that reads them can
+# join resources to the pack without asking for a manifest field at all.
+discover_resource_manifests.module_pack = MODULE_PACK  # type: ignore[attr-defined]
+discover_resource_manifests.manifest_extensions = MANIFEST_EXTENSIONS  # type: ignore[attr-defined]
+# The link's state and the operator refresh, for a host's status surface.
+discover_resource_manifests.transport_status = transport_status  # type: ignore[attr-defined]
+discover_resource_manifests.reconnect = reconnect_resource  # type: ignore[attr-defined]
+
+
+def build_adapter(resource_id: str) -> GenericROS2Adapter:
+    """Python entry point used by hosts that load adapters in-process.
+
+    Refuses (``ResourceNotServed``) any id but the one configured here.
+    """
+
+    return build(_require_served(resource_id))
 
 
 def _response(request_id: Any, *, ok: bool, result: Any = None, error: str = "") -> dict[str, Any]:
@@ -142,6 +528,14 @@ def _serve(adapter_id: str, resource_id: str) -> int:
                 _response(None, ok=False, error=f"unsupported adapter: {adapter_id}"),
                 separators=(",", ":"),
             ),
+            flush=True,
+        )
+        return 2
+    try:
+        resource_id = _require_served(resource_id)
+    except ResourceNotServed as error:
+        print(
+            json.dumps(_response(None, ok=False, error=str(error)), separators=(",", ":")),
             flush=True,
         )
         return 2
@@ -201,8 +595,18 @@ def _serve(adapter_id: str, resource_id: str) -> int:
                             else None
                         ),
                     )
+                elif op == "served_identity":
+                    value = adapter.served_identity()
+                elif op == "transport_status":
+                    value = adapter.transport_status()
+                elif op == "reconnect":
+                    value = adapter.reconnect()
                 elif op == "describe":
-                    value = _manifest(adapter, resource_name=_resource_identity()[1])
+                    value = _manifest(
+                        adapter,
+                        resource_name=_resource_identity()[1],
+                        extensions=request.get("manifest_extensions"),
+                    )
                 elif op == "execution_count":
                     value = {
                         "count": adapter.execution_count(str(request.get("call_id") or ""))
@@ -241,6 +645,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--execution-host-id", default="")
     parser.add_argument("--adapter-id", default=ADAPTER_ID)
     parser.add_argument("--resource-id", default="")
+    parser.add_argument(
+        "--manifest-extension",
+        action="append",
+        default=[],
+        choices=MANIFEST_EXTENSIONS,
+        help="optional manifest field the host accepts (repeatable)",
+    )
     args = parser.parse_args(argv)
 
     if args.discover:
@@ -249,7 +660,8 @@ def main(argv: list[str] | None = None) -> int:
                 {
                     "protocol": PROVIDER_PROTOCOL,
                     "resources": discover_resource_manifests(
-                        execution_host_id=args.execution_host_id
+                        execution_host_id=args.execution_host_id,
+                        manifest_extensions=args.manifest_extension,
                     ),
                 },
                 separators=(",", ":"),

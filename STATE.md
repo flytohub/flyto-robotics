@@ -8,6 +8,35 @@ without hosted Cloud. It does not provide autonomous motion authority or
 prove end-to-end robot navigation. Robotics remains independent from the
 separate cybersecurity Engine.
 
+## Inflation escape before navigation (2026-10-04, 0.4.0)
+
+`motion.navigate` backs out of an obstacle's inflation (back-off plus one
+lateral waypoint, then the original goal) or refuses with `no_escape_room`.
+Verified with ray-cast scans and fake backends only; costmap parameter names
+and values were read from the twin's live Nav2. Not yet run on the twin or the
+robot: whether Nav2 then reaches the original target is unproven.
+
+## Named places on the execution host (2026-10-04, 0.3.0)
+
+`places.list` / `places.mark` and `motion.navigate(place=...)` work against a
+host-side places file (`flyto_robotics/places.py`). Verified with fakes and
+temporary files only: no twin, no physical robot. Hosts (Cloud, Desktop) do
+not yet judge a call by place against `resolved_arguments`, so its arrival
+evidence is unprovable there until they do.
+
+## Host-side driver layer, module pack join (2026-10-04)
+
+`flyto-robotics` is the host-side driver layer next to the equipment (execution
+host or companion computer); it drives the robot's native ROS 2 / Nav2 stack,
+is never firmware, and installs nothing on the robot. Capabilities are
+declared to Flyto2 by the `flyto-modules-robotics` pack, not by this
+repository. The `ros2.generic` discoverer adds `"module_pack": "robotics"` to
+its manifest only for a host that asks for the `module_pack` extension. See
+`DECISIONS.md` (2026-10-04).
+
+The 0.143 m clearance reading recorded below was superseded on 2026-10-02:
+the first accepted physical motion measured 0.539 m clearance with the 0.35 m
+floor unchanged (`handoffs/2026-10-02-first-physical-motion.md`).
 ## Adapter provider ownership closure (2026-09-22)
 
 Physical/vendor adapter implementation now lives outside Flyto2 Cloud. `flyto-robotics` exposes Generic ROS2/rosbridge plus extracted OpenRMF and vision-stream providers through host-neutral plugin/process boundaries. The selected AI Space execution host owns provider lifecycle and assignment-scoped authority; Flyto2 Runtime is optional. Discovery is evidence only and grants no motion authority. The latest read-only TurtleBot3 preflight measured 0.143 m minimum LiDAR clearance, so the unchanged 0.35 m motion floor correctly prevented a new positive-movement acceptance.

@@ -103,3 +103,74 @@ def describe(clearance: float | None) -> str:
     if clearance is UNREADABLE:
         return "unreadable (no usable lidar return)"
     return f"{clearance:.2f} m"
+
+
+#: Beams a reported sweep is reduced to. Enough to draw the room around the
+#: robot; small enough to travel inside a job's evidence.
+SWEEP_BEAMS = 180
+
+
+def sweep(
+    ranges: Sequence[float],
+    *,
+    angle_min: float,
+    angle_increment: float,
+    beams: int = SWEEP_BEAMS,
+    range_min: float = MIN_VALID_RANGE,
+    range_max: float = MAX_VALID_RANGE,
+) -> dict | None:
+    """One sweep reduced to at most ``beams`` bins, for a person to look at.
+
+    Each bin keeps its *nearest* valid return, so reducing the sweep can hide
+    open space but never an obstacle. A bin with no valid return is ``None``:
+    not seen, which is not the same as clear. Returns ``None`` when the sweep
+    has no usable beam or no usable geometry.
+    """
+    count = len(ranges)
+    if count == 0 or beams < 1:
+        return None
+    try:
+        start = float(angle_min)
+        step = float(angle_increment)
+    except (TypeError, ValueError):
+        return None
+    if not (math.isfinite(start) and math.isfinite(step)) or step == 0.0:
+        return None
+    # The scan's own band, as the clearance check reads it, inside the trusted
+    # one: the picture never shows a return the clearance figure ignored.
+    try:
+        low = max(MIN_VALID_RANGE, float(range_min))
+        high = min(MAX_VALID_RANGE, float(range_max))
+    except (TypeError, ValueError):
+        low, high = MIN_VALID_RANGE, MAX_VALID_RANGE
+    group = max(1, math.ceil(count / beams))
+    reduced: list[float | None] = []
+    for first in range(0, count, group):
+        valid = []
+        for raw in ranges[first:first + group]:
+            try:
+                beam = float(raw)
+            except (TypeError, ValueError):
+                continue
+            if not math.isnan(beam) and low <= beam <= high:
+                valid.append(beam)
+        reduced.append(round(min(valid), 3) if valid else None)
+    increment = round(step * group, 6)
+    centre = round(start + step * (group - 1) / 2, 6)
+    # Anything the observation contract would refuse is dropped here: the
+    # sweep is for a person to look at and must never fail the observation
+    # the motion check reads.
+    if (
+        all(item is None for item in reduced)
+        or increment == 0
+        or not -math.pi <= increment <= math.pi
+        or not -2 * math.pi <= centre <= 2 * math.pi
+        or len(reduced) > 720
+    ):
+        return None
+    return {
+        # The centre of the first bin, and the spacing between bin centres.
+        "angle_min_rad": centre,
+        "angle_increment_rad": increment,
+        "ranges_m": reduced,
+    }

@@ -40,6 +40,7 @@ reaches a refusal here instead of a task request the dispatcher rejects with a
 message no operator can act on.
 
     motion.navigate    -> patrol    one waypoint, no payload
+    motion.navigate_to_waypoint     the same, as a fleet resource declares it
     transport.load     -> delivery  pickup half of an RMF delivery
     transport.unload   -> delivery  dropoff half
     motion.dock        -> patrol    to the charger's waypoint
@@ -61,20 +62,37 @@ from __future__ import annotations
 
 import json
 import os
+import time
+import urllib.parse
 import urllib.request
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from datetime import datetime, timezone
 from typing import Any
 
 from . import adapter_contract as decl
 from .adapter_contract import (
     OUTCOME_COMPLETED,
+    OUTCOME_FAILED,
     OUTCOME_REFUSED,
+    OUTCOME_TIMEOUT,
     CallRequest,
     CallResult,
 )
 
 API_URL_ENV = "FLYTO_RMF_API_URL"
 DEFAULT_API_URL = "http://127.0.0.1:8000"
+DEPLOYMENT_MODE_ENV = "FLYTO_RMF_DEPLOYMENT_MODE"
+
+# The ``flyto2.external_adapters`` entry-point name of this adapter, and the
+# ``flyto.modules`` entry-point name of the flyto-modules-robotics pack whose
+# steps drive it. A host joins a discovered fleet to that pack by this name.
+ADAPTER_ID = "open_rmf.fleet"
+MODULE_PACK = "fleet"
+# Manifest fields emitted only when a host names them (see adapter_provider).
+MANIFEST_EXTENSIONS: tuple[str, ...] = ("module_pack",)
+FLEET_PREFIX = "fleet:"
+# How often a dispatched task's state is read while a call waits on it.
+POLL_SECONDS = 1.0
 
 MAX_RESPONSE_BYTES = 512 * 1024
 MAX_FLEETS = 32
@@ -84,10 +102,20 @@ MAX_FLEETS = 32
 # request the dispatcher rejects with a message no operator can act on.
 CAPABILITY_TO_CATEGORY: Mapping[str, str] = {
     "motion.navigate": "patrol",
+    "motion.navigate_to_waypoint": "patrol",
     "motion.dock": "patrol",
     "transport.load": "delivery",
     "transport.unload": "delivery",
 }
+
+# A fleet resource travels to a named waypoint, which is not the contract of a
+# single robot's ``motion.navigate`` (a map coordinate). Two contracts under
+# one capability id make a contract host treat it as ambiguous and fail
+# closed, so the fleet resource declares its own id; ``motion.navigate`` is
+# still accepted, and still declared by the unbound conformance build.
+WAYPOINT_NAVIGATE = "motion.navigate_to_waypoint"
+_UNBOUND_ONLY = frozenset({"motion.navigate"})
+_FLEET_ONLY = frozenset({WAYPOINT_NAVIGATE})
 
 # Deliberately unmapped, and why. Kept as data so the refusal can say which of
 # the two reasons applies instead of answering "unknown" to both.
@@ -134,11 +162,40 @@ def _request(path: str, *, payload: Any = None, opener=urllib.request.urlopen) -
 class OpenRmfAdapter:
     """The conformance methods over an Open-RMF dispatcher."""
 
-    def __init__(self, *, call=None, requester: str = "flyto2"):
+    def __init__(
+        self,
+        *,
+        call=None,
+        requester: str = "flyto2",
+        fleet: str | None = None,
+        wait_for_completion: bool = False,
+        poll_seconds: float = POLL_SECONDS,
+        sleep: Callable[[float], None] = time.sleep,
+        clock: Callable[[], float] = time.monotonic,
+    ):
         self._call = call or _request
         self._requester = requester
         self.unmapped: list[tuple[str, str]] = []
         self._dispatched: dict[str, dict[str, Any]] = {}
+        # Set when the adapter commands one fleet (the ``fleet:<name>``
+        # resource a host built it for). The request then names that fleet,
+        # never a robot: the fleet's own dispatcher still picks the machine.
+        self.fleet = fleet
+        self.resource_id = f"{FLEET_PREFIX}{fleet}" if fleet else ""
+        # A capability host reads a call as done when it returns, so the
+        # entry-point adapter waits for Open-RMF to finish the task. The
+        # conformance build returns once the task is accepted, as it always has.
+        self._wait = bool(wait_for_completion)
+        self._poll_seconds = max(0.05, float(poll_seconds))
+        self._sleep = sleep
+        self._clock = clock
+        self._results: dict[str, CallResult] = {}
+
+    @property
+    def deployment_mode(self) -> str:
+        """``simulation`` for an Open-RMF demo world; anything else is physical."""
+        mode = (os.environ.get(DEPLOYMENT_MODE_ENV) or "physical").strip().lower()
+        return "simulation" if mode == "simulation" else "physical"
 
     # -- describe ------------------------------------------------------------
 
@@ -165,9 +222,14 @@ class OpenRmfAdapter:
             if not name:
                 self.unmapped.append(("", "a fleet with no name"))
                 continue
+            if self.fleet is not None and name != self.fleet:
+                continue
+            hidden = _UNBOUND_ONLY if self.fleet is not None else _FLEET_ONLY
             for category in self._categories(fleet):
                 for capability_id, mapped in CAPABILITY_TO_CATEGORY.items():
                     if mapped != category or (name, capability_id) in seen:
+                        continue
+                    if capability_id in hidden:
                         continue
                     seen.add((name, capability_id))
                     try:
@@ -227,6 +289,21 @@ class OpenRmfAdapter:
                 ),
             )
 
+        kept = self._results.get(request.call_id)
+        if kept is not None:
+            # The same call again: its result, never a second task.
+            return kept
+        if request.call_id in self._dispatched:
+            # Dispatched before and still running (the last wait timed out):
+            # wait on that task rather than dispatching another one.
+            if not self._dispatched[request.call_id].get("rmf_task_id"):
+                return CallResult(
+                    request.call_id,
+                    OUTCOME_FAILED,
+                    detail=NO_TASK_ID,
+                )
+            return self._settle(request, self._dispatched[request.call_id])
+
         description = self._description(category, request)
         if description is None:
             return CallResult(
@@ -234,24 +311,28 @@ class OpenRmfAdapter:
                 OUTCOME_REFUSED,
                 detail=(
                     f"{category} needs a named waypoint on the shared map and the "
-                    "call supplied none; RMF plans between places, not distances"
+                    "call supplied none it can use (text, at most "
+                    f"{MAX_WAYPOINT_LENGTH} characters, no control characters); "
+                    "RMF plans between places, not distances"
                 ),
             )
 
+        task_request: dict[str, Any] = {
+            "category": category,
+            "description": description,
+            "requester": self._requester,
+            # Left to RMF. Stamping a start time here would make
+            # this process's clock the fleet's schedule.
+            "unix_millis_earliest_start_time": 0,
+        }
+        if self.fleet:
+            # The commanded resource is the fleet. Its dispatcher still picks
+            # the robot; this only keeps the task inside the fleet asked for.
+            task_request["fleet_name"] = self.fleet
         try:
             answer = self._call(
                 "/tasks/dispatch_task",
-                payload={
-                    "type": "dispatch_task_request",
-                    "request": {
-                        "category": category,
-                        "description": description,
-                        "requester": self._requester,
-                        # Left to RMF. Stamping a start time here would make
-                        # this process's clock the fleet's schedule.
-                        "unix_millis_earliest_start_time": 0,
-                    },
-                },
+                payload={"type": "dispatch_task_request", "request": task_request},
             )
         except Exception as error:  # noqa: BLE001 - reported, never swallowed
             return CallResult(
@@ -269,24 +350,80 @@ class OpenRmfAdapter:
                 detail=f"the dispatcher refused the request: {errors or 'no state returned'}",
             )
 
-        booking = state.get("booking") or {}
-        assigned = state.get("assigned_to") or {}
-        rmf_id = str(booking.get("id") or "")
+        booking = state.get("booking") if isinstance(state.get("booking"), Mapping) else {}
+        rmf_id = str(booking.get("id") or "").strip()
         self._dispatched[request.call_id] = {"rmf_task_id": rmf_id}
-        return CallResult(
-            request.call_id,
-            OUTCOME_COMPLETED,
-            evidence={
-                "rmf_task_id": rmf_id,
-                "rmf_status": str(state.get("status") or ""),
-                # Who the dispatcher picked. Recorded as evidence of a decision
-                # made elsewhere — this is the answer to "why this robot", and
-                # the answer is "Open-RMF's bid said so", not "Flyto2 chose".
-                "assigned_fleet": str(assigned.get("group") or ""),
-                "assigned_robot": str(assigned.get("name") or ""),
-                "chosen_by": "open-rmf.dispatcher",
-            },
-        )
+        evidence = _task_evidence(rmf_id, state)
+        if not rmf_id:
+            # Accepted with no id: the task can be neither followed nor
+            # withdrawn, so it is never reported as done (cancel refuses it).
+            return CallResult(
+                request.call_id,
+                OUTCOME_FAILED,
+                evidence=evidence,
+                detail=NO_TASK_ID,
+            )
+        if not self._wait:
+            return CallResult(request.call_id, OUTCOME_COMPLETED, evidence=evidence)
+        return self._settle(request, {"rmf_task_id": rmf_id}, evidence)
+
+    def _settle(
+        self,
+        request: CallRequest,
+        record: Mapping[str, Any],
+        evidence: Mapping[str, Any] | None = None,
+    ) -> CallResult:
+        """Wait, up to the call's deadline, for Open-RMF to finish the task.
+
+        ``completed`` is RMF's word for a finished task; ``failed``,
+        ``canceled`` and ``killed`` end the call as failed. A task still
+        running at the deadline is a timeout, and the host's cancel then
+        withdraws it by the id RMF gave it.
+        """
+        rmf_id = str(record.get("rmf_task_id") or "")
+        latest = dict(evidence or {"rmf_task_id": rmf_id, "chosen_by": "open-rmf.dispatcher"})
+        deadline = self._clock() + max(0.0, float(request.deadline_seconds))
+        while True:
+            try:
+                answer = self._call(_state_path(rmf_id))
+            except Exception:  # noqa: BLE001 - a missed read is retried until the deadline
+                answer = None
+            if isinstance(answer, Mapping):
+                latest = {**latest, **_task_evidence(rmf_id, answer, previous=latest)}
+                status = latest["rmf_status"].lower()
+                if status in RMF_TERMINAL_SUCCESS:
+                    items = _arrival_items(request, latest)
+                    if items:
+                        latest["evidence_items"] = items
+                    return self._keep(
+                        CallResult(request.call_id, OUTCOME_COMPLETED, evidence=latest)
+                    )
+                if status in RMF_TERMINAL_FAILURE:
+                    return self._keep(
+                        CallResult(
+                            request.call_id,
+                            OUTCOME_FAILED,
+                            evidence=latest,
+                            detail=f"Open-RMF reports task {rmf_id} {status}",
+                        )
+                    )
+            if self._clock() >= deadline:
+                return CallResult(
+                    request.call_id,
+                    OUTCOME_TIMEOUT,
+                    evidence=latest,
+                    detail=(
+                        f"Open-RMF task {rmf_id} was still "
+                        f"{latest.get('rmf_status') or 'unreported'} at the deadline"
+                    ),
+                )
+            self._sleep(self._poll_seconds)
+
+    def _keep(self, result: CallResult) -> CallResult:
+        self._results[result.call_id] = result
+        while len(self._results) > 256:
+            self._results.pop(next(iter(self._results)))
+        return result
 
     @staticmethod
     def _description(category: str, request: CallRequest) -> dict[str, Any] | None:
@@ -297,7 +434,7 @@ class OpenRmfAdapter:
         inventing a waypoint would dispatch a robot somewhere nobody asked for.
         """
         arguments = dict(getattr(request, "arguments", None) or {})
-        waypoint = str(arguments.get("waypoint") or arguments.get("destination") or "")
+        waypoint = _waypoint(arguments)
         if not waypoint:
             return None
         if category == "patrol":
@@ -324,8 +461,16 @@ class OpenRmfAdapter:
                 OUTCOME_REFUSED,
                 detail="this adapter never dispatched that call",
             )
+        if not record.get("rmf_task_id"):
+            # Cancelling "" withdraws nothing; saying it did would tell the
+            # host the fleet task was stopped while it may still be running.
+            return CallResult(
+                call_id,
+                OUTCOME_REFUSED,
+                detail="the dispatcher gave that call no task id; nothing can be withdrawn",
+            )
         try:
-            self._call(
+            answer = self._call(
                 "/tasks/cancel_task",
                 payload={"type": "cancel_task_request", "task_id": record["rmf_task_id"]},
             )
@@ -334,6 +479,19 @@ class OpenRmfAdapter:
                 call_id,
                 OUTCOME_REFUSED,
                 detail=f"the dispatcher could not be reached: {type(error).__name__}",
+            )
+        if isinstance(answer, Mapping) and answer.get("success") is False:
+            # RMF answered and declined. For a fleet task this cancel is the
+            # only stop there is (safe_stop is refused), so it must not read
+            # as done.
+            return CallResult(
+                call_id,
+                OUTCOME_REFUSED,
+                evidence=dict(record),
+                detail=(
+                    "the dispatcher did not cancel the task: "
+                    f"{answer.get('errors') or 'no reason given'}"
+                )[:300],
             )
         return CallResult(call_id, OUTCOME_COMPLETED, evidence=dict(record))
 
@@ -373,14 +531,232 @@ class OpenRmfAdapter:
         record = self._dispatched.get(call_id)
         if record is None:
             return "unknown"
-        answer = self._call(f"/tasks/{record['rmf_task_id']}/state")
+        if not record.get("rmf_task_id"):
+            return "unknown"
+        answer = self._call(_state_path(record["rmf_task_id"]))
         if not isinstance(answer, Mapping):
             return "unknown"
         return str(answer.get("status") or "unknown")
 
 
+MAX_WAYPOINT_LENGTH = 128
+NO_TASK_ID = "the dispatcher returned no task id; the task cannot be followed or cancelled"
+
+
+def _waypoint(arguments: Mapping[str, Any]) -> str:
+    """The named waypoint a call asked for, or "" when it named none usable.
+
+    Checked here as well as by the pack, because a host may call the adapter
+    directly: a non-text value, an overlong name or a control character is
+    refused rather than turned into a place by ``str()``.
+    """
+    raw = arguments.get("waypoint")
+    if raw is None:
+        raw = arguments.get("destination")
+    if not isinstance(raw, str):
+        return ""
+    text = raw.strip()
+    if not text or len(text) > MAX_WAYPOINT_LENGTH:
+        return ""
+    if any(ord(character) < 32 or 127 <= ord(character) < 160 for character in text):
+        return ""
+    return text
+
+
+def _state_path(rmf_id: str) -> str:
+    """The state URL of one task, its id quoted as one path segment."""
+    return f"/tasks/{urllib.parse.quote(str(rmf_id), safe='')}/state"
+
+
+def _task_evidence(
+    rmf_id: str, state: Mapping[str, Any], *, previous: Mapping[str, Any] | None = None
+) -> dict[str, Any]:
+    """What RMF reported about a task, in RMF's words.
+
+    Who the dispatcher picked is recorded as evidence of a decision made
+    elsewhere: this is the answer to "why this robot", and the answer is
+    "Open-RMF's bid said so", not "Flyto2 chose".
+    """
+    assigned = state.get("assigned_to") if isinstance(state.get("assigned_to"), Mapping) else {}
+    earlier = previous or {}
+    return {
+        "rmf_task_id": rmf_id,
+        "rmf_status": str(state.get("status") or earlier.get("rmf_status") or ""),
+        "assigned_fleet": str(assigned.get("group") or earlier.get("assigned_fleet") or ""),
+        "assigned_robot": str(assigned.get("name") or earlier.get("assigned_robot") or ""),
+        "chosen_by": "open-rmf.dispatcher",
+    }
+
+
+# Capabilities whose finished task means a machine arrived somewhere.
+_ARRIVALS = frozenset({"motion.navigate", WAYPOINT_NAVIGATE, "motion.dock"})
+
+
+def _arrival_items(request: CallRequest, evidence: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """The arrival a finished fleet task proves, in the host's evidence shape.
+
+    Usable because RMF reported the task completed: that is the fleet's own
+    claim, recorded with who made it. A load or unload proves no arrival.
+    """
+    if request.capability_id not in _ARRIVALS:
+        return []
+    arguments = dict(getattr(request, "arguments", None) or {})
+    waypoint = str(arguments.get("waypoint") or arguments.get("destination") or "")
+    robot = evidence.get("assigned_robot") or "a robot"
+    fleet = evidence.get("assigned_fleet") or "its fleet"
+    return [
+        {
+            "kind": "robot.arrival",
+            "usable": True,
+            "detail": (
+                f"Open-RMF reports task {evidence.get('rmf_task_id')} completed: "
+                f"{robot} of {fleet} at {waypoint}"
+            )[:200],
+            "reason": {
+                "code": "rmf_task_completed",
+                "observed": {
+                    "rmf_task_id": evidence.get("rmf_task_id"),
+                    "rmf_status": evidence.get("rmf_status"),
+                    "assigned_fleet": evidence.get("assigned_fleet"),
+                    "assigned_robot": evidence.get("assigned_robot"),
+                    "waypoint": waypoint,
+                },
+                "required": {"rmf_status": "completed"},
+                "source": "open-rmf.task-state",
+            },
+        }
+    ]
+
+
 def build() -> OpenRmfAdapter:
     return OpenRmfAdapter()
+
+
+def fleet_name(resource_id: str) -> str:
+    """The fleet a ``fleet:<name>`` resource id names, or ValueError."""
+    text = str(resource_id or "").strip()
+    name = text[len(FLEET_PREFIX) :].strip() if text.startswith(FLEET_PREFIX) else ""
+    if not name or len(name) > 120:
+        raise ValueError(
+            f"an Open-RMF resource is a fleet, named {FLEET_PREFIX}<fleet name>; got {text!r}"
+        )
+    return name
+
+
+def build_adapter(resource_id: str) -> OpenRmfAdapter:
+    """The ``flyto2.external_adapters`` factory: one fleet, calls that finish.
+
+    A host builds it for the commanded resource, which is a fleet. Each call
+    returns once Open-RMF reports the task finished, failed, or still running
+    at the call's deadline.
+    """
+    return OpenRmfAdapter(fleet=fleet_name(resource_id), wait_for_completion=True)
+
+
+def _discovery_enabled() -> bool:
+    # Only an explicitly configured dispatcher is discovered: the default URL
+    # is for the conformance kit, not a claim that a fleet exists here.
+    return bool((os.environ.get(API_URL_ENV) or "").strip())
+
+
+def discover_fleet_manifests(
+    *,
+    execution_host_id: str,
+    manifest_extensions: Iterable[str] | None = None,
+    adapter: OpenRmfAdapter | None = None,
+) -> list[dict[str, Any]]:
+    """One resource manifest per fleet the configured dispatcher reports.
+
+    Discovery grants nothing: every capability arrives DISCOVERED, and the
+    resource is the fleet, never a robot. Best effort, like the ROS 2
+    discoverer: a dispatcher that cannot be reached is not a statement that
+    no fleet exists.
+    """
+    _ = execution_host_id
+    if adapter is None and not _discovery_enabled():
+        return []
+    # Bound to no fleet yet, but declaring what a fleet resource offers.
+    reader = adapter or OpenRmfAdapter(fleet=None)
+    reader_hides = _UNBOUND_ONLY
+    try:
+        declarations = tuple(reader.describe())
+    except Exception:  # noqa: BLE001 - see docstring
+        return []
+    requested = (
+        frozenset()
+        if manifest_extensions is None or isinstance(manifest_extensions, (str, bytes))
+        else frozenset(str(item) for item in manifest_extensions)
+    ) & frozenset(MANIFEST_EXTENSIONS)
+    by_fleet: dict[str, list[decl.CapabilityDeclaration]] = {}
+    for item in declarations:
+        if item.capability_id in reader_hides:
+            # A fleet resource offers the waypoint navigation, not a robot's.
+            item = decl.declare(
+                capability_id=WAYPOINT_NAVIGATE,
+                resource_id=item.resource_id,
+                executor_kind=item.executor_kind,
+                source=item.source,
+                runtime_name=item.runtime_name,
+            )
+        by_fleet.setdefault(item.resource_id, []).append(item)
+    manifests = []
+    for resource_id, items in sorted(by_fleet.items()):
+        contracts = []
+        for item in sorted(items, key=lambda value: value.capability_id):
+            metadata = decl.capability_metadata(item.capability_id)
+            contracts.append(
+                {
+                    "capability_id": item.capability_id,
+                    "display_name": str(metadata.get("display_name") or item.capability_id),
+                    "description": str(metadata.get("description") or "")[:1000],
+                    "input_schema": _WAYPOINT_SCHEMA,
+                    "safety_class": item.safety_class,
+                    "required_permissions": list(item.required_permissions),
+                    # The fleet has no stop of its own (see safe_stop).
+                    "requires_safe_stop": False,
+                }
+            )
+        manifest: dict[str, Any] = {
+            "contract": "flyto.resource-manifest.v1",
+            "resource_id": resource_id,
+            "resource_type": "fleet",
+            "display_name": f"Open-RMF fleet {resource_id[len(FLEET_PREFIX):]}"[:200],
+            "revision": 1,
+            "adapter": {
+                "adapter_id": ADAPTER_ID,
+                "version": "1.0.0",
+                "provider": "Flyto2 Robotics",
+            },
+            "deployment_mode": "simulation" if reader.deployment_mode == "simulation" else "real",
+            "capability_ids": [item["capability_id"] for item in contracts],
+            "capability_contracts": contracts,
+            "settings": [],
+            "telemetry_channels": [],
+            "observed_at": datetime.now(timezone.utc).isoformat(),
+            "contract_hash": "",
+        }
+        if "module_pack" in requested:
+            manifest["module_pack"] = MODULE_PACK
+        manifests.append(manifest)
+    return manifests
+
+
+discover_fleet_manifests.manifest_extensions = MANIFEST_EXTENSIONS  # type: ignore[attr-defined]
+
+# RMF plans between named places: every fleet capability takes one waypoint.
+_WAYPOINT_SCHEMA: Mapping[str, Any] = {
+    "type": "object",
+    "properties": {
+        "waypoint": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "description": "A named waypoint on the fleet's shared map",
+        }
+    },
+    "required": ["waypoint"],
+    "additionalProperties": False,
+}
 
 
 if __name__ == "__main__":

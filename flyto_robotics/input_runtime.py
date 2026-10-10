@@ -164,7 +164,7 @@ class ValidatedWorkflowCatalog:
             plan = parse_planner_response(payload, registry=registry)
             registered.append(
                 RegisteredWorkflow(
-                    robot_id=plan.robot_id,
+                    robot_id=plan.resource_id,
                     workflow=compile_workflow(plan),
                 )
             )
