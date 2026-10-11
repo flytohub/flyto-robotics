@@ -83,13 +83,18 @@ differences beyond those listed in the next section.
 | `/odom`, `/imu`, `/joint_states`, `/battery_state`, `/sensor_state`, `/magnetic_field` | ~20 Hz, zero covariances, `imu_link` / `base_link` frames | same (18–20 Hz, see below) |
 | `/scan` (LDS-03, coin_d4) | BEST_EFFORT, ~10 Hz, 399–401 readings over 0..2π, `angle_increment = 2π/(n+1)`, range 0.1–100 m, no-return = `0.0` (~15 per turn, intensity 66–97), ~0.9 NaN per turn, valid intensity 219–247, static noise median 3.4 mm / p90 17 mm | emulated to the same figures |
 | Camera | `/camera/image_raw` 640×480 `yuv422_yuy2` 30 Hz, `camera_info` all-zero K/R/P (uncalibrated), `compressed` transport | same |
-| Downstream | `laser-scan-stabilizer` → `/scan_stable` (400 bins), SLAM Toolbox with `/etc/ros/slam_toolbox.yaml`, Nav2 with `turtlebot3_navigation2` `burger.yaml`, rosbridge on 9090 | same files and arguments, plus `use_sim_time` |
+| Downstream | `laser-scan-stabilizer` → `/scan_stable` (400 bins), SLAM Toolbox with `/etc/ros/slam_toolbox.yaml`, Nav2 with `/etc/ros/nav2-burger-flyto.yaml` (`burger.yaml` plus a rolling global costmap, see below), rosbridge on 9090 | same files and arguments, plus `use_sim_time`, except the stock `burger.yaml` global costmap |
 
 ## Different from the robot
 
 Interface:
 
 - **`/clock`** exists only on the twin (simulation time; the adapter's marker).
+- **Global costmap.** Since 2026-10-08 the robot's Nav2 file
+  (`deploy/native_ros2/nav2-burger-flyto.yaml`) has a rolling 6 m x 6 m global
+  costmap with no static layer and `track_unknown_space: false`; the twin
+  still uses the stock `burger.yaml` global costmap (static layer from the
+  SLAM map). Navigation plans can differ between them for that reason.
 - **Camera transports `theora` and `zstd`** are advertised but publish nothing.
 - **nav2_bringup** is 1.3.13 in the twin (1.3.12 on the robot): the apt
   repository serves only the newest build.
