@@ -48,6 +48,20 @@ def adapter(tmp_path: Path, capabilities=None) -> GenericROS2Adapter:
         resource_id="standard-turtlebot3",
         places_store=store(tmp_path),
     )
+    # Navigation judges its destination on a LiDAR sweep from a map pose
+    # (path_clearance.judge_destination): an open room, walls 5 m away.
+    device.backend.observation_payload["range"] = {
+        "minimum_range_m": 5.0,
+        "sample_count": 360,
+        "sweep": {
+            "angle_min_rad": 0.0,
+            "angle_increment_rad": math.tau / 360,
+            "ranges_m": [5.0] * 360,
+        },
+    }
+    device.backend.observation_payload["map_pose"] = {
+        "frame": "map", "x": 0.0, "y": 0.0, "yaw": 0.0,
+    }
     device.describe()
     return device
 
