@@ -166,7 +166,16 @@ def _motion_kind(capability_id: str) -> str | None:
 # (braking.decide_governance): lowered by a preempting goal as the room shrinks,
 # on a server that takes one, or else planned before sending together with a
 # distance that ends the drive where it can still stop at the floor. Turns and
-# planned paths have no single direction and stay with Nav2.
+# planned paths have no single direction; a navigation leg (and an inflation
+# escape's back-off) is watched by the same guard as a floor guard instead
+# (GUARD_KIND_LEG): a return inside the floor in any direction, or the room the
+# way the base is moving within its stopping distance, stops the leg
+# (braking.leg_floor_check). Nav2's collision monitor only slowed the real robot
+# to a person's shins on 2026-10-09 (run c6d8d79d: 0.135 m against 0.35 m).
+
+#: How a guarded motion is judged on each scan.
+GUARD_KIND_STRAIGHT = "straight_drive"
+GUARD_KIND_LEG = "navigation_leg"
 
 #: Direction of travel of each straight drive, from the robot's heading.
 STRAIGHT_MOTIONS: Mapping[str, float] = {
@@ -282,6 +291,9 @@ class _BrakingGuard:
     # How the drive ended when the guard did not stop it: at the stop point
     # planned before sending (GUARD_END_PLANNED_STOP), short of the request.
     ended: str | None = None
+    kind: str = GUARD_KIND_STRAIGHT
+    # A navigation leg's nearest return over the whole leg, as the guard saw it.
+    minimum_range_m: float | None = None
 
     @property
     def resends(self) -> bool:
@@ -289,6 +301,8 @@ class _BrakingGuard:
         return self.governance is not None and self.governance.resends
 
     def record(self, rest_pose: Mapping[str, Any] | None) -> dict[str, Any]:
+        if self.kind == GUARD_KIND_LEG:
+            return self._leg_record(rest_pose)
         out: dict[str, Any] = {
             "profile": self.profile.to_dict(),
             "requested_speed_mps": round(self.requested_speed_mps, 4),
@@ -320,6 +334,28 @@ class _BrakingGuard:
             if self.trip_pose is not None and rest_pose is not None:
                 # What the robot actually covered after the guard acted:
                 # the number that calibrates latency and deceleration.
+                trip["measured_stop_distance_m"] = round(
+                    math.hypot(
+                        float(rest_pose["x"]) - float(self.trip_pose["x"]),
+                        float(rest_pose["y"]) - float(self.trip_pose["y"]),
+                    ),
+                    4,
+                )
+            out["trip"] = trip
+        return out
+
+    def _leg_record(self, rest_pose: Mapping[str, Any] | None) -> dict[str, Any]:
+        out: dict[str, Any] = {
+            "kind": self.kind,
+            "profile": self.profile.to_dict(),
+            "minimum_range_m": (
+                None if self.minimum_range_m is None else round(self.minimum_range_m, 4)
+            ),
+            "tripped": self.tripped,
+        }
+        if self.trip is not None:
+            trip = dict(self.trip)
+            if self.trip_pose is not None and rest_pose is not None:
                 trip["measured_stop_distance_m"] = round(
                     math.hypot(
                         float(rest_pose["x"]) - float(self.trip_pose["x"]),
@@ -948,6 +984,45 @@ class _ObservationState:
             guard.last_slowdown_at = time.monotonic()
             _remember(self._guards, call_id, guard)
 
+    def arm_floor_guard(
+        self, call_id: str, capability_id: str, *, profile: braking.BrakingProfile
+    ) -> None:
+        """Watch the navigation leg ``call_id`` against the floor from now on.
+
+        Stopped, never slowed: the leg's goal is cancelled and the base sent
+        zero once a scan shows a return inside the floor or the room the way
+        it moves within its stopping distance (``braking.leg_floor_check``).
+        """
+        with self._condition:
+            if call_id in self._guards:
+                return  # a resumed call keeps the guard it started with
+            guard = _BrakingGuard(
+                capability_id=capability_id,
+                profile=profile,
+                direction_rad=0.0,
+                speed_mps=0.0,
+                requested_speed_mps=0.0,
+                distance_m=0.0,
+                start_room_m=None,
+                start_pose=dict(self._pose) if self._pose is not None else None,
+                kind=GUARD_KIND_LEG,
+            )
+            _remember(self._guards, call_id, guard)
+
+    def _check_leg_guard(self, guard: _BrakingGuard) -> None:
+        """Called under the condition after each scan: judge one navigation leg."""
+        linear = self._velocity[0] if self._velocity is not None else 0.0
+        check = braking.leg_floor_check(self._range_sweep, guard.profile, linear)
+        if check is None:
+            self._trip_guard(guard, motion_outcome.GUARD_TRIP_BLIND, {
+                "detail": "the LiDAR sweep could not be read",
+            })
+            return
+        if guard.minimum_range_m is None or check.nearest_m < guard.minimum_range_m:
+            guard.minimum_range_m = check.nearest_m
+        if check.breached:
+            self._trip_guard(guard, motion_outcome.GUARD_TRIP_FLOOR, check.to_dict())
+
     def _trip_guard(
         self, guard: _BrakingGuard, cause: str, detail: Mapping[str, Any]
     ) -> None:
@@ -966,6 +1041,9 @@ class _ObservationState:
         measured = abs(self._velocity[0]) if self._velocity is not None else 0.0
         for guard in self._guards.values():
             if guard.tripped is not None:
+                continue
+            if guard.kind == GUARD_KIND_LEG:
+                self._check_leg_guard(guard)
                 continue
             room = braking.room_to_floor(
                 self._range_sweep, guard.direction_rad, guard.profile.floor_m
@@ -1933,6 +2011,17 @@ class GenericROS2Adapter:
             # The same call again: its result, not a second motion's evidence.
             return kept
         escape: inflation_escape.EscapeDecision | None = None
+        if request.capability_id == "motion.navigate":
+            # The robot comes to rest at the destination: a return inside the
+            # floor there refuses the call before anything moves.
+            destination = self._destination_verdict("goal", arguments)
+            if not destination.admitted:
+                return CallResult(
+                    request.call_id,
+                    OUTCOME_REFUSED,
+                    evidence={**destination.evidence(), **_target_evidence(arguments, place)},
+                    detail=destination.describe(),
+                )
         if request.capability_id == "motion.navigate" and not supervised:
             escape = self._escape_decision(request.call_id)
             if escape is not None and escape.pinned and not escape.feasible:
@@ -1963,6 +2052,8 @@ class GenericROS2Adapter:
                 request.call_id, arguments, escape, float(request.deadline_seconds)
             )
         else:
+            if request.capability_id == "motion.navigate":
+                self._arm_leg_guard(request.call_id, request.capability_id)
             result = self.backend.invoke(
                 call_id=request.call_id,
                 capability_id=request.capability_id,
@@ -2162,6 +2253,30 @@ class GenericROS2Adapter:
         _remember(self._escape_starts, call_id, dict(observation["map_pose"]))
         return decision
 
+    def _arm_leg_guard(self, leg_id: str, capability_id: str) -> None:
+        """Have the backend hold the floor on every scan while this leg runs."""
+        arm = getattr(self.backend, "arm_floor_guard", None)
+        profile_of = getattr(self.backend, "braking_profile", None)
+        if callable(arm) and callable(profile_of):
+            arm(leg_id, capability_id, profile=profile_of())
+
+    def _destination_verdict(
+        self, leg: str, destination: Mapping[str, Any]
+    ) -> path_clearance.DestinationClearance:
+        """Whether a navigation leg's destination keeps the floor, from a fresh sweep."""
+        observation = self.backend.observation(
+            required=(REQUIRE_POSE, REQUIRE_RANGE, REQUIRE_MAP_TF)
+        )
+        reading = observation.get("range")
+        sweep = reading.get("sweep") if isinstance(reading, Mapping) else None
+        return path_clearance.judge_destination(
+            sweep,
+            observation.get("map_pose"),
+            (float(destination["x"]), float(destination["y"])),
+            floor_m=_clearance_floor(),
+            leg=leg,
+        )
+
     def _escape_leg(
         self,
         call_id: str,
@@ -2172,6 +2287,7 @@ class GenericROS2Adapter:
     ) -> CallResult:
         if call_id in self._cancelled_escapes:
             return CallResult(leg_id, OUTCOME_CANCELLED, detail="cancelled")
+        self._arm_leg_guard(leg_id, capability_id)
         self._escape_legs[call_id] = leg_id
         try:
             return self.backend.invoke(
@@ -2267,6 +2383,13 @@ class GenericROS2Adapter:
         # that only reads a single goal (TurtleBot3 Jazzy did: the planner got an
         # empty pose and the goal was refused in under a second), while
         # NavigateToPose is served by every Nav2.
+        # Each leg's destination is judged from the sweep where the robot now
+        # stands, before the leg is sent: the robot comes to rest there.
+        verdict = self._destination_verdict("waypoint", waypoint)
+        if not verdict.admitted:
+            return ended("waypoint", self._destination_refusal(
+                f"{call_id}:escape-waypoint", verdict
+            ))
         result = self._escape_leg(
             call_id, f"{call_id}:escape-waypoint", "motion.navigate", waypoint, deadline
         )
@@ -2275,6 +2398,10 @@ class GenericROS2Adapter:
         record("waypoint", result)
         if call_id in self._cancelled_escapes:
             return ended("goal", CallResult(call_id, OUTCOME_CANCELLED, detail="cancelled"))
+        verdict = self._destination_verdict("goal", target)
+        if not verdict.admitted:
+            return ended("goal", self._destination_refusal(call_id, verdict))
+        self._arm_leg_guard(call_id, "motion.navigate")
         result = self.backend.invoke(
             call_id=call_id,
             capability_id="motion.navigate",
@@ -2290,6 +2417,14 @@ class GenericROS2Adapter:
                 "navigation_escape": escape_record(),
             },
             detail=result.detail,
+        )
+
+    @staticmethod
+    def _destination_refusal(
+        leg_id: str, verdict: path_clearance.DestinationClearance
+    ) -> CallResult:
+        return CallResult(
+            leg_id, OUTCOME_REFUSED, evidence=verdict.evidence(), detail=verdict.describe()
         )
 
     # -- named places (host-side, never on the robot) ---------------------------

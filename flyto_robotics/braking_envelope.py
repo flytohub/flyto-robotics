@@ -324,6 +324,90 @@ def nearest_return(
     return beam, math.remainder(angle - reference_rad, math.tau)
 
 
+@dataclass(frozen=True)
+class LegFloorCheck:
+    """One scan's verdict on a navigation leg (Nav2 plans its path, not a line).
+
+    ``breached`` when a return in any direction is inside the floor, or when
+    the room the way the base is moving is within its stopping distance, so a
+    leg is stopped before the floor is crossed and never lets it go by.
+    """
+
+    breached: bool
+    cause: str | None
+    nearest_m: float
+    nearest_bearing_rad: float
+    speed_mps: float
+    stopping_distance_m: float
+    #: Room to the floor the way the base is moving; None when it is not moving.
+    travel_room_m: float | None
+    travel_direction_rad: float | None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "cause": self.cause,
+            "nearest_m": round(self.nearest_m, 4),
+            "nearest_bearing_rad": round(self.nearest_bearing_rad, 4),
+            "nearest_direction": direction_label(self.nearest_bearing_rad),
+            "speed_mps": round(self.speed_mps, 4),
+            "stopping_distance_m": round(self.stopping_distance_m, 4),
+            "travel_room_m": (
+                round(self.travel_room_m, 4)
+                if self.travel_room_m is not None and math.isfinite(self.travel_room_m)
+                else None
+            ),
+            "travel_direction_rad": (
+                None if self.travel_direction_rad is None else round(self.travel_direction_rad, 4)
+            ),
+        }
+
+
+#: Why a navigation leg's floor check stopped it.
+LEG_INSIDE_FLOOR = "inside_floor"  # a return in some direction is inside the floor
+LEG_NO_ROOM_TO_STOP = "no_room_to_stop"  # the way it moves, it can no longer stop at the floor
+#: Below this odometry speed the base is not moving anywhere in particular.
+LEG_MOVING_MPS = 0.01
+
+
+def leg_floor_check(
+    sweep: Mapping[str, Any] | None, profile: BrakingProfile, linear_mps: float
+) -> LegFloorCheck | None:
+    """Whether a navigation leg must stop on this scan; None when the sweep is unreadable.
+
+    The floor is the profile's (0.35 m by default) and is applied as it is,
+    in every direction, because a planned path can turn toward anything. The
+    way the base is moving (forward or backward, from odometry) it is also
+    held against the stopping distance, exactly as a straight drive's guard
+    is: a leg is stopped while it can still come to rest at the floor.
+    """
+    nearest = nearest_return(sweep)
+    if nearest is None:
+        return None
+    nearest_m, bearing = nearest
+    speed = abs(float(linear_mps))
+    stopping = profile.stopping_distance(speed)
+    direction: float | None = None
+    room: Room | None = None
+    if speed >= LEG_MOVING_MPS:
+        direction = 0.0 if linear_mps > 0 else math.pi
+        room = room_to_floor(sweep, direction, profile.floor_m)
+    cause: str | None = None
+    if nearest_m < profile.floor_m:
+        cause = LEG_INSIDE_FLOOR
+    elif room is not None and room.room_m <= stopping:
+        cause = LEG_NO_ROOM_TO_STOP
+    return LegFloorCheck(
+        breached=cause is not None,
+        cause=cause,
+        nearest_m=nearest_m,
+        nearest_bearing_rad=bearing,
+        speed_mps=speed,
+        stopping_distance_m=stopping,
+        travel_room_m=None if room is None else room.room_m,
+        travel_direction_rad=direction,
+    )
+
+
 def direction_label(bearing_rad: float) -> str:
     """Ahead, left, right or behind, for a bearing from the direction of travel."""
     degrees = math.degrees(math.remainder(bearing_rad, math.tau))
