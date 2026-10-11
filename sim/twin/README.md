@@ -142,3 +142,4 @@ robot.
 | `config/real/` | Captured from the robot: parameters, `robot_description`, interface fingerprint (the comparison baseline) |
 | `tools/fingerprint.py`, `tools/compare_fingerprint.py` | Capture an interface fingerprint (read-only) and compare |
 | `tools/bounded_advance.py` | One bounded advance through the adapter, robot or twin |
+| `tools/destination_probe.py` | Twin only: a navigation to a destination inside the 0.35 m floor of the nearest obstacle ahead must be refused (`destination_blocked`) with no goal sent |

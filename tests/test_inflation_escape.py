@@ -302,13 +302,15 @@ def test_side_choice_picks_the_larger_free_side():
     assert mirrored.side == "left" and mirrored.lateral_offset_m > 0
 
 
-def test_waypoint_clears_the_box_by_robot_radius_and_margin():
+def test_waypoint_clears_the_box_by_the_floor_and_margin():
+    # The leg past the box is held to the floor on every scan, so the way
+    # past is planned with the floor, not the robot's radius (0.6.7).
     decision = decide(OBSERVED)
     half_width = 0.20
-    assert abs(decision.lateral_offset_m) >= half_width + TWIN.robot_radius_m + 0.10 - 0.01
+    assert abs(decision.lateral_offset_m) >= half_width + FLOOR + 0.10 - 0.01
     x, y = decision.waypoint_robot
-    # The waypoint sits outside the box grown by the robot's radius.
-    assert not (0.40 - 0.1 <= x <= 0.70 + 0.1 and abs(y) <= half_width + 0.1)
+    # The waypoint sits outside the box grown by the floor.
+    assert not (0.40 - FLOOR <= x <= 0.70 + FLOOR and abs(y) <= half_width + FLOOR)
     beams = escape.sweep_beams(scan(OBSERVED))
     assert escape.segment_clearance(beams, (x, y), (x, y)) >= FLOOR
 
@@ -445,10 +447,11 @@ def _simulation_marker_off(monkeypatch):
 
 
 def test_free_start_sends_the_goal_unchanged():
+    # The goal stands 0.5 m short of the box (a goal inside it is refused).
     backend = EscapeBackend(box(1.0, 0.3, 0.4) + room())
-    result = navigate(make(backend))
+    result = navigate(make(backend), x=0.50)
     assert result.outcome == OUTCOME_COMPLETED
-    assert backend.calls == [("nav-1", "motion.navigate", {"x": 1.20, "y": 0.0})]
+    assert backend.calls == [("nav-1", "motion.navigate", {"x": 0.50, "y": 0.0})]
     assert result.evidence["navigation_escape"]["pinned"] is False
 
 
@@ -725,20 +728,22 @@ def test_every_heading_the_waypoint_leg_may_end_at_drives_past_the_box():
     The waypoint was sent facing the goal (-0.278 rad), the leg ended at
     -0.523 rad (inside the 0.25 rad tolerance) facing the box, and the goal
     leg failed to make progress eight times (119 s). Every heading Nav2 may
-    accept must now drive past the box by the robot's radius.
+    accept must now drive past the box by the clearance floor, which the
+    floor guard holds the leg to (0.6.7; it was the robot's radius before).
     """
     decision = decide(OBSERVED)
     start = {"x": 0.0, "y": 0.0, "yaw": 0.0}
     chosen = escape.waypoint_heading(start, decision, (1.20, 0.0))
     toward_goal = chosen["toward_goal_rad"]
-    assert toward_goal == pytest.approx(-0.278, abs=0.02)
+    # The waypoint is now the floor plus margin beside the box (y ~0.65 m).
+    assert toward_goal == pytest.approx(-0.432, abs=0.02)
     assert chosen["limited_by"] == "obstacle"
     heading = chosen["heading_rad"]
     origin = decision.waypoint_robot
-    # The old heading's tolerance band reached into the box.
-    assert _ray_clearance(origin, toward_goal - HEADING, BOX) < TWIN.robot_radius_m
+    # Facing the goal, the tolerance band would pass the box inside the floor.
+    assert _ray_clearance(origin, toward_goal - HEADING, BOX) < FLOOR
     for offset in (-HEADING, -HEADING / 2, 0.0, HEADING / 2, HEADING):
-        assert _ray_clearance(origin, heading + offset, BOX) >= TWIN.robot_radius_m
+        assert _ray_clearance(origin, heading + offset, BOX) >= FLOOR
     # The band never turns back across the line of travel toward the box's side.
     assert heading - HEADING >= -1e-9
     pose = escape.waypoint_pose(start, decision, (1.20, 0.0))
@@ -755,7 +760,7 @@ def test_the_right_side_is_the_mirror_image():
     assert decision.clear_heading_rad <= 0.0
     for offset in (-HEADING, 0.0, HEADING):
         heading = chosen["heading_rad"] + offset
-        assert _ray_clearance(decision.waypoint_robot, heading, BOX) >= TWIN.robot_radius_m
+        assert _ray_clearance(decision.waypoint_robot, heading, BOX) >= FLOOR
 
 
 def test_a_goal_already_on_the_open_side_is_faced_directly():
