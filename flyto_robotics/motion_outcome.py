@@ -24,8 +24,11 @@ Reasons, most specific first:
     base for one of its polygons, this adapter's braking guard stopped a
     straight drive because the room left to the clearance floor was inside
     its stopping distance, the drive was planned before sending to end short
-    of the request for the same reason, or the nearest return the way the
-    robot was going is inside the clearance floor at the stop.
+    of the request for the same reason, the floor guard stopped a navigation
+    leg because a return came inside the floor or within the stopping
+    distance the way it moved (``braking.tripped`` is ``floor_breach``), or
+    the nearest return the way the robot was going is inside the clearance
+    floor at the stop.
 
 Whether a motion with a requested distance stopped short because of what
 stands ahead is decided first, by one table (:data:`STOP_RULES`) over the
@@ -123,6 +126,10 @@ INVALID_SOURCE = "invalid source"
 GUARD_TRIP_CLEARANCE = "clearance"  # room to the floor inside the stopping distance
 GUARD_TRIP_BLIND = "blind"  # the sweep could not be read
 GUARD_TRIP_STALE = "stale"  # no scan arrived in time
+# A navigation leg (Nav2 plans its path) stopped by the adapter's floor guard:
+# a return came inside the clearance floor, or within the stopping distance
+# the way the base was moving (braking_envelope.leg_floor_check).
+GUARD_TRIP_FLOOR = "floor_breach"
 # A straight drive the guard did not stop, which ended where it was planned
 # to before sending: short of the request, because the clearance measured then
 # left no more room to stop at the floor (braking_envelope.plan_drive).
@@ -583,12 +590,16 @@ def _reason(
     """
     if rule is not None:
         return rule.reason
+    # The floor guard stopped a navigation leg: whatever the server said
+    # after, the floor was about to be crossed, so the leg did not arrive.
+    if guard_trip == GUARD_TRIP_FLOOR:
+        return REASON_OBSTACLE_BLOCKED
     if status == STATUS_SUCCEEDED:
         return REASON_COMPLETED
     # The adapter's own braking guard cancels the goal it stops, so the
     # server reports "canceled"; the guard's cause is the reason, not the
     # cancel it used to act on it.
-    if guard_trip == GUARD_TRIP_CLEARANCE:
+    if guard_trip in (GUARD_TRIP_CLEARANCE, GUARD_TRIP_FLOOR):
         return REASON_OBSTACLE_BLOCKED
     if guard_trip in (GUARD_TRIP_BLIND, GUARD_TRIP_STALE):
         return REASON_SENSOR_STALE
@@ -824,6 +835,13 @@ def describe(summary: Mapping[str, Any]) -> str:
                 f"braking guard stopped at {trip.get('speed_mps', 0.0):.3f} m/s with "
                 f"{trip.get('room_m', 0.0):.3f} m to the floor "
                 f"(stopping distance {trip.get('stopping_distance_m', 0.0):.3f} m)"
+            )
+        elif guard.get("tripped") == GUARD_TRIP_FLOOR and trip:
+            parts.append(
+                f"floor guard stopped the leg ({trip.get('cause')}): nearest return "
+                f"{trip.get('nearest_m', 0.0):.3f} m {trip.get('nearest_direction')} at "
+                f"{trip.get('speed_mps', 0.0):.3f} m/s (stopping distance "
+                f"{trip.get('stopping_distance_m', 0.0):.3f} m)"
             )
         else:
             parts.append(f"braking guard stopped: LiDAR {guard.get('tripped')}")

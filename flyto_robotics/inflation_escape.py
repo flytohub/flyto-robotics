@@ -446,20 +446,21 @@ def _lateral_positions(cluster: Sequence[Beam]) -> list[float]:
 
 
 def lateral_offset(
-    cluster: Sequence[Beam], side: str, robot_radius_m: float, margin_m: float
+    cluster: Sequence[Beam], side: str, clearance_m: float, margin_m: float
 ) -> float:
     """Signed y (left positive) that clears the obstacle's extent on ``side``.
 
     For each obstacle return at (range, bearing) its lateral position is
     ``range * sin(bearing)``; the waypoint sits beyond the outermost one by
-    the robot's radius plus the margin.
+    ``clearance_m`` (the clearance floor: the leg past the obstacle is held to
+    it on every scan) plus the margin.
     """
     lateral = _lateral_positions(cluster)
     if not lateral:
         return 0.0
     if side == "left":
-        return max(0.0, max(lateral)) + robot_radius_m + margin_m
-    return min(0.0, min(lateral)) - robot_radius_m - margin_m
+        return max(0.0, max(lateral)) + clearance_m + margin_m
+    return min(0.0, min(lateral)) - clearance_m - margin_m
 
 
 def clear_heading(
@@ -644,7 +645,11 @@ def plan_escape(
     tried: list[dict[str, Any]] = []
     start = (-backoff, 0.0)
     for side in choose_sides(clearances["left"], clearances["right"]):
-        offset = lateral_offset(cluster, side, geometry.robot_radius_m, margin_m)
+        # The way past is planned to keep the floor, not just the robot's
+        # radius: the floor guard stops any leg that comes inside it, so a
+        # waypoint the robot's radius beside the obstacle would have the goal
+        # leg stopped as it passed (path_clearance, braking.leg_floor_check).
+        offset = lateral_offset(cluster, side, floor_m, margin_m)
         leaves = max(0.0, arrival_tolerance_m) + margin_m
         if abs(offset) < leaves:
             offset = leaves if side == "left" else -leaves
@@ -669,7 +674,7 @@ def plan_escape(
                 side=side,
                 lateral_offset_m=offset,
                 clear_heading_rad=clear_heading(
-                    cluster, (-backoff, offset), side, geometry.robot_radius_m + margin_m
+                    cluster, (-backoff, offset), side, floor_m + margin_m
                 ),
                 obstacle=obstacle,
                 sides_tried=tuple(tried),
