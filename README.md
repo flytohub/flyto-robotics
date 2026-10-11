@@ -279,12 +279,34 @@ goes to the original goal, which stays the final pose. If no escape keeps the
 floor the call is refused at once with `reason_code: no_escape_room` and the
 measured clearances. The floor itself is never lowered.
 
+The floor also holds where a navigation ends and while it runs (0.6.7; real
+robot 2026-10-09, run c6d8d79d: a detour's goal leg drove to 0.135 m of a
+person's shins while Nav2's collision monitor only slowed it):
+
+- Before every leg (the call's goal, the escape's waypoint, the goal leg after
+  it) the adapter places each LiDAR return in the robot frame and measures it
+  against the destination (`path_clearance.judge_destination`). A return
+  closer than the floor refuses the leg: before anything moves the call is
+  `refused`, after an escape leg it is `failed`, both with
+  `evidence.reason_code: destination_blocked` and
+  `evidence.destination_clearance`. A sweep or map pose that cannot be read
+  refuses with `path_unreadable`. Never `completed`.
+- While a leg runs, the backend's floor guard reads every scan
+  (`braking_envelope.leg_floor_check`): a return inside the floor in any
+  direction, or the room the way the base is moving within its stopping
+  distance, sends zero, cancels the goal and sends zero again. The result is
+  `failed` with `motion_outcome.reason: obstacle_blocked` and
+  `motion_outcome.braking.tripped: floor_breach` (`kind: navigation_leg`,
+  `trip.cause: inside_floor | no_room_to_stop`), even when Nav2 then reports
+  the goal succeeded. The escape's waypoint is placed the floor plus the margin
+  beside the obstacle, so the way past keeps the floor the guard holds it to.
+
 | Setting | Default | Meaning |
 | --- | --- | --- |
 | `FLYTO_ROS2_INFLATION_ESCAPE` | `on` | `off` sends every goal unchanged |
 | `FLYTO_ROS2_COSTMAP_NODES` | `/local_costmap/local_costmap,/global_costmap/global_costmap` | costmaps whose `plugins`, inflation layer and `robot_radius`/`footprint` are read; the largest radius of each kind is used |
 | `FLYTO_ROS2_ESCAPE_MAX_BACKOFF_M` | `0.30` | longest back-off |
-| `FLYTO_ROS2_ESCAPE_MARGIN_M` | `0.10` | clearance past the obstacle's edge beyond the robot radius |
+| `FLYTO_ROS2_ESCAPE_MARGIN_M` | `0.10` | clearance past the obstacle's edge beyond the clearance floor (the leg past it is held to the floor) |
 | `FLYTO_ROS2_ESCAPE_MAX_LATERAL_M` | `1.0` | widest lateral offset before the escape is refused |
 | `FLYTO_ROS2_NAVIGATE_THROUGH_ACTION` | `/navigate_through_poses` | used when present; otherwise the legs are sequential `NavigateToPose` goals |
 
@@ -340,7 +362,7 @@ contract's `motion_kind`, not its name:
 | --- | --- | --- | --- |
 | `advance` / `retreat` | `motion.advance` / `motion.retreat` | corridor in the direction of travel: returns with `x > 0` and `abs(y) < floor + FLYTO_ROS2_ROBOT_RADIUS_M` (0.1) | the nearest of them is at least the floor away |
 | `rotate` | `motion.rotate` | the footprint turning in place, all around | every return is at least `floor + FLYTO_ROS2_ROBOT_RADIUS_M` away |
-| `planned` | `motion.navigate` | left to Nav2, the inflation escape and the in-motion guard | (not judged on a static distance) |
+| `planned` | `motion.navigate` | the path is Nav2's; every leg (back-off, waypoint, goal) is held to the floor on every scan by the floor guard | every LiDAR return is at least the floor away from the leg's destination |
 
 A refusal carries `evidence.reason_code: "path_blocked"` and
 `evidence.path_clearance` (`motion_kind`, `shape`, `threshold_m`,

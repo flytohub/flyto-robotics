@@ -14,8 +14,13 @@ goes, with the same frame-of-travel geometry as the in-motion braking guard
 - a rotation in place sweeps the robot's footprint all around, so every
   return must be at least ``floor + rotation radius`` away (omnidirectional is
   correct there);
-- a planned navigation is left to Nav2, the inflation escape and the
-  in-motion guard; it is not judged on a static distance here.
+- a planned navigation's path is left to Nav2, the inflation escape and the
+  in-motion floor guard (``braking_envelope.leg_floor_check``); its
+  destination is judged here (:func:`judge_destination`): the robot comes to
+  rest there, so every LiDAR return must be at least the floor away from it.
+  On 2026-10-09 (run c6d8d79d, real robot) a detour's goal leg was the blocked
+  move's original destination, about 0.1 m in front of a person's shins, and
+  nothing checked it.
 
 Which of these applies is the capability contract's ``motion_kind``, never
 the capability's name. Pure arithmetic: no ROS.
@@ -28,7 +33,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
-from .inflation_escape import Beam, sweep_beams
+from .inflation_escape import Beam, sweep_beams, to_robot
 
 SHAPE_CORRIDOR = "corridor"
 SHAPE_FOOTPRINT = "footprint"
@@ -38,6 +43,9 @@ REASON_CLEAR = "clear"
 REASON_BLOCKED = "path_blocked"
 REASON_UNREADABLE = "path_unreadable"
 REASON_NOT_JUDGED = "left_to_planner"
+#: A navigation leg refused because a return lies inside the floor of the place
+#: it would come to rest: arriving there would break the floor by itself.
+REASON_DESTINATION_BLOCKED = "destination_blocked"
 
 
 @dataclass(frozen=True)
@@ -235,3 +243,114 @@ def judge(
     if path.shape == SHAPE_CORRIDOR:
         return measured(_corridor(beams, path.direction_rad, floor_m + radius_m))
     return measured(_nearest(beams))
+
+
+@dataclass(frozen=True)
+class DestinationClearance:
+    """Whether a navigation leg's destination keeps the floor, with what was measured."""
+
+    leg: str
+    admitted: bool
+    reason: str
+    floor_m: float
+    #: The destination in the robot frame at the time of the sweep (x ahead,
+    #: y left); None when the robot's map pose could not be read.
+    destination_robot: tuple[float, float] | None
+    #: Distance from the destination to the nearest LiDAR return; None: no return.
+    clearance_m: float | None = None
+    #: That return, as the LiDAR saw it.
+    limiting_range_m: float | None = None
+    limiting_bearing_rad: float | None = None
+    #: How many returns lie inside the floor of the destination.
+    returns_inside_floor: int = 0
+
+    def to_dict(self) -> dict[str, Any]:
+        where = self.destination_robot
+        return {
+            "leg": self.leg,
+            "admitted": self.admitted,
+            "reason": self.reason,
+            "floor_m": round(self.floor_m, 4),
+            "destination_robot_frame": (
+                None if where is None else {"x": round(where[0], 4), "y": round(where[1], 4)}
+            ),
+            "clearance_m": _round(self.clearance_m),
+            "limiting_range_m": _round(self.limiting_range_m),
+            "limiting_bearing_rad": _round(self.limiting_bearing_rad),
+            "limiting_side": (
+                None if self.limiting_bearing_rad is None else side_of(self.limiting_bearing_rad)
+            ),
+            "returns_inside_floor": self.returns_inside_floor,
+        }
+
+    def evidence(self) -> dict[str, Any]:
+        return {"reason_code": self.reason, "destination_clearance": self.to_dict()}
+
+    def describe(self) -> str:
+        if self.reason == REASON_UNREADABLE:
+            return (
+                f"the {self.leg} leg's destination cannot be judged: no readable LiDAR "
+                "sweep and map pose; not knowing is not room"
+            )
+        if self.admitted:
+            return f"{self.leg} leg destination clear"
+        return (
+            f"{self.leg} leg refused: {self.returns_inside_floor} LiDAR return(s) within "
+            f"{self.clearance_m:.3f} m of its destination, inside the {self.floor_m:.3f} m "
+            f"clearance floor (nearest seen at {self.limiting_range_m:.3f} m "
+            f"{side_of(self.limiting_bearing_rad or 0.0)})"
+        )
+
+
+def judge_destination(
+    sweep: Mapping[str, Any] | None,
+    robot_map_pose: Mapping[str, Any] | None,
+    destination_xy: tuple[float, float],
+    *,
+    floor_m: float,
+    leg: str,
+) -> DestinationClearance:
+    """Whether a navigation leg may be sent to ``destination_xy`` (map frame).
+
+    Each LiDAR return is placed in the robot frame and its distance to the
+    destination measured; one closer than the floor refuses the leg. Only
+    returns the LiDAR has are judged (a bin with no return says nothing about
+    the destination); a sweep or pose that cannot be read refuses, because
+    the destination cannot be judged without them. The floor is the caller's
+    and is applied as it is: nothing here lowers it.
+    """
+    beams = sweep_beams(sweep)
+    readable = [beam for beam in beams if beam.range_m is not None]
+    try:
+        destination = to_robot(robot_map_pose or {}, destination_xy)
+    except (KeyError, TypeError, ValueError):
+        destination = None
+    if not readable or destination is None:
+        return DestinationClearance(
+            leg=leg,
+            admitted=False,
+            reason=REASON_UNREADABLE,
+            floor_m=floor_m,
+            destination_robot=destination,
+        )
+    dx, dy = destination
+    measured = [
+        (math.hypot(beam.range_m * math.cos(beam.bearing) - dx,
+                    beam.range_m * math.sin(beam.bearing) - dy), beam)
+        for beam in readable
+        if beam.range_m is not None
+    ]
+    inside = sum(1 for distance, _ in measured if distance < floor_m)
+    distance, beam = min(measured, key=lambda item: item[0])
+    blocked = distance < floor_m
+    return DestinationClearance(
+        leg=leg,
+        admitted=not blocked,
+        reason=REASON_DESTINATION_BLOCKED if blocked else REASON_CLEAR,
+        floor_m=floor_m,
+        destination_robot=destination,
+        clearance_m=distance,
+        limiting_range_m=beam.range_m,
+        limiting_bearing_rad=beam.bearing,
+        returns_inside_floor=inside,
+    )
