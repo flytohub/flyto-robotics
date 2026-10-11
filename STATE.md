@@ -1,5 +1,13 @@
 # Flyto2 Robotics State
 
+## The floor on navigation legs (2026-10-11, 0.6.7 and 0.7.1)
+
+A leg whose destination has a LiDAR return inside the floor is refused
+(`destination_blocked`), and every navigation leg is stopped by the floor
+guard when a return comes inside the floor (`floor_breach`). Verified with
+ray-cast scans, fake backends and the rosbridge transport over a fake socket.
+Not run on the physical robot.
+
 ## Inflation escape before navigation (2026-10-04, 0.4.0)
 
 `motion.navigate` backs out of an obstacle's inflation (back-off plus one

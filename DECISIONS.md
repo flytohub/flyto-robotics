@@ -1,5 +1,20 @@
 # Decisions
 
+## 2026-10-11 — The floor holds where a navigation leg ends and while it runs (0.6.7, 0.7.1)
+
+Real robot, 2026-10-09, run c6d8d79d: a detour's goal leg navigated to the
+blocked move's original destination, about 0.1 m in front of a person's
+shins, and came to 0.135 m of them; Nav2's collision monitor only slowed.
+The floor was checked before straight drives and enforced during them, but a
+navigation leg had neither. Every leg's destination is now judged against
+the LiDAR returns before it is sent, and every leg runs under the same guard
+machinery as a straight drive, judged all around plus the stopping distance
+the way the base moves. The escape's lateral waypoint moved from the robot's
+radius to the floor beside the obstacle, because a way past planned inside
+the floor would be stopped by the guard as designed. Rejected: lowering or
+relaxing the floor for Nav2 legs; trusting the collision monitor; a margin
+for "slow" legs; checking only the final goal leg.
+
 ## 2026-10-04 — A navigation that starts inside inflation escapes first, or is refused at once
 
 On the twin, a navigate sent from 0.40 m in front of a box (stock TurtleBot3
