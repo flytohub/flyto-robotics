@@ -2,17 +2,37 @@
 
 The robot's Nav2 file and its Wi-Fi unit were changed on the robot itself
 (2026-10-08 and 2026-10-10) and lived nowhere else, so a reinstall from this
-repository would have brought back a different robot. These tests pin what
-was recorded about them; ``deploy/native_ros2/README.md`` says how they were
-reconstructed and how to compare them with the robot.
+repository would have brought back a different robot. Both files are now the
+robot's own bytes, read over SSH (read-only) on 2026-10-11; the digests below
+are what ``sha256sum`` printed on the robot. ``deploy/native_ros2/README.md``
+says how to compare them again.
 """
 
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
+
+import pytest
 
 NATIVE = Path(__file__).resolve().parents[1] / "deploy" / "native_ros2"
 NAV2 = NATIVE / "nav2-burger-flyto.yaml"
+
+# sha256 of the files on burger-01, read 2026-10-11 14:46 (+0800).
+ROBOT_SHA256 = {
+    "nav2-burger-flyto.yaml": (
+        "4092dd91bece7b719d8f681925b5d3716a9783621c74847c220fbb80fac9a76d"
+    ),
+    "wifi-powersave-off.service": (
+        "0269fa4c698ceb0e2d45ca46248b5f85cdb7494bcdc603096cf1dbdddb97c8cd"
+    ),
+}
+
+
+@pytest.mark.parametrize("name", sorted(ROBOT_SHA256))
+def test_the_file_is_the_robots_own_bytes(name):
+    digest = hashlib.sha256((NATIVE / name).read_bytes()).hexdigest()
+    assert digest == ROBOT_SHA256[name]
 
 
 def _block(text: str, header: str) -> list[str]:
@@ -46,12 +66,14 @@ def test_the_global_costmap_is_the_rolling_window_the_robot_runs():
     assert global_costmap["height"] == "6"
     assert global_costmap["track_unknown_space"] == "false"
     assert global_costmap["plugins"] == '["obstacle_layer", "voxel_layer", "inflation_layer"]'
-    assert "static_layer" not in global_costmap
 
 
-def test_nothing_else_names_a_static_layer_in_the_global_costmap():
-    block = "\n".join(_block(NAV2.read_text(encoding="utf-8"), "global_costmap"))
-    assert "StaticLayer" not in block
+def test_the_robots_unused_static_layer_block_is_not_a_plugin():
+    # The robot dropped static_layer from the plugin list on 2026-10-08 but
+    # kept its parameter block; Nav2 loads only what `plugins` names.
+    global_costmap = _settings(_block(NAV2.read_text(encoding="utf-8"), "global_costmap"), 6)
+    assert "static_layer" in global_costmap
+    assert "static_layer" not in global_costmap["plugins"]
 
 
 def test_the_local_costmap_is_stock():

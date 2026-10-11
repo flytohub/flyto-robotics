@@ -1,16 +1,3 @@
-# Nav2 parameters of the demo TurtleBot3 (burger-01), installed on the robot
-# as /etc/ros/nav2-burger-flyto.yaml and loaded by nav2.service.
-#
-# Base: turtlebot3_navigation2 2.3.6 (ROS 2 Jazzy) param/burger.yaml, unchanged
-# except the global costmap, changed on the robot on 2026-10-08
-# (backup there: /etc/ros/nav2-burger-flyto.yaml.bak-20261008):
-#   rolling_window true, width 6, height 6, track_unknown_space false,
-#   static_layer removed (from plugins and its block).
-# Reconstructed on 2026-10-11 from the stock file and those recorded changes;
-# the robot was offline, so it has not been byte-compared with the robot's
-# file. Compare (read-only) before relying on it:
-#   ssh ubuntu@<robot> cat /etc/ros/nav2-burger-flyto.yaml | diff - nav2-burger-flyto.yaml
-# The adapter's 0.35 m clearance floor is not a Nav2 parameter and is not here.
 amcl:
   ros__parameters:
     alpha1: 0.2
@@ -62,6 +49,7 @@ amcl:
 
 bt_navigator:
   ros__parameters:
+    default_server_timeout: 200
     global_frame: map
     robot_base_frame: base_link
     transform_tolerance: 0.5
@@ -155,7 +143,7 @@ controller_server:
       sim_time: 1.5
       linear_granularity: 0.05
       angular_granularity: 0.025
-      transform_tolerance: 0.2
+      transform_tolerance: 0.5
       xy_goal_tolerance: 0.05
       trans_stopped_velocity: 0.25
       short_circuit_trajectory_evaluation: true
@@ -234,12 +222,10 @@ global_costmap:
       transform_tolerance: 0.5
       robot_radius: 0.1
       resolution: 0.05
-      # 2026-10-08 (demo robot): a 6 m x 6 m window that follows the robot,
-      # built from the live scan only; the SLAM map is not a global layer.
+      track_unknown_space: false
       rolling_window: true
       width: 6
       height: 6
-      track_unknown_space: false
       plugins: ["obstacle_layer", "voxel_layer", "inflation_layer"]
       obstacle_layer:
         plugin: "nav2_costmap_2d::ObstacleLayer"
@@ -275,6 +261,10 @@ global_costmap:
           raytrace_min_range: 0.0
           obstacle_max_range: 2.5
           obstacle_min_range: 0.0
+      static_layer:
+        plugin: "nav2_costmap_2d::StaticLayer"
+        map_subscribe_transient_local: true
+        transform_tolerance: 0.1
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         inflation_radius: 0.5
