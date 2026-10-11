@@ -1,0 +1,18 @@
+# Turns Wi-Fi power save off on the robot's wlan0 at every boot.
+# Installed on the demo robot on 2026-10-10 (with the `iw` package): with power
+# save on, rosbridge latency over the phone hotspot was 11-177 ms; off, 9-18 ms
+# (flyto-cloud handoff 2026-10-10-demo-machine-and-robot.md). Reconstructed
+# from that record on 2026-10-11 while the robot was offline; compare with
+#   ssh ubuntu@<robot> systemctl cat wifi-powersave-off.service
+[Unit]
+Description=Wi-Fi power save off on wlan0
+After=sys-subsystem-net-devices-wlan0.device
+Requires=sys-subsystem-net-devices-wlan0.device
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/iw dev wlan0 set power_save off
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
