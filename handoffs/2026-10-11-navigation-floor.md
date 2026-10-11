@@ -45,6 +45,9 @@ and the floor was enforced on straight drives only, never during a Nav2 leg.
 - Floor value: `_clearance_floor()` unchanged (`FLYTO_ROS2_MIN_CLEARANCE_M`,
   default 0.35). Nothing lowers it.
 - `sim/twin/tools/destination_probe.py`: twin-only probe (forces simulation mode).
+  `.env.example` now declares `FLYTO_ROS2_DEPLOYMENT_MODE` (the probe sets it,
+  and the indexer's `env_contract` check rightly asked for it; follow-up PR on
+  release/0.6.7, because the strict run before the probe's last edit missed it).
 
 ## Verified
 
