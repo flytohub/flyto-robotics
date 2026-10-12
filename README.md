@@ -87,7 +87,18 @@ effects. A host that passes `manifest_extensions=["module_pack"]` to the
 `"module_pack": "robotics"`, the `flyto.modules` entry-point name of the pack
 that drives the resource. The discoverer offers the same name as its
 `module_pack` attribute. Without the request the manifest keeps its released
-shape, because released hosts reject unknown fields. For execution, Runtime binds the exact commanded resource and approved
+shape, because released hosts reject unknown fields.
+
+A host that asks for `live_channels` also receives the robot's read-only
+`flyto.live-channels.v1` block (`flyto_robotics/live_channels.py`): `scan`
+(LiDAR, `ws-json`, 5 Hz, with the clearance floor), `pose` (odometry,
+`ws-json`, 5 Hz) and `camera` (compressed frames, `ws-jpeg`, 5 Hz), each a
+`rosbridge://<bridge>/<topic>?type=<type>` source on the bridge the adapter
+uses. A channel is declared only when the graph publishes its topic with its
+type, and only over rosbridge; with nothing to watch the field is left out.
+The host relay only subscribes to these topics.
+
+For execution, Runtime binds the exact commanded resource and approved
 capability allowlist to one assignment and exposes that authority only through a
 loopback endpoint to Flyto2 Core. The robot itself remains standard equipment
 with no Flyto2 credential or scheduler.
