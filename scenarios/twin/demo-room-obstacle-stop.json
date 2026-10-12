@@ -1,0 +1,36 @@
+{
+  "contract_version": "flyto.robotics.twin-scenario.v1",
+  "scenario_id": "twin.demo-room.obstacle-stop.v1",
+  "title": "Stop at the demo room's box and do not detour on its own",
+  "description": "The TurtleBot3 twin starts in the demo room 0.75 m behind a box and is asked, through the Generic ROS 2 Adapter over rosbridge, to advance 1.2 m. It must stop short of the box with the 0.35 m LiDAR floor held, report obstacle_blocked as a failed call, send no goal but the one DriveOnHeading it was asked for (no NavigateToPose, NavigateThroughPoses, BackUp or Spin: no detour and no recovery of its own), and stay still with no further motion command afterwards. A detour is the caller's decision, never the adapter's.",
+  "twin": {
+    "world": "/opt/flyto-twin/worlds/flyto_demo_room.world",
+    "start_pose": {
+      "x": -1.8,
+      "y": 0.0,
+      "yaw": 0.0
+    }
+  },
+  "call": {
+    "capability_id": "motion.advance",
+    "arguments": {
+      "distance_m": 1.2,
+      "speed_mps": 0.1
+    },
+    "deadline_seconds": 60.0
+  },
+  "expectations": {
+    "outcome": "failed",
+    "motion_reason": "obstacle_blocked",
+    "clearance_floor_m": 0.35,
+    "stop_floor_held": true,
+    "min_travelled_m": 0.1,
+    "max_travelled_m": 0.45,
+    "allowed_goal_action_types": [
+      "nav2_msgs/action/DriveOnHeading"
+    ],
+    "max_goals_sent": 1,
+    "quiet_after_seconds": 10.0,
+    "max_drift_after_m": 0.02
+  }
+}
