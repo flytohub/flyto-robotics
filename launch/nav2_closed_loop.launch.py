@@ -140,13 +140,21 @@ def _launch_runtime(context: object) -> list[object]:
         output="screen",
     )
     tf_remappings = [("/tf", "tf"), ("/tf_static", "tf_static")]
+    # Velocity chain to the base, one producer per stage:
+    #   controller_server / behavior_server -> /nav2/cmd_vel_nav
+    #   velocity_smoother  /nav2/cmd_vel_nav -> /nav2/cmd_vel
+    #   safety supervisor  /nav2/cmd_vel     -> /cmd_vel (the only writer)
+    # The supervisor stays the last stage before the base. The smoother's
+    # velocity_timeout is bounded by the supervisor's command timeout
+    # (tests/test_nav2_launch_contracts.py), so a silent controller cannot
+    # keep the base moving longer than the supervisor alone would.
     navigation_nodes = [
         Node(
             package="nav2_controller",
             executable="controller_server",
             name="controller_server",
             parameters=[str(params)],
-            remappings=tf_remappings + [("cmd_vel", "/nav2/cmd_vel")],
+            remappings=tf_remappings + [("cmd_vel", "/nav2/cmd_vel_nav")],
             output="screen",
         ),
         Node(
@@ -170,13 +178,30 @@ def _launch_runtime(context: object) -> list[object]:
             executable="behavior_server",
             name="behavior_server",
             parameters=[str(params)],
-            remappings=tf_remappings + [("cmd_vel", "/nav2/cmd_vel")],
+            remappings=tf_remappings + [("cmd_vel", "/nav2/cmd_vel_nav")],
+            output="screen",
+        ),
+        Node(
+            package="nav2_velocity_smoother",
+            executable="velocity_smoother",
+            name="velocity_smoother",
+            parameters=[str(params)],
+            remappings=tf_remappings
+            + [("cmd_vel", "/nav2/cmd_vel_nav"), ("cmd_vel_smoothed", "/nav2/cmd_vel")],
             output="screen",
         ),
         Node(
             package="nav2_bt_navigator",
             executable="bt_navigator",
             name="bt_navigator",
+            parameters=[str(params)],
+            remappings=tf_remappings,
+            output="screen",
+        ),
+        Node(
+            package="nav2_waypoint_follower",
+            executable="waypoint_follower",
+            name="waypoint_follower",
             parameters=[str(params)],
             remappings=tf_remappings,
             output="screen",
@@ -200,7 +225,9 @@ def _launch_runtime(context: object) -> list[object]:
                     "smoother_server",
                     "planner_server",
                     "behavior_server",
+                    "velocity_smoother",
                     "bt_navigator",
+                    "waypoint_follower",
                 ],
             }
         ],

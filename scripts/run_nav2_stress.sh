@@ -169,6 +169,16 @@ DOCKERFILE
 fi
 container_image_id="$(docker image inspect --format '{{.Id}}' "${scenario_image}")"
 
+# Scenario containers run as root and write evidence with mode 0600. On a
+# Linux host the bind mount keeps that ownership, so hand the run directory
+# back to the host user before anything on the host reads it.
+restore_ownership() {
+  docker run --rm \
+    -v "${repository_root}:/workspace" \
+    "${scenario_image}" \
+    chown -R "$(id -u):$(id -g)" "/workspace/$1"
+}
+
 mkdir -p "${repository_root}/${run_directory}"
 docker run --rm \
   -v "${repository_root}:/workspace" \
@@ -281,6 +291,7 @@ run_scenario() {
     ' 2>&1 | tee "${repository_root}/${round_directory}/${label}.log"
   scenario_status="${PIPESTATUS[0]}"
   set -e
+  restore_ownership "${round_directory}"
   test -s "${pressure_evidence}"
   if [[ "${scenario_status}" != "0" || ! -s "${evidence}" ]]; then
     failure_reason="scenario_exit_nonzero"
