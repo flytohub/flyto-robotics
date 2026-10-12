@@ -1,5 +1,14 @@
 # Flyto2 Robotics State
 
+## Live channels and the battery scale (2026-10-12, 0.8.1)
+
+On request the manifest declares `scan`, `pose` and `camera` as
+`flyto.live-channels.v1` rosbridge sources on the adapter's own bridge, each
+only when the graph publishes its topic with its type. The battery percent
+accepts 0..1 and (1, 100]. Checked against flyto-cloud's schema, manifest DTO
+and rosbridge source parser (read-only import) with a fake graph; no frame was
+relayed from the twin or the robot by this repository's code.
+
 ## Live HMI readings (2026-10-12, 0.8.0)
 
 The manifest declares `power.battery`, `pose.planar` and `nav.goal`; the
