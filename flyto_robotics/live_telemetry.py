@@ -10,8 +10,9 @@ feedback of a goal this computer sent).
 
 Three channels, one row each in :data:`CHANNELS`:
 
-* ``power.battery`` -- ``percent`` (0..100, from ``BatteryState.percentage``)
-  and ``voltage_v``. A field the robot does not measure is null, never 0.
+* ``power.battery`` -- ``percent`` (0..100, from ``BatteryState.percentage``
+  read on the scale it falls in, :data:`PERCENTAGE_SCALES`) and
+  ``voltage_v``. A field the robot does not measure is null, never 0.
 * ``pose.planar`` -- ``x``, ``y``, ``heading_deg`` (counter-clockwise from +x)
   and the ``frame`` they are in: ``map`` while localization's transform is
   fresh, else ``odom``. The goal (``goal_x``, ``goal_y``) is added only in the
@@ -140,17 +141,54 @@ def _finite(value: Any) -> float | None:
     return number if math.isfinite(number) else None
 
 
+@dataclass(frozen=True)
+class PercentageScale:
+    """A range ``BatteryState.percentage`` can fall in, and what it means there."""
+
+    name: str
+    low: float
+    low_inclusive: bool
+    high: float
+    #: Multiplier to a percentage 0..100.
+    factor: float
+
+    def holds(self, value: float) -> bool:
+        above = value >= self.low if self.low_inclusive else value > self.low
+        return above and value <= self.high
+
+
+#: How ``BatteryState.percentage`` is read, first match wins. The message's
+#: contract is a fraction 0..1, but the TurtleBot3 driver publishes 0..100
+#: (burger-01, 2026-10-12: 93.88). A value in (1, 100] can only be a percent;
+#: 0..1 is read as the contract says. Anything else is unknown: null, never
+#: clamped. The one ambiguity is a percent-scale robot at or below 1 %, which
+#: reads as a fraction; no scale can tell those apart from one message.
+PERCENTAGE_SCALES: tuple[PercentageScale, ...] = (
+    PercentageScale("fraction", 0.0, True, 1.0, 100.0),
+    PercentageScale("percent", 1.0, False, 100.0, 1.0),
+)
+
+
+def battery_percent(percentage: Any) -> float | None:
+    """``BatteryState.percentage`` as 0..100 by :data:`PERCENTAGE_SCALES`, else None."""
+    value = _finite(percentage)
+    if value is None:
+        return None
+    scale = next((row for row in PERCENTAGE_SCALES if row.holds(value)), None)
+    return None if scale is None else round(value * scale.factor, 1)
+
+
 def battery_payload(percentage: Any, voltage: Any) -> dict[str, float | None]:
     """``sensor_msgs/BatteryState`` fields as the battery channel's payload.
 
-    ``percentage`` is 0..1 by the message's contract and NaN when unmeasured;
-    anything outside that is left out rather than rescaled by guess.
+    ``percentage`` is NaN when unmeasured; its scale is read by
+    :data:`PERCENTAGE_SCALES`, and a value on no scale is left out.
     """
-    fraction = _finite(percentage)
-    in_range = fraction is not None and 0.0 <= fraction <= 1.0
-    percent = round(fraction * 100.0, 1) if in_range and fraction is not None else None
     volts = _finite(voltage)
-    return {"percent": percent, "voltage_v": round(volts, 2) if volts is not None else None}
+    return {
+        "percent": battery_percent(percentage),
+        "voltage_v": round(volts, 2) if volts is not None else None,
+    }
 
 
 @dataclass
@@ -346,8 +384,11 @@ __all__ = [
     "ENDED_STATES",
     "NAVIGATION_STATES",
     "NavigationRecord",
+    "PERCENTAGE_SCALES",
+    "PercentageScale",
     "VIEW_MIN_HALF_SPAN_M",
     "battery_payload",
+    "battery_percent",
     "channel_declarations",
     "pose_payload",
     "samples",

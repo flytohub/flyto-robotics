@@ -2759,6 +2759,18 @@ class GenericROS2Adapter:
             return None
         return method()
 
+    def bridge_url(self) -> str | None:
+        """The rosbridge this adapter reads the robot through; None over rclpy."""
+        method = getattr(self.backend, "bridge_url", None)
+        return method() if callable(method) else None
+
+    def published_topics(self) -> dict[str, str]:
+        """``{topic: type}`` as the graph was last read; empty while disconnected."""
+        method = getattr(self.backend, "published_topics", None)
+        if not callable(method) or not self.connected:
+            return {}
+        return dict(method())
+
     def silent_seconds(self) -> float | None:
         """Seconds since the robot last sent a reading; None if unknown."""
         method = getattr(self.backend, "silent_seconds", None)
@@ -4411,6 +4423,15 @@ class RosbridgeROS2Backend(_ObservationState):
         except ValueError as error:
             return CallResult(call_id, OUTCOME_FAILED, detail=str(error))
         return CallResult(call_id, OUTCOME_COMPLETED, evidence={"capture": payload})
+
+    def bridge_url(self) -> str:
+        """The bridge URL this connection uses (a managed forward's, when it moves)."""
+        return self._url
+
+    def published_topics(self) -> dict[str, str]:
+        """``{topic: type}`` from the last rosapi read of the graph."""
+        with self._condition:
+            return dict(self._topic_types) if self._connected else {}
 
     def invalidate_discovery(self) -> None:
         with self._condition:

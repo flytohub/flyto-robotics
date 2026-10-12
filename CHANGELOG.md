@@ -2,6 +2,13 @@
 
 All notable project changes are recorded here.
 
+## 0.8.1 — 2026-10-12
+
+- The robot can be watched live. `MANIFEST_EXTENSIONS` adds `live_channels`: when the host asks, the manifest carries a `flyto.live-channels.v1` block from one table, `live_channels.LIVE_CHANNELS`: `scan` (kind `scan`, `ws-json`, 5 Hz, `FLYTO_ROS2_SCAN_TOPIC` `/scan`, `sensor_msgs/msg/LaserScan`, `floor_m` = the adapter's clearance floor, 0.35 m by default), `pose` (kind `pose`, `ws-json`, 5 Hz, `FLYTO_ROS2_ODOM_TOPIC` `/odom`, `nav_msgs/msg/Odometry`) and `camera` (kind `video`, `ws-jpeg`, 5 Hz, `FLYTO_ROS2_CAMERA_COMPRESSED_TOPIC` `/camera/image_raw/compressed`, `sensor_msgs/msg/CompressedImage`). Each `source` is `rosbridge://<host:port>/<topic>?type=<type>` (`rosbridges://` for `wss`) on the bridge the adapter itself uses, which is what flyto-cloud's host relay reads. A channel is declared only when the graph the discovery pass just read publishes its topic with its type; an rclpy adapter, a bridge URL with a path, or nothing to watch leaves the field out (Cloud refuses an empty list). The robot and the twin publish the same topics and declare the same block. Live channels are subscriptions only; no declared topic is a command topic or action.
+- `GenericROS2Adapter.bridge_url()` and `published_topics()` (the rosbridge backend's URL and the `{topic: type}` of its last rosapi read; empty while disconnected).
+- The battery reads TurtleBot3's percent scale. `BatteryState.percentage` is read by one table, `live_telemetry.PERCENTAGE_SCALES`: 0..1 is a fraction (x 100), (1, 100] is already a percent (burger-01 publishes 93.88); anything else, NaN or not a number is null, never clamped. A percent-scale robot at or below 1 % reads as a fraction; one message cannot tell them apart.
+- Motion behaviour, the safety floor (0.35 m) and the request shape are unchanged.
+
 ## 0.8.0 — 2026-10-12
 
 - Live readings for an HMI, read only. The ROS 2 manifest now declares three telemetry channels (`live_telemetry.CHANNELS`): `power.battery` (`percent` from `BatteryState.percentage` 0..1, `voltage_v`; an unmeasured field is null, never 0), `pose.planar` (`x`, `y`, `heading_deg`, `frame` — `map` while localization's transform is fresh, else `odom`; the goal and a `view_*` window only in the map frame), and `nav.goal` (`state` in idle/navigating/arrived/blocked/cancelled/failed, `distance_m` and `progress_pct` from Nav2's `distance_remaining`, the goal, the ended goal's `motion_outcome` reason). `discover_resource_manifests.telemetry_sampler` (interval 1 s) builds samples from connections the computer already holds: the presence watch and adapters built by `build_adapter`. It never opens a connection and never commands.
