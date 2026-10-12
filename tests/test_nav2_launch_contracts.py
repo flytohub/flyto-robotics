@@ -150,9 +150,11 @@ def test_navigation_manager_has_bounded_reconnection_and_exact_node_set() -> Non
     manager = _assigned_call(_tree(), "navigation_manager", "Node")
     parameters = _keyword(manager, "parameters")
     assert isinstance(parameters, ast.List) and len(parameters.elts) == 1
+    # No autostart: the lab configures the nodes and then sends RESUME, so the
+    # manager must not run its own bringup concurrently (one lifecycle owner).
     assert ast.literal_eval(parameters.elts[0]) == {
         "use_sim_time": True,
-        "autostart": True,
+        "autostart": False,
         "attempt_respawn_reconnection": False,
         "node_names": [
             "controller_server",
