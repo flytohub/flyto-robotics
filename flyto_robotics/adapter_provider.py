@@ -22,7 +22,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from . import adapter_contract as contract
-from . import live_telemetry, ssh_transport
+from . import live_channels, live_telemetry, ssh_transport
 from .generic_ros2_adapter import (
     SILENT_SECONDS,
     GenericROS2Adapter,
@@ -44,7 +44,12 @@ MODULE_PACK = "robotics"
 # with ``extra="forbid"``, so a field they do not know would make them drop
 # the robot. Each one is emitted only when the host names it in
 # ``manifest_extensions``; without that the manifest keeps its old shape.
-MANIFEST_EXTENSIONS: tuple[str, ...] = ("module_pack", "transport", "presentation")
+MANIFEST_EXTENSIONS: tuple[str, ...] = (
+    "module_pack",
+    "transport",
+    "presentation",
+    "live_channels",
+)
 
 # Where the module pack declares what an HMI shows for its resource
 # (``flyto.resource-presentation.v1``): an entry point named ``MODULE_PACK``
@@ -177,6 +182,13 @@ def _manifest(
         block = _pack_presentation()
         if block is not None:
             manifest["presentation"] = block
+    if "live_channels" in requested:
+        # Read only (``flyto.live-channels.v1``): what the host relay may
+        # subscribe to. Left out, never empty, when nothing can be watched:
+        # a host refuses a manifest with an empty list.
+        channels = live_channels.declarations(adapter.bridge_url(), adapter.published_topics())
+        if channels:
+            manifest["live_channels"] = channels
     return manifest
 
 
