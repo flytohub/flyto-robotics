@@ -26,7 +26,20 @@ if [[ "${image_rebuild}" == "1" ]]; then
     "${repository_root}"
 fi
 
+# Scenario containers run as root and write evidence with mode 0600. On a
+# Linux host the bind mount keeps that ownership, so hand the run directory
+# back to the host user before anything on the host reads it.
+restore_ownership() {
+  docker run --rm \
+    -v "${repository_root}:/workspace" \
+    "${image_name}" \
+    chown -R "$(id -u):$(id -g)" "/workspace/$1"
+}
+
 mkdir -p "${repository_root}/${run_directory}"
+# A failed scenario exits early under set -e; its evidence and logs must
+# still be readable for the uploaded CI artifact.
+trap 'restore_ownership "${run_directory}" || true' EXIT
 docker run --rm \
   -v "${repository_root}:/workspace" \
   -w /workspace \
@@ -60,6 +73,7 @@ for scenario in success cancel emergency_stop; do
           scenario:=${FLYTO_NAV2_SCENARIO} \
           output_file:=${FLYTO_NAV2_EVIDENCE}
     ' 2>&1 | tee "${repository_root}/${run_directory}/${scenario}.log"
+  restore_ownership "${run_directory}"
   test -s "${evidence}"
   python3 -m flyto_robotics.cli verify-ros2-execution-evidence \
     --evidence "${evidence}" \

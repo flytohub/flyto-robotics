@@ -189,6 +189,33 @@ class NavRun:
     cgroup: dict[str, int] | None = None
 
 
+def _restore_host_ownership(image: str, path: Path) -> None:
+    """Hand container-written evidence back to the host user.
+
+    Scenario containers run as root and write evidence with mode 0600; on a
+    Linux host the bind mount keeps that ownership and the host cannot read it.
+    """
+
+    _run(
+        [
+            "docker",
+            "run",
+            "--rm",
+            "-v",
+            f"{ROOT}:/workspace",
+            image,
+            "chown",
+            "-R",
+            f"{os.getuid()}:{os.getgid()}",
+            f"/workspace/{path.relative_to(ROOT).as_posix()}",
+        ],
+        # Called from a finally block: never mask the episode's own failure.
+        # An unreadable evidence file still fails the episode on read.
+        check=False,
+        timeout=60,
+    )
+
+
 def _container_logs(name: str) -> str:
     return _run(["docker", "logs", name], check=False, timeout=15).stdout
 
@@ -462,6 +489,7 @@ timeout --signal=TERM --kill-after=15s 210s \
         logs = _container_logs(container_name)
     finally:
         _run(["docker", "rm", "-f", container_name], check=False, timeout=30)
+        _restore_host_ownership(image, episode_dir)
     log_path.write_text(logs, encoding="utf-8")
     if pressure_path.is_file():
         for line in pressure_path.read_text(encoding="utf-8").splitlines():
