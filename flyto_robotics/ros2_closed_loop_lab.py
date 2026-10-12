@@ -41,7 +41,9 @@ NAVIGATION_LIFECYCLE_NODES = (
     "/smoother_server",
     "/planner_server",
     "/behavior_server",
+    "/velocity_smoother",
     "/bt_navigator",
+    "/waypoint_follower",
 )
 # Stable values from lifecycle_msgs keep the recovery state machine testable
 # on development hosts that do not have a ROS installation sourced.

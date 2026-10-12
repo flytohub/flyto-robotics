@@ -161,7 +161,9 @@ def test_navigation_manager_has_bounded_reconnection_and_exact_node_set() -> Non
             "smoother_server",
             "planner_server",
             "behavior_server",
+            "velocity_smoother",
             "bt_navigator",
+            "waypoint_follower",
         ],
     }
 
