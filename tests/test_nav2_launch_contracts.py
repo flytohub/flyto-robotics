@@ -161,7 +161,9 @@ def test_navigation_manager_has_bounded_reconnection_and_exact_node_set() -> Non
             "smoother_server",
             "planner_server",
             "behavior_server",
+            "velocity_smoother",
             "bt_navigator",
+            "waypoint_follower",
         ],
     }
 
@@ -245,3 +247,198 @@ def test_launch_process_timeouts_are_explicit_and_signals_are_graceful() -> None
         assert isinstance(signal_number, ast.Attribute)
         assert isinstance(signal_number.value, ast.Name)
         assert (signal_number.value.id, signal_number.attr) == ("signal", "SIGINT")
+
+
+# The Nav2 lab runs the canonical standard profile, so it must start every
+# node that profile pairs against, and the velocity smoother it adds must sit
+# inside the command chain, never beside it.
+SAFETY_LATENCY_BOUND_SECONDS = 0.75  # bounded_stop_latency in ros2_execution_evidence
+
+
+def _navigation_node_calls() -> dict[str, ast.Call]:
+    nodes = _assignment(_tree(), "navigation_nodes")
+    assert isinstance(nodes, ast.List)
+    calls: dict[str, ast.Call] = {}
+    for item in nodes.elts:
+        assert isinstance(item, ast.Call) and _name(item.func) == "Node"
+        name = _literal_keyword(item, "name")
+        assert isinstance(name, str) and name not in calls
+        calls[name] = item
+    return calls
+
+
+def _explicit_remappings(call: ast.Call) -> dict[str, str]:
+    """The literal remappings a node adds on top of the shared tf remappings."""
+
+    value = _keyword(call, "remappings")
+    if value is None:
+        return {}
+    if isinstance(value, ast.BinOp):
+        assert isinstance(value.op, ast.Add)
+        assert _name(value.left) == "tf_remappings"
+        value = value.right
+    elif _name(value) == "tf_remappings":
+        return {}
+    pairs = ast.literal_eval(value)
+    return dict(pairs)
+
+
+def _navigation_manager_parameters() -> dict[str, object]:
+    parameters = _keyword(_assigned_call(_tree(), "navigation_manager", "Node"), "parameters")
+    assert isinstance(parameters, ast.List) and len(parameters.elts) == 1
+    value = ast.literal_eval(parameters.elts[0])
+    assert isinstance(value, dict)
+    return value
+
+
+def _safety_parameters() -> dict[str, object]:
+    parameters = _keyword(_assigned_call(_tree(), "safety", "Node"), "parameters")
+    assert isinstance(parameters, ast.List) and len(parameters.elts) == 1
+    value = ast.literal_eval(parameters.elts[0])
+    assert isinstance(value, dict)
+    return value
+
+
+def _nav2_section(name: str) -> dict[str, object]:
+    """Scalar and flow-list parameters of one top-level node in nav2_params.yaml.
+
+    PyYAML is not a dependency, and the smoother block is flat, so read it
+    line by line rather than pull in a parser for one test.
+    """
+
+    lines = (ROOT / "config" / "nav2_params.yaml").read_text(encoding="utf-8").splitlines()
+    start = lines.index(f"{name}:")
+    assert lines[start + 1].strip() == "ros__parameters:"
+    values: dict[str, object] = {}
+    for line in lines[start + 2 :]:
+        if line and not line.startswith(" "):
+            break
+        if not line.strip() or line.strip().startswith("#"):
+            continue
+        assert line.startswith("    ") and not line.startswith("     "), line
+        key, _, raw = line.strip().partition(":")
+        raw = raw.strip()
+        if raw in {"true", "false"}:
+            values[key] = raw == "true"
+        elif raw.startswith("["):
+            values[key] = ast.literal_eval(raw)
+        else:
+            try:
+                values[key] = float(raw)
+            except ValueError:
+                values[key] = raw
+    return values
+
+
+def test_lab_starts_every_node_the_standard_profile_pairs_against() -> None:
+    import json
+
+    from flyto_robotics import ros2_closed_loop_lab as lab
+
+    manifest = json.loads(
+        (ROOT / "examples" / "ros2-adapters" / "flyto2-standard.json").read_text(encoding="utf-8")
+    )
+    (adapter,) = manifest["adapters"]
+    required = set(adapter["managed_nodes"])
+    started = {f"/{name}" for name in _navigation_node_calls()}
+    started.add(f"/{_literal_keyword(_assigned_call(_tree(), 'map_server', 'Node'), 'name')}")
+
+    assert started == required
+    assert "/velocity_smoother" in started and "/waypoint_follower" in started
+    # The manager activates exactly the navigation nodes, and the lab
+    # configures exactly the same set before it sends RESUME.
+    manager_nodes = _navigation_manager_parameters()["node_names"]
+    assert isinstance(manager_nodes, list)
+    assert set(manager_nodes) == set(_navigation_node_calls())
+    assert [f"/{name}" for name in manager_nodes] == list(lab.NAVIGATION_LIFECYCLE_NODES)
+    assert _navigation_manager_parameters()["autostart"] is False
+
+
+def test_navigation_manager_brings_up_the_smoother_after_the_controller() -> None:
+    order = _navigation_manager_parameters()["node_names"]
+    assert isinstance(order, list)
+    assert order == [
+        "controller_server",
+        "smoother_server",
+        "planner_server",
+        "behavior_server",
+        "velocity_smoother",
+        "bt_navigator",
+        "waypoint_follower",
+    ]
+
+
+def test_velocity_chain_is_controller_then_smoother_then_safety_supervisor() -> None:
+    calls = _navigation_node_calls()
+    smoother = calls["velocity_smoother"]
+    assert _literal_keyword(smoother, "package") == "nav2_velocity_smoother"
+    assert _literal_keyword(smoother, "executable") == "velocity_smoother"
+
+    raw = "/nav2/cmd_vel_nav"
+    smoothed = "/nav2/cmd_vel"
+    # Every Nav2 velocity producer feeds the smoother, never the supervisor.
+    assert _explicit_remappings(calls["controller_server"]) == {"cmd_vel": raw}
+    assert _explicit_remappings(calls["behavior_server"]) == {"cmd_vel": raw}
+    # The smoother is the one stage between Nav2 and the supervisor.
+    assert _explicit_remappings(smoother) == {"cmd_vel": raw, "cmd_vel_smoothed": smoothed}
+    publishers_into_supervisor = [
+        name
+        for name, call in calls.items()
+        if smoothed in _explicit_remappings(call).values()
+    ]
+    assert publishers_into_supervisor == ["velocity_smoother"]
+    for name, call in calls.items():
+        if name not in {"controller_server", "behavior_server", "velocity_smoother"}:
+            assert _explicit_remappings(call) == {}, name
+
+    # The safety supervisor stays the last stage: it alone reads the smoothed
+    # command and alone writes the base's /cmd_vel.
+    safety = _safety_parameters()
+    assert safety["cmd_vel_input_topic"] == smoothed
+    assert safety["cmd_vel_output_topic"] == "/cmd_vel"
+    bridge_remaps = dict(
+        ast.literal_eval(_keyword(_assigned_call(_tree(), "bridge", "Node"), "remappings"))
+    )
+    assert bridge_remaps["/flyto/cmd_vel"] == "/cmd_vel"
+    for call in calls.values():
+        assert "/cmd_vel" not in _explicit_remappings(call).values()
+
+
+def test_smoother_deadman_ends_motion_inside_the_supervisor_command_timeout() -> None:
+    import re
+
+    smoother = _nav2_section("velocity_smoother")
+    safety = _safety_parameters()
+    command_timeout = float(safety["command_timeout_seconds"])
+    assert command_timeout == 0.30
+
+    velocity_timeout = float(smoother["velocity_timeout"])
+    tick = 1.0 / float(smoother["smoothing_frequency"])
+    supervisor_source = (ROOT / "flyto_robotics" / "ros2_safety_node.py").read_text(
+        encoding="utf-8"
+    )
+    match = re.search(
+        r'declare_parameter\("max_abs_linear_speed_mps", ([0-9.]+)\)', supervisor_source
+    )
+    assert match is not None
+    assert "max_abs_linear_speed_mps" not in safety
+    base_speed_cap = float(match.group(1))
+    decel = abs(float(smoother["max_decel"][0]))
+
+    # When the controller goes silent the smoother keeps sending its last
+    # command until velocity_timeout (checked once per tick), then ramps to
+    # zero. The base must be stopped by the time the supervisor alone would
+    # have stopped it.
+    motion_after_silence = velocity_timeout + tick + base_speed_cap / decel
+    assert motion_after_silence <= command_timeout + 1e-9
+    # The smoother then falls silent, and the supervisor's own command_stale
+    # must still land inside the evidence's bounded stop latency.
+    assert velocity_timeout + tick + command_timeout < SAFETY_LATENCY_BOUND_SECONDS
+    assert smoother["feedback"] == "OPEN_LOOP"
+    assert float(smoother["max_velocity"][0]) <= 0.35
+    assert smoother["enable_stamped_cmd_vel"] is False
+
+
+def test_bounded_stop_latency_constant_matches_the_evidence_verdict() -> None:
+    source = (ROOT / "flyto_robotics" / "ros2_execution_evidence.py").read_text(encoding="utf-8")
+    assert f'["safety_stop_latency_ms"] <= {SAFETY_LATENCY_BOUND_SECONDS * 1000:.1f}' in source
