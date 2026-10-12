@@ -108,6 +108,17 @@ battery and lifecycle (presence at 500 ms/1 s): small, left as is.
 - Robot rosbridge accepts `queue_length` 1 + `throttle_rate` 100 (read-only
   subscription: odom 8.7/s, scan 10/s).
 
+- PR #75 simulator-closed-loop (run 38273529801) green: twin demo-room stop
+  `obstacle_blocked`, `floor_held: true`. In that run the guard tripped with
+  `stale {'scan_age_s': 0.057, 'limit_s': 0.012, 'basis': 'floor', 'room_m':
+  0.0662, 'speed_mps': 0.1, ...}`: at the end of a planned drive the room is
+  about one stopping distance, so the floor bound is about `credit - poll` and
+  an ordinary scan interval trips it. That is the intended fail-safe; the call
+  still reported `obstacle_blocked`. Expect `braking.tripped: stale` (basis
+  `floor`) at the end of planned drives on the robot too. The same log showed
+  `scan_stamp_age_s` as the simulator's clock; a stamp more than 60 s from wall
+  time is now reported as null (`_stamp_age_s`, test added).
+
 ## Not verified
 
 - The new rule has not driven the physical robot or the twin from this

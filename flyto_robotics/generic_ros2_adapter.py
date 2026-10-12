@@ -261,6 +261,19 @@ def _scan_timeout_s() -> float:
     return _env_number("FLYTO_ROS2_STOP_SCAN_TIMEOUT_S", 0.5, low=0.1, high=5.0)
 
 
+#: A header stamp further than this from this computer's wall clock is not
+#: wall time (a simulator's clock, or a robot clock never set) and is not aged.
+MAX_STAMP_AGE_S = 60.0
+
+
+def _stamp_age_s(stamp_s: float | None) -> float | None:
+    """Seconds since a header stamp by the wall clock, or None if not wall time."""
+    if stamp_s is None:
+        return None
+    age = time.time() - stamp_s
+    return round(age, 3) if abs(age) <= MAX_STAMP_AGE_S else None
+
+
 #: How often a guarded motion's waiter re-checks the LiDAR's age, in seconds.
 #: A stale scan is noticed up to this late, so the floor bound allows for it.
 GUARD_POLL_S = 0.05
@@ -1242,9 +1255,8 @@ class _ObservationState:
                     "speed_mps": round(speed, 4),
                     # By the robot's clock: tells a sensor that stopped from a
                     # transport that held its scans (clock skew included).
-                    "scan_stamp_age_s": (
-                        None if stamp is None else round(time.time() - stamp, 3)
-                    ),
+                    # None when the stamp is not wall time (a simulator clock).
+                    "scan_stamp_age_s": _stamp_age_s(stamp),
                 })
 
     def _guard(self, call_id: str) -> _BrakingGuard | None:
