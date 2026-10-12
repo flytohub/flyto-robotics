@@ -1,0 +1,123 @@
+name: simulator
+
+# Simulator closed loops on GitHub-hosted runners. Not a required check yet:
+# it becomes one only after two consecutive green runs on main, when the owner
+# adds `simulator-closed-loop` to branch protection. Nothing here may lower the
+# 0.35 m LiDAR clearance floor.
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    paths:
+      - ".github/workflows/simulator.yml"
+      - "scripts/run_nav2_closed_loop.sh"
+      - "scripts/run_twin_scenario.sh"
+      - "sim/**"
+      - "scenarios/**"
+      - "worlds/**"
+      - "docker/**"
+      - "launch/**"
+      - "config/**"
+      - "models/**"
+      - "maps/**"
+      - "setup.py"
+      - "package.xml"
+      - "flyto_robotics/generic_ros2_adapter.py"
+      - "flyto_robotics/motion_outcome.py"
+      - "flyto_robotics/braking_envelope.py"
+      - "flyto_robotics/path_clearance.py"
+      - "flyto_robotics/scan_clearance.py"
+      - "flyto_robotics/ros2_*.py"
+  schedule:
+    # Nightly, 02:17 Asia/Taipei.
+    - cron: "17 18 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: simulator-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  simulator-closed-loop:
+    name: simulator-closed-loop
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      RUN_ID: ci-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Free runner disk for two ROS 2 images
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - name: Install the adapter and evidence verifier
+        run: |
+          python -m pip --isolated install -r requirements-dev.txt
+          python -m pip --isolated install "websockets>=12"
+          python -m pip --isolated install --no-build-isolation --no-deps --editable .
+
+      - name: Nav2 closed loop in Gazebo (success, cancel, emergency stop)
+        id: nav2
+        env:
+          FLYTO_ROBOTICS_NAV2_RUN_ID: ${{ env.RUN_ID }}
+        run: ./scripts/run_nav2_closed_loop.sh
+
+      - name: Twin stops at the demo box and does not detour
+        id: twin
+        if: ${{ !cancelled() }}
+        env:
+          FLYTO_ROBOTICS_TWIN_RUN_ID: ${{ env.RUN_ID }}
+        run: ./scripts/run_twin_scenario.sh scenarios/twin/demo-room-obstacle-stop.json
+
+      - name: Report
+        if: ${{ always() }}
+        env:
+          NAV2_OUTCOME: ${{ steps.nav2.outcome }}
+          TWIN_OUTCOME: ${{ steps.twin.outcome }}
+        run: |
+          python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json, os
+          from pathlib import Path
+          run = os.environ["RUN_ID"]
+          print("## simulator-closed-loop\n")
+          print("| Loop | Step | Detail |\n|---|---|---|")
+          nav2 = Path("results/nav2-closed-loop") / run
+          detail = []
+          for name in ("success", "cancel", "emergency_stop"):
+              path = nav2 / f"{name}.json"
+              status = json.loads(path.read_text())["status"] if path.is_file() else "no evidence"
+              detail.append(f"{name}: {status}")
+          print(f"| Nav2 closed loop | {os.environ['NAV2_OUTCOME']} | {'; '.join(detail)} |")
+          verdict_path = Path("results/twin-scenario") / run / "verdict.json"
+          checks = "no verdict"
+          if verdict_path.is_file():
+              verdict = json.loads(verdict_path.read_text()).get("verdict") or {}
+              checks = ", ".join(
+                  f"{item['code']} {'pass' if item['passed'] else 'FAIL'}"
+                  for item in verdict.get("checks", [])
+              ) or "no verdict"
+          print(f"| Twin obstacle stop, no detour | {os.environ['TWIN_OUTCOME']} | {checks} |")
+          PY
+
+      - name: Upload simulator evidence and logs
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: simulator-closed-loop-${{ env.RUN_ID }}
+          path: |
+            results/nav2-closed-loop/${{ env.RUN_ID }}
+            results/twin-scenario/${{ env.RUN_ID }}
+          if-no-files-found: warn
+          retention-days: 14
