@@ -416,7 +416,15 @@ transport can send a second goal:
 
 Either way the drive is stopped (zero velocity, cancel, zero) while the room is
 still at least its stopping distance, or when the LiDAR is unreadable or quiet
-for `FLYTO_ROS2_STOP_SCAN_TIMEOUT_S`. A drive that could not stop at the floor
+for longer than its staleness limit. That limit (`braking_envelope.scan_stale_limit`,
+`generic_ros2_adapter.SCAN_STALENESS`) is the smaller of a rate cap (15 nominal
+scan periods, never below `FLYTO_ROS2_STOP_SCAN_TIMEOUT_S` or 3 x the worst
+recent interval, never above 2.0 s) and a floor bound: the scan age at which a
+stop decided then still brings the robot to rest at or beyond the floor from
+the room the last scan showed (`credit + (room - stopping_distance(v)) / v -
+poll`, where `credit` is the scan period the measured latency already holds).
+Ages are measured from receipt on this computer's monotonic clock. Navigation
+legs keep `max(FLYTO_ROS2_STOP_SCAN_TIMEOUT_S, 3 x worst interval)`. A drive that could not stop at the floor
 even at 0.02 m/s, or would have under 0.01 m left to drive, is refused before
 it moves.
 
@@ -424,7 +432,7 @@ it moves.
 | --- | --- | --- |
 | `FLYTO_ROS2_STOP_LATENCY_S` | `0.5` | end-to-end stop latency. The measured budget (worst recent scan interval + scan delivery delay, twice, for the scan in and the cancel out + `FLYTO_ROS2_STOP_CONTROL_PERIOD_S` 0.1 + `FLYTO_ROS2_STOP_ACTUATION_S` 0.1) replaces it only when larger |
 | `FLYTO_ROS2_STOP_DECEL_MPS2` | `0.5` | achievable deceleration. The robot's declared limit (`FLYTO_ROS2_DECEL_PARAMETER`, default `/velocity_smoother:max_decel`) replaces it only when smaller |
-| `FLYTO_ROS2_STOP_SCAN_TIMEOUT_S` | `0.5` | longest gap between scans before a guarded drive stops (at least three measured scan periods) |
+| `FLYTO_ROS2_STOP_SCAN_TIMEOUT_S` | `0.5` | the shortest staleness limit a guarded motion gets (see above); a straight drive's limit is still capped at 2.0 s and by the floor bound |
 
 A straight drive's `motion_outcome` carries `braking` (the profile and where
 each value came from, the requested and commanded speeds, `governance` (mode,
