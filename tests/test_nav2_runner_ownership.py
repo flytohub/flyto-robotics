@@ -37,6 +37,9 @@ def _assert_restores_as_host_user(body: str) -> None:
 def test_closed_loop_runner_restores_ownership_before_reading_evidence() -> None:
     text = (ROOT / "scripts" / "run_nav2_closed_loop.sh").read_text(encoding="utf-8")
     _assert_restores_as_host_user(_restore_function(text))
+    # An early exit on a failed scenario still leaves readable evidence for
+    # the uploaded artifact.
+    assert "trap 'restore_ownership \"${run_directory}\" || true' EXIT" in text
 
     loop = _between(text, "for scenario in success cancel emergency_stop; do", "\ndone\n")
     launch = loop.index("ros2 launch flyto_robotics nav2_closed_loop.launch.py")
