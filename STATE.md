@@ -1,5 +1,14 @@
 # Flyto2 Robotics State
 
+## Scan staleness and rosbridge load (2026-10-12, 0.8.2)
+
+A straight drive's LiDAR staleness limit is derived from the measured scan
+rate and the floor's stopping budget instead of `max(0.5, 3 x worst
+interval)`, and a full rosbridge connection no longer reads the raw camera.
+Verified with unit and property tests, fake rosbridge sockets and read-only
+timing measurements on the physical robot's rosbridge; the new rule has not
+yet driven the physical robot.
+
 ## Live channels and the battery scale (2026-10-12, 0.8.1)
 
 On request the manifest declares `scan`, `pose` and `camera` as

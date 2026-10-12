@@ -452,6 +452,11 @@ class StopFacts:
         return self.shortfall_m <= self.arrival_tolerance_m
 
     @property
+    def reached_commanded(self) -> bool:
+        """Travelled the distance it was sent with, within the arrival rule."""
+        return self.commanded_m - self.travelled_m <= relative_move_tolerance(self.commanded_m)
+
+    @property
     def governed(self) -> bool:
         """The adapter, not the server, decided where this drive stopped."""
         return self.shortened or self.trip is not None
@@ -483,6 +488,19 @@ STOP_RULES: tuple[StopRule, ...] = (
         REASON_COMPLETED,
         "travelled within mission.relative_move_tolerance (min(0.03 m, d/10)) of "
         "the requested distance: a planned or guarded stop that still arrived",
+    ),
+    StopRule(
+        "blind_after_planned_stop",
+        lambda f: (
+            f.trip in (GUARD_TRIP_BLIND, GUARD_TRIP_STALE)
+            and f.shortened
+            and f.reached_commanded
+        ),
+        REASON_OBSTACLE_BLOCKED,
+        "planned before sending to end short of the request (plan.shortened) and "
+        "travelled within mission.relative_move_tolerance of that planned "
+        "distance: the plan stopped it where it could still stop at the floor, "
+        "so a blind or stale guard trip at its end shortened nothing",
     ),
     StopRule(
         "guard_blind",
