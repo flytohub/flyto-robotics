@@ -181,7 +181,7 @@ def test_the_backend_subscribes_to_the_nav2_lifecycle_topics(no_sleep):
     backend.disconnect()
 
 
-def test_a_presence_connection_carries_odometry_and_lifecycle_only(no_sleep):
+def test_a_presence_connection_carries_odometry_lifecycle_and_battery_only(no_sleep):
     sockets: list[RecordingSocket] = []
 
     def connect(_url):
@@ -192,8 +192,10 @@ def test_a_presence_connection_carries_odometry_and_lifecycle_only(no_sleep):
         url="ws://127.0.0.1:1", connection_factory=connect, presence_only=True
     )
     topics = {item["topic"] for item in sockets[-1].subscribed}
+    # Battery is read for a host's HMI (live_telemetry), sampled once a second.
     assert topics == {
         "/odom",
+        "/battery_state",
         "/bt_navigator/transition_event",
         "/behavior_server/transition_event",
     }

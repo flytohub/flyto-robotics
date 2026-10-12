@@ -1,5 +1,14 @@
 # Flyto2 Robotics State
 
+## Live HMI readings (2026-10-12, 0.8.0)
+
+The manifest declares `power.battery`, `pose.planar` and `nav.goal`; the
+host's telemetry pump samples them once a second from the presence watch and
+the job adapters (`live_telemetry`). The manifest carries the module pack's
+presentation block on request. Verified with fake sockets and adapters only:
+not run against the twin or the physical robot, so the real battery message
+(TurtleBot3's `percentage` scale) and live Nav2 feedback are unconfirmed.
+
 ## The floor on navigation legs (2026-10-11, 0.6.7 and 0.7.1)
 
 A leg whose destination has a LiDAR return inside the floor is refused
