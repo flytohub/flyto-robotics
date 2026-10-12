@@ -67,7 +67,7 @@ floor unchanged (`handoffs/2026-10-02-first-physical-motion.md`).
 
 ## Adapter provider ownership closure (2026-09-22)
 
-Physical/vendor adapter implementation now lives outside Flyto2 Cloud. `flyto-robotics` exposes Generic ROS2/rosbridge plus extracted OpenRMF and vision-stream providers through host-neutral plugin/process boundaries. The selected AI Space execution host owns provider lifecycle and assignment-scoped authority; Flyto2 Runtime is optional. Discovery is evidence only and grants no motion authority. The latest read-only TurtleBot3 preflight measured 0.143 m minimum LiDAR clearance, so the unchanged 0.35 m motion floor correctly prevented a new positive-movement acceptance.
+Physical/vendor adapter implementation now lives outside Flyto2 Cloud. `flyto-robotics` exposes Generic ROS2/rosbridge plus extracted OpenRMF and vision-stream providers through host-neutral plugin/process boundaries. The selected AI Space execution host owns provider lifecycle and assignment-scoped authority; Flyto2 Runtime is optional. Discovery is evidence only and grants no motion authority. The latest read-only TurtleBot3 preflight measured 0.143 m minimum LiDAR clearance, so the unchanged 0.35 m motion floor correctly prevented a new positive-movement acceptance. The 0.8.3 candidate also clamps `FLYTO_ROS2_MIN_CLEARANCE_M` to that floor; 0.8.2 incorrectly allowed the variable to lower it to 0.1 m. This correction has not been run on the robot.
 
 
 ## Current — external adapter / standard ROS 2 robot (2026-09-21)

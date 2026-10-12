@@ -112,4 +112,4 @@ __all__ = [
     "request_ai_plan",
 ]
 
-__version__ = "0.8.2"
+__version__ = "0.8.3"
