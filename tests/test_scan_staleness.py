@@ -282,3 +282,11 @@ def test_no_scan_at_all_stops_the_drive(monkeypatch):
     backend.disconnect()
     assert guard.tripped == mo.GUARD_TRIP_STALE
     assert guard.trip["scan_age_s"] is None
+
+
+def test_a_stamp_that_is_not_wall_time_is_not_aged():
+    from flyto_robotics.generic_ros2_adapter import _stamp_age_s
+
+    assert _stamp_age_s(None) is None
+    assert _stamp_age_s(30.5) is None  # a simulator clock: 30 s since start
+    assert _stamp_age_s(time.time() - 0.4) == pytest.approx(0.4, abs=0.05)
