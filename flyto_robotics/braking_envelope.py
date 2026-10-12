@@ -30,6 +30,7 @@ ROS, so the physics is testable on its own.
 from __future__ import annotations
 
 import math
+import statistics
 from collections import deque
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
@@ -141,6 +142,12 @@ class LatencyEstimator:
         return max(self._intervals) if len(self._intervals) >= 3 else None
 
     @property
+    def nominal_scan_period_s(self) -> float | None:
+        # The median interval: the rate the sensor publishes at, which a
+        # transport stall delays but does not change.
+        return statistics.median(self._intervals) if len(self._intervals) >= 3 else None
+
+    @property
     def scan_transport_s(self) -> float | None:
         return max(self._delays) if len(self._delays) >= 3 else None
 
@@ -171,6 +178,9 @@ class BrakingProfile:
     latency_s: float
     decel_mps2: float
     sources: Mapping[str, Any] = field(default_factory=dict)
+    #: The scan period ``latency_s`` holds beyond every other term of a
+    #: measured budget (see ``period_credit_s``); 0 when nothing was measured.
+    scan_period_credit_s: float = 0.0
 
     def stopping_distance(self, speed_mps: float) -> float:
         """How far the robot travels from the scan that triggers a stop to rest."""
@@ -234,9 +244,145 @@ def resolve_profile(
         if 0.0 < declared < decel:
             decel = _clamp(declared, DECEL_BOUNDS_MPS2)
             sources["decel"] = "declared"
+    credit = 0.0
+    if measured_latency is not None:
+        rest = measured_latency.total_s - measured_latency.scan_period_s
+        credit = max(0.0, min(measured_latency.scan_period_s, latency - rest))
     return BrakingProfile(
-        floor_m=float(floor_m), latency_s=latency, decel_mps2=decel, sources=sources
+        floor_m=float(floor_m), latency_s=latency, decel_mps2=decel, sources=sources,
+        scan_period_credit_s=credit,
     )
+
+
+# -- how long a guarded drive may go without a scan ----------------------------------
+#
+# Scans reach the guard over a transport (rosbridge, Wi-Fi, an SSH forward)
+# that delivers them late in bursts while the sensor itself keeps its rate:
+# on the physical robot, 2026-10-12, header stamps stepped 0.100 s while
+# receipt intervals reached 0.36 s at rest and 0.965 s during a drive, and
+# odometry stalled with every scan stall. "No scan" must still stop the robot,
+# but the limit is taken from two derived bounds, not one guessed number:
+#
+# * the rate cap: ``missed_periods`` nominal (median) scan periods, never below
+#   the configured minimum or ``worst_interval_multiple`` x the worst recent
+#   interval, never above ``ceiling_s`` -- how long a sensor may be silent
+#   before it is treated as gone, whatever the room;
+# * the floor bound (straight drives): the receipt age at which a stop, decided
+#   then, still brings the robot to rest at or beyond the floor from the room
+#   the last scan showed (``blind_time_to_floor``).
+#
+# Ages are measured on this computer's monotonic clock from the scan's
+# receipt, never from its header stamp, so clock skew between the robot and
+# this computer cannot stretch them; the delivery delay is in the latency.
+
+#: Which bound decided a staleness limit.
+STALE_BASIS_RATE = "rate"
+STALE_BASIS_FLOOR = "floor"
+
+
+@dataclass(frozen=True)
+class ScanStalePolicy:
+    """How one kind of guarded motion turns scan timing into a staleness limit."""
+
+    #: Nominal scan periods a motion may go without a scan (0: not used).
+    missed_periods: float
+    #: Multiple of the worst recent interval that is always tolerated.
+    worst_interval_multiple: float
+    #: Never blind longer than this, in seconds; None for no ceiling.
+    ceiling_s: float | None
+    #: Whether the room the last scan showed bounds the limit as well.
+    floor_bound: bool
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "missed_periods": self.missed_periods,
+            "worst_interval_multiple": self.worst_interval_multiple,
+            "ceiling_s": self.ceiling_s,
+            "floor_bound": self.floor_bound,
+        }
+
+
+@dataclass(frozen=True)
+class ScanStaleLimit:
+    """A staleness limit and the two bounds it was taken from."""
+
+    limit_s: float
+    basis: str
+    rate_limit_s: float
+    floor_limit_s: float | None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "limit_s": round(self.limit_s, 3),
+            "basis": self.basis,
+            "rate_limit_s": round(self.rate_limit_s, 3),
+            "floor_limit_s": (
+                round(self.floor_limit_s, 3)
+                if self.floor_limit_s is not None and math.isfinite(self.floor_limit_s)
+                else None
+            ),
+        }
+
+
+def period_credit_s(profile: BrakingProfile) -> float:
+    """The scan period the profile's latency already allows for, in seconds.
+
+    The stopping distance assumes a stop is decided up to one scan period
+    after the scan that shows the obstacle; a scan that is late by no more
+    than that is inside the budget. Only a measured budget names its period;
+    a configured latency is not split into terms, so it earns no credit. A
+    latency clamped below its measured total keeps the credit to what it
+    still holds beyond the other terms (computed in ``resolve_profile``).
+    """
+    return max(0.0, float(profile.scan_period_credit_s))
+
+
+def blind_time_to_floor(
+    profile: BrakingProfile, *, room_m: float, speed_mps: float, poll_s: float
+) -> float:
+    """The latest receipt age a stop can be decided at and still hold the floor.
+
+    From where the last scan was taken the robot holds ``v`` through the
+    scan's delivery, the age ``s`` the stop is decided at, and the rest of the
+    latency, then brakes: ``v (t - credit + s) + v^2/2a <= room``, so
+    ``s <= credit + (room - stopping_distance(v)) / v``. The guard notices an
+    age up to ``poll_s`` late, so that is taken off. Negative when the room
+    is already inside the stopping distance (the clearance check stops it).
+    """
+    v = abs(float(speed_mps))
+    if not math.isfinite(room_m) or v <= 0.0:
+        return math.inf
+    slack = float(room_m) - profile.stopping_distance(v)
+    return period_credit_s(profile) + slack / v - max(0.0, float(poll_s))
+
+
+def scan_stale_limit(
+    policy: ScanStalePolicy,
+    *,
+    configured_s: float,
+    nominal_period_s: float | None,
+    worst_period_s: float | None,
+    profile: BrakingProfile,
+    room_m: float | None,
+    speed_mps: float,
+    poll_s: float,
+) -> ScanStaleLimit:
+    """How long a guarded motion may go without a scan, and why."""
+    rate = float(configured_s)
+    if nominal_period_s is not None and policy.missed_periods > 0:
+        rate = max(rate, policy.missed_periods * nominal_period_s)
+    if worst_period_s is not None and policy.worst_interval_multiple > 0:
+        rate = max(rate, policy.worst_interval_multiple * worst_period_s)
+    if policy.ceiling_s is not None:
+        rate = min(rate, policy.ceiling_s)
+    floor: float | None = None
+    if policy.floor_bound and room_m is not None:
+        floor = blind_time_to_floor(
+            profile, room_m=room_m, speed_mps=speed_mps, poll_s=poll_s
+        )
+    if floor is not None and floor < rate:
+        return ScanStaleLimit(floor, STALE_BASIS_FLOOR, rate, floor)
+    return ScanStaleLimit(rate, STALE_BASIS_RATE, rate, floor)
 
 
 @dataclass(frozen=True)

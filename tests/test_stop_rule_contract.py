@@ -139,6 +139,23 @@ CONTRACT = [
         id="mid-motion-blind-trip-keeps-sensor_stale",
     ),
     pytest.param(
+        # Live, 2026-10-12 23:29 (run 88ccbec1): a 2.0 m advance planned short
+        # of a return ahead; it went its planned distance (0.612 m, room at
+        # rest 0.104 m) and a late scan tripped the guard as it ended. The
+        # plan decided where it stopped; the trip shortened nothing.
+        dict(requested=2.0, commanded=0.627, travelled=0.612, status=SUCCEEDED,
+             tripped="stale", ahead_m=FLOOR + 0.104),
+        OBSTACLE_BLOCKED,
+        id="planned-stop-reached-then-stale-trip-is-obstacle_blocked",
+    ),
+    pytest.param(
+        # The same plan cut short mid-way by a LiDAR gone quiet: blind.
+        dict(requested=2.0, commanded=0.627, travelled=0.30, status=CANCELED,
+             tripped="stale", ahead_m=FLOOR + 0.42),
+        SENSOR_STALE,
+        id="planned-drive-cut-short-by-stale-trip-keeps-sensor_stale",
+    ),
+    pytest.param(
         dict(requested=1.2, commanded=1.2, travelled=1.2, status=SUCCEEDED, planned=False),
         COMPLETED,
         id="full-length-move-is-completed",

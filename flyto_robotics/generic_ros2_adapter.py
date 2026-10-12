@@ -256,11 +256,43 @@ def _declared_decel(value: Mapping[str, Any] | None) -> float | None:
     return abs(number)
 
 
-def _scan_timeout_s(period_s: float | None) -> float:
-    """How long a guarded drive goes without a scan before it is stopped."""
-    measured = 3.0 * period_s if period_s is not None else 0.0
-    configured = _env_number("FLYTO_ROS2_STOP_SCAN_TIMEOUT_S", 0.5, low=0.1, high=5.0)
-    return max(configured, measured)
+def _scan_timeout_s() -> float:
+    """The configured minimum a guarded motion may go without a scan."""
+    return _env_number("FLYTO_ROS2_STOP_SCAN_TIMEOUT_S", 0.5, low=0.1, high=5.0)
+
+
+#: A header stamp further than this from this computer's wall clock is not
+#: wall time (a simulator's clock, or a robot clock never set) and is not aged.
+MAX_STAMP_AGE_S = 60.0
+
+
+def _stamp_age_s(stamp_s: float | None) -> float | None:
+    """Seconds since a header stamp by the wall clock, or None if not wall time."""
+    if stamp_s is None:
+        return None
+    age = time.time() - stamp_s
+    return round(age, 3) if abs(age) <= MAX_STAMP_AGE_S else None
+
+
+#: How often a guarded motion's waiter re-checks the LiDAR's age, in seconds.
+#: A stale scan is noticed up to this late, so the floor bound allows for it.
+GUARD_POLL_S = 0.05
+
+#: How long each kind of guarded motion may go without a scan
+#: (braking.scan_stale_limit). Straight drives: 15 nominal periods (1.5 s at
+#: the robot's 10 Hz; the live stall of 2026-10-12 was 0.965 s), never below
+#: 3 x the worst recent interval (the 0.8.1 rule), never above 2.0 s, and never
+#: longer than a stop decided then could still hold the floor from the room
+#: the last scan showed. A navigation leg's speed and path are Nav2's, so the
+#: guard has no speed to bound its travel with: it keeps the 0.8.1 rule.
+SCAN_STALENESS: Mapping[str, braking.ScanStalePolicy] = {
+    GUARD_KIND_STRAIGHT: braking.ScanStalePolicy(
+        missed_periods=15.0, worst_interval_multiple=3.0, ceiling_s=2.0, floor_bound=True,
+    ),
+    GUARD_KIND_LEG: braking.ScanStalePolicy(
+        missed_periods=0.0, worst_interval_multiple=3.0, ceiling_s=None, floor_bound=False,
+    ),
+}
 
 
 @dataclass
@@ -295,6 +327,9 @@ class _BrakingGuard:
     kind: str = GUARD_KIND_STRAIGHT
     # A navigation leg's nearest return over the whole leg, as the guard saw it.
     minimum_range_m: float | None = None
+    # A straight drive's room to the floor on the latest scan (the start room
+    # until one arrives): what a stale-scan limit is bounded by.
+    last_room_m: float | None = None
 
     @property
     def resends(self) -> bool:
@@ -408,6 +443,57 @@ def _collision_state_topic() -> str:
 
 
 COLLISION_STATE_TYPE = "nav2_msgs/msg/CollisionMonitorState"
+
+
+@dataclass(frozen=True)
+class ContinuousSubscription:
+    """One topic a rosbridge connection reads for as long as it is open."""
+
+    topic_env: str
+    default_topic: str
+    message_type: str
+    reliability: str
+    #: rosbridge sends at most one message per this many ms (0: every one).
+    throttle_ms: int
+    #: rosbridge queues at most this many and drops the oldest (0: its default).
+    queue_length: int
+    #: What reads it, and why this rate is enough.
+    reader: str
+
+
+#: What every full rosbridge connection reads continuously. rosbridge on the
+#: robot is Python and converts every message it sends to JSON; on 2026-10-12
+#: it used 75 % of a core on burger-01 (load ~10 on 4 cores) and scans reached
+#: the adapter up to 0.965 s late while the sensor kept 10 Hz. Measured
+#: read-only through the robot's tunnel that day, one connection carried
+#: /camera/image_raw 756 KiB/s (0.9 msg/s, 811 KiB each), /scan 98 KiB/s
+#: (10/s), /odom 13 KiB/s (18/s), /tf 10 KiB/s (27/s), /camera/camera_info
+#: 6 KiB/s (15/s). Each row is only what its reader needs:
+#:
+#: * no camera: only the observation bundle's ``camera`` digest read the raw
+#:   frames and nothing consumes it; ``vision.observe`` subscribes to the
+#:   compressed topic for the one frame it captures, and the HMI's live camera
+#:   is its own channel;
+#: * scan: every scan, newest first -- the braking guard's period is the
+#:   sensor's, and an old scan is worth nothing once a newer one exists;
+#: * odometry: 10 Hz, newest first -- the guard's speed and stop pose, the
+#:   stillness wait and motion tracks; the robot publishes about 20 Hz;
+#: * /tf: unthrottled, because rosbridge throttles per topic and the frequent
+#:   odom->base transforms would crowd out map->odom.
+ROSBRIDGE_CONTINUOUS_SUBSCRIPTIONS: tuple[ContinuousSubscription, ...] = (
+    ContinuousSubscription(
+        "FLYTO_ROS2_ODOM_TOPIC", "/odom", "nav_msgs/msg/Odometry", "reliable", 100, 1,
+        "pose, velocity and stillness; braking guard speed and stop pose",
+    ),
+    ContinuousSubscription(
+        "FLYTO_ROS2_SCAN_TOPIC", "/scan", "sensor_msgs/msg/LaserScan", "best_effort", 0, 1,
+        "clearance, braking guard, floor guard, escape and destination checks",
+    ),
+    ContinuousSubscription(
+        "FLYTO_ROS2_TF_TOPIC", "/tf", "tf2_msgs/msg/TFMessage", "best_effort", 0, 0,
+        "map->odom for the map pose",
+    ),
+)
 
 
 BATTERY_STATE_TYPE = "sensor_msgs/msg/BatteryState"
@@ -855,6 +941,8 @@ class _ObservationState:
         self._range_sample_count = 0
         self._range_sweep: dict[str, Any] | None = None
         self._range_seen_at: float | None = None
+        # The latest scan's header stamp (robot clock, seconds), for evidence.
+        self._range_stamp_s: float | None = None
         self._camera: dict[str, Any] | None = None
         self._camera_seen_at: float | None = None
         self._camera_calibration_snapshot: str | None = None
@@ -947,6 +1035,7 @@ class _ObservationState:
     def _note_scan_timing(self, observed: float, stamp_s: float | None) -> None:
         """Called under the condition with each scan's arrival and header stamp."""
         delay = time.time() - stamp_s if stamp_s else None
+        self._range_stamp_s = stamp_s or None
         self._latency.observe(observed, delay)
 
     def _declared_deceleration(self) -> float | None:
@@ -1018,6 +1107,7 @@ class _ObservationState:
                 start_pose=dict(self._pose) if self._pose is not None else None,
                 governance=governance,
                 plan=plan,
+                last_room_m=start_room_m,
             )
             guard.speed_changes.append(
                 {"at_s": 0.0, "speed_mps": round(float(speed_mps), 4), "room_m": (
@@ -1098,6 +1188,7 @@ class _ObservationState:
                     "detail": "the LiDAR sweep could not be read",
                 })
                 continue
+            guard.last_room_m = room.room_m
             if guard.minimum_room_m is None or room.room_m < guard.minimum_room_m:
                 guard.minimum_room_m = room.room_m
             # The robot may still be faster than the last command asked for.
@@ -1131,13 +1222,41 @@ class _ObservationState:
             guard = self._guards.get(call_id)
             if guard is None or guard.tripped is not None:
                 return
-            limit = _scan_timeout_s(self._latency.scan_period_s)
             seen = self._range_seen_at
             age = None if seen is None else time.monotonic() - seen
-            if age is None or age > limit:
+            if age is not None and age <= GUARD_POLL_S:
+                return  # a scan just arrived; its own check has judged it
+            measured = abs(self._velocity[0]) if self._velocity is not None else 0.0
+            speed = max(guard.speed_mps, measured)
+            nominal = self._latency.nominal_scan_period_s
+            worst = self._latency.scan_period_s
+            stale = braking.scan_stale_limit(
+                SCAN_STALENESS[guard.kind],
+                configured_s=_scan_timeout_s(),
+                nominal_period_s=nominal,
+                worst_period_s=worst,
+                profile=guard.profile,
+                room_m=guard.last_room_m,
+                speed_mps=speed,
+                poll_s=GUARD_POLL_S,
+            )
+            if age is None or age > stale.limit_s:
+                stamp = self._range_stamp_s
                 self._trip_guard(guard, motion_outcome.GUARD_TRIP_STALE, {
                     "scan_age_s": None if age is None else round(age, 3),
-                    "limit_s": round(limit, 3),
+                    **stale.to_dict(),
+                    "nominal_period_s": None if nominal is None else round(nominal, 4),
+                    "worst_period_s": None if worst is None else round(worst, 4),
+                    "room_m": (
+                        round(guard.last_room_m, 4)
+                        if guard.last_room_m is not None and math.isfinite(guard.last_room_m)
+                        else None
+                    ),
+                    "speed_mps": round(speed, 4),
+                    # By the robot's clock: tells a sensor that stopped from a
+                    # transport that held its scans (clock skew included).
+                    # None when the stamp is not wall time (a simulator clock).
+                    "scan_stamp_age_s": _stamp_age_s(stamp),
                 })
 
     def _guard(self, call_id: str) -> _BrakingGuard | None:
@@ -1367,6 +1486,7 @@ class _ObservationState:
             self._battery_seen_at = None
             self._battery = None
             self._range_seen_at = None
+            self._range_stamp_s = None
             self._camera_seen_at = None
             self._map_tf_seen_at = None
             self._map_from_odom = None
@@ -3460,7 +3580,7 @@ class RclpyROS2Backend(_ObservationState):
                         handle.cancel_goal_async()
                 with contextlib.suppress(Exception):
                     self._publish_zero()
-            done.wait(timeout=min(remaining, 0.05))
+            done.wait(timeout=min(remaining, GUARD_POLL_S))
         return True
 
     def _wait_future(self, future: Any, deadline: float) -> bool:
@@ -4278,43 +4398,10 @@ class RosbridgeROS2Backend(_ObservationState):
         return dict(values)
 
     def _subscribe_standard_observations(self) -> None:
-        subscriptions = (
-            (
-                os.getenv("FLYTO_ROS2_ODOM_TOPIC", "/odom"),
-                "nav_msgs/msg/Odometry",
-                "reliable",
-                0,
-            ),
-            (
-                os.getenv("FLYTO_ROS2_SCAN_TOPIC", "/scan"),
-                "sensor_msgs/msg/LaserScan",
-                "best_effort",
-                0,
-            ),
-            (
-                os.getenv("FLYTO_ROS2_CAMERA_TOPIC", "/camera/image_raw"),
-                "sensor_msgs/msg/Image",
-                "best_effort",
-                # Kept only as a digest, so once a second is plenty: a raw
-                # 640x480 frame is ~1 MB of JSON, and ten a second starved the
-                # socket a motion's cancel has to travel on.
-                1000,
-            ),
-            (
-                os.getenv(
-                    "FLYTO_ROS2_CAMERA_INFO_TOPIC",
-                    "/camera/camera_info",
-                ),
-                "sensor_msgs/msg/CameraInfo",
-                "reliable",
-                0,
-            ),
-            (
-                os.getenv("FLYTO_ROS2_TF_TOPIC", "/tf"),
-                "tf2_msgs/msg/TFMessage",
-                "best_effort",
-                0,
-            ),
+        subscriptions = tuple(
+            (os.getenv(row.topic_env, row.default_topic), row.message_type,
+             row.reliability, row.throttle_ms, row.queue_length)
+            for row in ROSBRIDGE_CONTINUOUS_SUBSCRIPTIONS
         )
         collision_topic = _collision_state_topic()
         if collision_topic:
@@ -4322,40 +4409,40 @@ class RosbridgeROS2Backend(_ObservationState):
             # so it costs nothing while the robot drives freely.
             subscriptions = (
                 *subscriptions,
-                (collision_topic, COLLISION_STATE_TYPE, "reliable", 0),
+                (collision_topic, COLLISION_STATE_TYPE, "reliable", 0, 0),
             )
         clock_topic = _simulation_marker_topic()
         if not self._presence_only and clock_topic and _served_deployment_mode() == "simulation":
             # Read only, sampled: how fast simulated time runs against the wall.
             subscriptions = (
                 *subscriptions,
-                (clock_topic, CLOCK_TYPE, "best_effort", sim_time.CLOCK_THROTTLE_MS),
+                (clock_topic, CLOCK_TYPE, "best_effort", sim_time.CLOCK_THROTTLE_MS, 0),
             )
         if not self._presence_only:
             # Read only, sampled: what was commanded while a goal stood still.
             subscriptions = (
                 *subscriptions,
                 *(
-                    (topic, None, "reliable", COMMAND_WATCH_THROTTLE_MS)
+                    (topic, None, "reliable", COMMAND_WATCH_THROTTLE_MS, 0)
                     for topic in _command_watch_topics()
                 ),
             )
         if self._presence_only:
             # Odometry says the robot is there; a few a second is plenty.
-            subscriptions = ((subscriptions[0][0], subscriptions[0][1], "reliable", 500),)
+            subscriptions = ((subscriptions[0][0], subscriptions[0][1], "reliable", 500, 0),)
         # Read only, sampled: the battery for a host's HMI, on every connection.
         subscriptions = (
             *subscriptions,
-            (_battery_topic(), BATTERY_STATE_TYPE, "best_effort", BATTERY_THROTTLE_MS),
+            (_battery_topic(), BATTERY_STATE_TYPE, "best_effort", BATTERY_THROTTLE_MS, 0),
         )
         subscriptions = (
             *subscriptions,
             *(
-                (topic, LIFECYCLE_EVENT_TYPE, "reliable", 0)
+                (topic, LIFECYCLE_EVENT_TYPE, "reliable", 0, 0)
                 for topic in sorted(self._lifecycle_topics)
             ),
         )
-        for index, (topic, message_type, reliability, throttle_rate) in enumerate(
+        for index, (topic, message_type, reliability, throttle_rate, queue_length) in enumerate(
             subscriptions
         ):
             request: dict[str, Any] = {
@@ -4370,6 +4457,9 @@ class RosbridgeROS2Backend(_ObservationState):
                 },
                 "throttle_rate": throttle_rate,
             }
+            if queue_length:
+                # rosbridge keeps only the newest when it falls behind.
+                request["queue_length"] = queue_length
             if message_type is not None:
                 # Without a type rosbridge takes the one the graph advertises,
                 # so a stamped and an unstamped cmd_vel both subscribe.
@@ -4744,7 +4834,7 @@ class RosbridgeROS2Backend(_ObservationState):
                             break
                     # A guarded drive also wakes to notice a LiDAR gone quiet.
                     self._condition.wait(
-                        timeout=min(remaining, 0.05) if guard is not None else remaining
+                        timeout=min(remaining, GUARD_POLL_S) if guard is not None else remaining
                     )
             if action == "brake":
                 self._brake(call_id)
