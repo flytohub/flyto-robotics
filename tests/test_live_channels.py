@@ -169,6 +169,13 @@ def test_the_scan_shows_the_floor_the_adapter_enforces(monkeypatch):
     assert scan["floor_m"] == 0.5
 
 
+def test_the_scan_never_advertises_a_floor_below_the_physical_minimum(monkeypatch):
+    monkeypatch.setenv("FLYTO_ROS2_MIN_CLEARANCE_M", "0.1")
+    (scan,) = [item for item in live_channels.declarations(BRIDGE, ROBOT_TOPICS)
+               if item["id"] == "scan"]
+    assert scan["floor_m"] == 0.35 == ros2._clearance_floor()
+
+
 # --- only what the graph serves -------------------------------------------------
 
 

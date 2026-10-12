@@ -10,6 +10,11 @@ All notable project changes are recorded here.
 - `examples/arm-profiles/am-arm200-follower.json`: placeholder limits, `limits_accepted: false`.
 - Twin: `sim/twin/worlds/flyto_demo_room.world` declares its ground plane and sun instead of including them from Gazebo Fuel. On 2026-10-18 Fuel answered HTTP 502, the Gazebo server exited at start and Nav2 never activated; the world now loads with no network. `demo-room-obstacle-stop` passes on it.
 
+## 0.8.3 — 2026-10-13
+
+- The physical adapter now clamps `FLYTO_ROS2_MIN_CLEARANCE_M` to the documented 0.35 m safety floor. Previously the variable could lower the enforced floor to 0.1 m even though the 0.8.2 notes said the floor was never lowered. Values above 0.35 m still make the adapter stricter. The same clamped value is advertised by the read-only scan live channel.
+- This is a source and fake-test correction only. It has not been driven on the physical robot; the Cloud pin remains on 0.8.2 until the real closed-loop gate is passed.
+
 ## 0.8.2 — 2026-10-12
 
 - A late scan no longer stops a straight drive that has room to stop. Physical robot, 2026-10-12 23:29 (0.8.1): a 2.0 m `motion.advance` ended at 0.612 m with `sensor_stale`; the log reads `stale {'scan_age_s': 0.965, 'limit_s': 0.96}`. The limit was `max(FLYTO_ROS2_STOP_SCAN_TIMEOUT_S 0.5, 3 x worst recent scan interval 0.32)`. Read-only through the same tunnel afterwards the LiDAR's header stamps stepped 0.100 s while receipt intervals reached 0.36 s, and every receipt gap over 0.2 s stalled odometry with it: the scans were held up in transport (rosbridge on the robot at 75 % of a core), not missing.

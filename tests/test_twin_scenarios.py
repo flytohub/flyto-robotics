@@ -96,6 +96,16 @@ def test_scenario_floor_matches_the_adapter_default(monkeypatch) -> None:
     assert generic_ros2_adapter._clearance_floor() == check.SAFETY_FLOOR_M == 0.35
 
 
+def test_adapter_configuration_can_raise_but_never_lower_the_safety_floor(monkeypatch) -> None:
+    monkeypatch.syspath_prepend(str(ROOT))
+    from flyto_robotics import generic_ros2_adapter
+
+    monkeypatch.setenv("FLYTO_ROS2_MIN_CLEARANCE_M", "0.1")
+    assert generic_ros2_adapter._clearance_floor() == check.SAFETY_FLOOR_M == 0.35
+    monkeypatch.setenv("FLYTO_ROS2_MIN_CLEARANCE_M", "0.5")
+    assert generic_ros2_adapter._clearance_floor() == 0.5
+
+
 @pytest.mark.parametrize("floor", [0.3, 0.1, 0.0, 0.5])
 def test_a_scenario_cannot_name_another_floor(floor) -> None:
     scenario = _scenario()
