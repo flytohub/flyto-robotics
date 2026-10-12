@@ -16,12 +16,13 @@ import os
 import socket
 import sys
 import threading
+import weakref
 from collections.abc import Callable, Iterable, Mapping
 from datetime import datetime, timezone
 from typing import Any
 
 from . import adapter_contract as contract
-from . import ssh_transport
+from . import live_telemetry, ssh_transport
 from .generic_ros2_adapter import (
     SILENT_SECONDS,
     GenericROS2Adapter,
@@ -43,7 +44,14 @@ MODULE_PACK = "robotics"
 # with ``extra="forbid"``, so a field they do not know would make them drop
 # the robot. Each one is emitted only when the host names it in
 # ``manifest_extensions``; without that the manifest keeps its old shape.
-MANIFEST_EXTENSIONS: tuple[str, ...] = ("module_pack", "transport")
+MANIFEST_EXTENSIONS: tuple[str, ...] = ("module_pack", "transport", "presentation")
+
+# Where the module pack declares what an HMI shows for its resource
+# (``flyto.resource-presentation.v1``): an entry point named ``MODULE_PACK``
+# in this group, loading a callable that returns the block. The pack owns the
+# declaration; this library only carries it on the manifest, so neither
+# imports the other.
+PRESENTATION_ENTRYPOINT_GROUP = "flyto2.resource_presentations"
 
 
 def _extensions(requested: Iterable[str] | None) -> frozenset[str]:
@@ -54,6 +62,32 @@ def _extensions(requested: Iterable[str] | None) -> frozenset[str]:
     except TypeError:
         return frozenset()
     return frozenset(names) & frozenset(MANIFEST_EXTENSIONS)
+
+
+def _presentation_entry_points() -> list[Any]:
+    from importlib import metadata
+
+    try:
+        return list(metadata.entry_points(group=PRESENTATION_ENTRYPOINT_GROUP))
+    except Exception:  # noqa: BLE001 - no registry, no declaration
+        return []
+
+
+def _pack_presentation() -> dict[str, Any] | None:
+    """The module pack's presentation block, or None when it declares none.
+
+    Best effort: a pack that is missing or fails to load leaves the field out
+    and the robot is still published.
+    """
+    for entry in _presentation_entry_points():
+        if getattr(entry, "name", "") != MODULE_PACK:
+            continue
+        try:
+            block = entry.load()()
+        except Exception:  # noqa: BLE001 - the manifest goes out without it
+            return None
+        return dict(block) if isinstance(block, Mapping) else None
+    return None
 
 
 class ResourceNotServed(RuntimeError):
@@ -130,7 +164,7 @@ def _manifest(
         "capability_ids": [item["capability_id"] for item in contracts],
         "capability_contracts": contracts,
         "settings": [],
-        "telemetry_channels": [],
+        "telemetry_channels": live_telemetry.channel_declarations(),
         "observed_at": datetime.now(timezone.utc).isoformat(),
         "contract_hash": "",
     }
@@ -139,6 +173,10 @@ def _manifest(
         manifest["module_pack"] = MODULE_PACK
     if "transport" in requested:
         manifest["transport"] = adapter.transport_status()
+    if "presentation" in requested:
+        block = _pack_presentation()
+        if block is not None:
+            manifest["presentation"] = block
     return manifest
 
 
@@ -499,13 +537,54 @@ discover_resource_manifests.transport_status = transport_status  # type: ignore[
 discover_resource_manifests.reconnect = reconnect_resource  # type: ignore[attr-defined]
 
 
+# Adapters this module built for a host's jobs, while the host holds them:
+# the telemetry sampler reads the goal a job is driving to from them.
+_served: weakref.WeakSet[Any] = weakref.WeakSet()
+_served_lock = threading.Lock()
+
+
+def _served_adapters() -> list[Any]:
+    with _served_lock:
+        return list(_served)
+
+
 def build_adapter(resource_id: str) -> GenericROS2Adapter:
     """Python entry point used by hosts that load adapters in-process.
 
     Refuses (``ResourceNotServed``) any id but the one configured here.
     """
 
-    return build(_require_served(resource_id))
+    adapter = build(_require_served(resource_id))
+    with _served_lock, contextlib.suppress(TypeError):
+        _served.add(adapter)  # an object without weak references is not followed
+    return adapter
+
+
+def telemetry_sampler(*, execution_host_id: str) -> list[dict[str, Any]]:
+    """Samples for the host's telemetry channels (``live_telemetry``).
+
+    Read from connections this computer already holds to its robot -- the
+    presence watch and the adapters jobs run on -- never a new one, and
+    never a command. Advisory: a reading that fails is left out.
+    """
+    _ = execution_host_id
+    resource_id = configured_resource_id()
+    readings: list[Mapping[str, Any]] = []
+    for adapter in (_watched_adapter(resource_id), *_served_adapters()):
+        if adapter is None or not getattr(adapter, "connected", False):
+            continue
+        try:
+            reading = adapter.telemetry_readings()
+        except Exception:  # noqa: BLE001 - one connection never stops the others
+            continue
+        if isinstance(reading, Mapping):
+            readings.append(reading)
+    return live_telemetry.samples(resource_id, readings)
+
+
+# Battery, pose and navigation for a host that publishes provider telemetry.
+discover_resource_manifests.telemetry_sampler = telemetry_sampler  # type: ignore[attr-defined]
+discover_resource_manifests.telemetry_interval_seconds = 1.0  # type: ignore[attr-defined]
 
 
 def _response(request_id: Any, *, ok: bool, result: Any = None, error: str = "") -> dict[str, Any]:

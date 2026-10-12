@@ -45,6 +45,7 @@ from . import adapter_contract as decl
 from . import braking_envelope as braking
 from . import (
     inflation_escape,
+    live_telemetry,
     motion_outcome,
     path_clearance,
     places,
@@ -409,6 +410,15 @@ def _collision_state_topic() -> str:
 COLLISION_STATE_TYPE = "nav2_msgs/msg/CollisionMonitorState"
 
 
+BATTERY_STATE_TYPE = "sensor_msgs/msg/BatteryState"
+#: The robot publishes its battery about once a second; never sample faster.
+BATTERY_THROTTLE_MS = 1000
+
+
+def _battery_topic() -> str:
+    return os.getenv("FLYTO_ROS2_BATTERY_TOPIC", "/battery_state")
+
+
 def _max_observation_age() -> float:
     return max(0.1, float(os.getenv("FLYTO_ROS2_OBSERVATION_MAX_AGE_SECONDS", "5")))
 
@@ -702,6 +712,28 @@ def _route_poses(arguments: Mapping[str, Any]) -> list[tuple[float, float, float
     return poses
 
 
+#: Where each navigation capability is going, in the map frame: the goal of a
+#: NavigateToPose, the last pose of a NavigateThroughPoses. A capability not
+#: listed is not a navigation and has no goal an HMI follows.
+NAVIGATION_GOALS: Mapping[str, Callable[[Mapping[str, Any]], tuple[float, float]]] = {
+    "motion.navigate": lambda arguments: (float(arguments["x"]), float(arguments["y"])),
+    NAVIGATE_THROUGH: lambda arguments: _route_poses(arguments)[-1][:2],
+}
+
+
+def _navigation_goal(
+    capability_id: str, arguments: Mapping[str, Any]
+) -> tuple[float, float] | None:
+    goal = NAVIGATION_GOALS.get(capability_id)
+    if goal is None:
+        return None
+    try:
+        x, y = goal(arguments)
+    except (KeyError, TypeError, ValueError, IndexError):
+        return None
+    return (x, y) if math.isfinite(x) and math.isfinite(y) else None
+
+
 # Named places, kept on this host (``places.py``), not on the robot.
 PLACES_LIST = "places.list"
 PLACES_MARK = "places.mark"
@@ -856,6 +888,11 @@ class _ObservationState:
         self._declared_decel_read = False
         # Straight drives being watched on every scan, keyed by call_id.
         self._guards: dict[str, _BrakingGuard] = {}
+        # The latest battery reading (live_telemetry.battery_payload) and the
+        # latest navigation goal sent on this connection, for a host's HMI.
+        self._battery: dict[str, float | None] | None = None
+        self._battery_seen_at: float | None = None
+        self._navigation: live_telemetry.NavigationRecord | None = None
 
     def _begin_track(
         self, call_id: str, capability_id: str, arguments: Mapping[str, Any]
@@ -877,6 +914,14 @@ class _ObservationState:
             reading = snapshot.get("range")
             if isinstance(reading, Mapping):
                 track.saw_range(reading.get("minimum_range_m"))
+            goal = _navigation_goal(capability_id, arguments)
+            if goal is not None:
+                self._navigation = live_telemetry.NavigationRecord(
+                    call_id=call_id,
+                    goal_x=goal[0],
+                    goal_y=goal[1],
+                    updated_at=time.monotonic(),
+                )
             if _served_deployment_mode() == "simulation":
                 if self.READS_SIM_CLOCK:
                     track.clock = sim_time.ClockRecord(_simulation_marker_topic())
@@ -1128,6 +1173,45 @@ class _ObservationState:
             track = self._motion_tracks.get(call_id)
             if track is not None:
                 track.saw_feedback(values, time.monotonic())
+            navigation = self._navigation
+            if navigation is not None and navigation.call_id == call_id:
+                navigation.saw_feedback(values, time.monotonic())
+
+    def _end_navigation(self, call_id: str, reason: str, *, reached: bool = False) -> None:
+        """Record how the navigation goal ``call_id`` ended, if it is the latest."""
+        with self._condition:
+            navigation = self._navigation
+            if (
+                navigation is not None
+                and navigation.call_id == call_id
+                and navigation.state == "navigating"
+            ):
+                navigation.end(reason, time.monotonic(), reached=reached)
+
+    def _store_battery(self, percentage: Any, voltage: Any, observed: float) -> None:
+        """A ``sensor_msgs/BatteryState`` reading; never a graph event."""
+        with self._condition:
+            self._battery = live_telemetry.battery_payload(percentage, voltage)
+            self._battery_seen_at = observed
+
+    def telemetry_readings(self) -> dict[str, Any]:
+        """What this connection currently knows, for ``live_telemetry.samples``."""
+        with self._condition:
+            snapshot = self._snapshot()
+            now = time.monotonic()
+            battery_fresh = (
+                self._battery is not None
+                and self._battery_seen_at is not None
+                and now - self._battery_seen_at <= live_telemetry.BATTERY_MAX_AGE_S
+            )
+            return {
+                "battery": dict(self._battery) if battery_fresh else None,
+                "battery_seen_at": self._battery_seen_at if battery_fresh else None,
+                "pose": snapshot.get("pose"),
+                "map_pose": snapshot.get("map_pose"),
+                "pose_seen_at": self._pose_seen_at,
+                "navigation": self._navigation.copy() if self._navigation is not None else None,
+            }
 
     def _motion_summary(
         self,
@@ -1166,7 +1250,7 @@ class _ObservationState:
                     # request, because going on would have broken the floor.
                     guard.ended = motion_outcome.GUARD_END_PLANNED_STOP
                 track.braking = guard.record(snapshot.get("pose"))
-        return motion_outcome.summarize(
+        summary = motion_outcome.summarize(
             track,
             status=status,
             result_values=result_values,
@@ -1176,11 +1260,20 @@ class _ObservationState:
             clearance_floor_m=_clearance_floor(),
             ended_at=time.monotonic(),
         )
+        if status is not None:
+            self._end_navigation(
+                call_id,
+                str(summary.get("reason") or ""),
+                reached=status == motion_outcome.STATUS_SUCCEEDED or _rule_reached(summary),
+            )
+        return summary
 
     def _forget_track(self, call_id: str) -> None:
         with self._condition:
             self._motion_tracks.pop(call_id, None)
             self._guards.pop(call_id, None)
+        # A goal dropped before its result came back was cancelled or stopped.
+        self._end_navigation(call_id, motion_outcome.REASON_CANCELLED)
 
     def add_graph_listener(self, listener: Callable[[str], None]) -> None:
         """Call ``listener(reason)`` when the robot's graph may have changed.
@@ -1271,6 +1364,8 @@ class _ObservationState:
         with self._condition:
             self._pose_seen_at = None
             self._velocity = None
+            self._battery_seen_at = None
+            self._battery = None
             self._range_seen_at = None
             self._camera_seen_at = None
             self._map_tf_seen_at = None
@@ -2657,6 +2752,13 @@ class GenericROS2Adapter:
             return None
         return method(max_seconds)
 
+    def telemetry_readings(self) -> dict[str, Any] | None:
+        """The backend's live readings for a host's HMI; None while disconnected."""
+        method = getattr(self.backend, "telemetry_readings", None)
+        if not callable(method) or not self.connected:
+            return None
+        return method()
+
     def silent_seconds(self) -> float | None:
         """Seconds since the robot last sent a reading; None if unknown."""
         method = getattr(self.backend, "silent_seconds", None)
@@ -2956,6 +3058,7 @@ class RclpyROS2Backend(_ObservationState):
             self._sensor_qos,
         )
         self._subscribe_lifecycle(node)
+        self._subscribe_battery(node)
         if self._presence_only:
             self._node = node
             self._graph_ready = False
@@ -2990,6 +3093,24 @@ class RclpyROS2Backend(_ObservationState):
         self._graph_ready = False
         self._create_action_clients(node)
         self._start_executor()
+
+    def _subscribe_battery(self, node: Any) -> None:
+        """Read only: the battery for a host's HMI (``live_telemetry``)."""
+        try:
+            from sensor_msgs.msg import BatteryState
+        except ImportError:
+            return
+
+        def battery(message: Any) -> None:
+            self._store_battery(
+                getattr(message, "percentage", None),
+                getattr(message, "voltage", None),
+                time.monotonic(),
+            )
+
+        node.create_subscription(
+            BatteryState, _battery_topic(), self._guarded(battery), self._sensor_qos
+        )
 
     def _subscribe_lifecycle(self, node: Any) -> None:
         topics = _lifecycle_event_topics()
@@ -4082,6 +4203,9 @@ class RosbridgeROS2Backend(_ObservationState):
                 "FLYTO_ROS2_TF_TOPIC",
                 "/tf",
             ): lambda: self._update_tf(message, observed),
+            _battery_topic(): lambda: self._store_battery(
+                message.get("percentage"), message.get("voltage"), observed
+            ),
         }
         handler = handlers.get(topic)
         if handler is None:
@@ -4207,6 +4331,11 @@ class RosbridgeROS2Backend(_ObservationState):
         if self._presence_only:
             # Odometry says the robot is there; a few a second is plenty.
             subscriptions = ((subscriptions[0][0], subscriptions[0][1], "reliable", 500),)
+        # Read only, sampled: the battery for a host's HMI, on every connection.
+        subscriptions = (
+            *subscriptions,
+            (_battery_topic(), BATTERY_STATE_TYPE, "best_effort", BATTERY_THROTTLE_MS),
+        )
         subscriptions = (
             *subscriptions,
             *(

@@ -2,6 +2,13 @@
 
 All notable project changes are recorded here.
 
+## 0.8.0 — 2026-10-12
+
+- Live readings for an HMI, read only. The ROS 2 manifest now declares three telemetry channels (`live_telemetry.CHANNELS`): `power.battery` (`percent` from `BatteryState.percentage` 0..1, `voltage_v`; an unmeasured field is null, never 0), `pose.planar` (`x`, `y`, `heading_deg`, `frame` — `map` while localization's transform is fresh, else `odom`; the goal and a `view_*` window only in the map frame), and `nav.goal` (`state` in idle/navigating/arrived/blocked/cancelled/failed, `distance_m` and `progress_pct` from Nav2's `distance_remaining`, the goal, the ended goal's `motion_outcome` reason). `discover_resource_manifests.telemetry_sampler` (interval 1 s) builds samples from connections the computer already holds: the presence watch and adapters built by `build_adapter`. It never opens a connection and never commands.
+- Both rosbridge connections and the rclpy node subscribe to `FLYTO_ROS2_BATTERY_TOPIC` (`/battery_state`, `sensor_msgs/msg/BatteryState`), at most once a second. A battery message is never a graph event.
+- `MANIFEST_EXTENSIONS` adds `presentation`: when the host asks, the manifest carries the module pack's `flyto.resource-presentation.v1` block, found by entry point `robotics` in group `flyto2.resource_presentations` (flyto-modules-robotics). No pack or a failing pack leaves the field out. Neither package imports the other.
+- Motion behaviour, the safety floor (0.35 m) and the request shape are unchanged.
+
 ## 0.7.1 — 2026-10-11
 
 - The same fix as 0.6.7 (`release/0.6.7`, the demo line off 0.6.6), on 0.7.0.
