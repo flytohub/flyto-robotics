@@ -68,16 +68,51 @@ def test_declarations_are_fresh_copies():
     ("percentage", "voltage", "expected"),
     [
         (0.64, 11.9, {"percent": 64.0, "voltage_v": 11.9}),
-        (1.0, 12.4, {"percent": 100.0, "voltage_v": 12.4}),
         # sensor_msgs/BatteryState: NaN means "not measured", never zero.
         (float("nan"), 11.2, {"percent": None, "voltage_v": 11.2}),
-        # Outside the message's 0..1 contract: not shown rather than guessed.
-        (64.0, 11.2, {"percent": None, "voltage_v": 11.2}),
         (None, float("nan"), {"percent": None, "voltage_v": None}),
     ],
 )
 def test_battery_payload_follows_the_battery_state_message(percentage, voltage, expected):
     assert live.battery_payload(percentage, voltage) == expected
+
+
+@pytest.mark.parametrize(
+    ("percentage", "percent"),
+    [
+        # TurtleBot3 burger-01 publishes 0..100 (observed 93.88, 2026-10-12).
+        (93.88, 93.9),
+        # The message's own contract: a fraction 0..1.
+        (0.9388, 93.9),
+        (0, 0.0),
+        (0.0, 0.0),
+        (1.0, 100.0),
+        (1.5, 1.5),
+        (100, 100.0),
+        # Out of range on either scale: unknown, never clamped or invented.
+        (101, None),
+        (100.01, None),
+        (-0.01, None),
+        (float("nan"), None),
+        (float("inf"), None),
+        (None, None),
+        (True, None),
+        ("93.88", None),
+    ],
+)
+def test_the_battery_percentage_is_read_on_the_scale_it_falls_in(percentage, percent):
+    assert live.battery_payload(percentage, 12.19)["percent"] == percent
+
+
+def test_the_percentage_scales_are_one_table_without_gaps_or_overlaps():
+    scales = live.PERCENTAGE_SCALES
+    assert [scale.name for scale in scales] == ["fraction", "percent"]
+    assert scales[0].low == 0.0 and scales[0].low_inclusive
+    for lower, upper in zip(scales, scales[1:]):
+        # Each scale starts where the previous one ends, the boundary on one side only.
+        assert upper.low == lower.high and not upper.low_inclusive
+    assert scales[-1].high == 100.0
+    assert all(scale.high * scale.factor == 100.0 for scale in scales)
 
 
 # --- pose -------------------------------------------------------------------
