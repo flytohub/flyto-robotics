@@ -138,8 +138,8 @@ def _default_requirements() -> tuple[str, ...]:
 
 
 def _clearance_floor() -> float:
-    """The LiDAR clearance a motion needs to start; never below 0.1 m."""
-    return max(0.1, float(os.getenv("FLYTO_ROS2_MIN_CLEARANCE_M", "0.35")))
+    """The LiDAR clearance a motion needs to start; never below 0.35 m."""
+    return max(0.35, float(os.getenv("FLYTO_ROS2_MIN_CLEARANCE_M", "0.35")))
 
 
 def _rotation_radius() -> float:
