@@ -182,6 +182,10 @@ def _launch_runtime(context: object) -> list[object]:
             output="screen",
         ),
     ]
+    # The closed-loop lab owns navigation startup: it configures every node
+    # itself, then asks this manager to RESUME (activate and bond). With
+    # autostart the manager raced it, and the lab found a node already
+    # active mid-bringup and failed closed ("partial activation").
     navigation_manager = Node(
         package="nav2_lifecycle_manager",
         executable="lifecycle_manager",
@@ -189,7 +193,7 @@ def _launch_runtime(context: object) -> list[object]:
         parameters=[
             {
                 "use_sim_time": True,
-                "autostart": True,
+                "autostart": False,
                 "attempt_respawn_reconnection": False,
                 "node_names": [
                     "controller_server",
