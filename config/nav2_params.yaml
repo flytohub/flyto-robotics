@@ -185,7 +185,11 @@ velocity_smoother:
     odom_topic: /flyto/odom
     odom_duration: 0.1
     deadband_velocity: [0.0, 0.0, 0.0]
-    velocity_timeout: 1.0
+    # Deadman: a silent controller must not keep the base moving longer
+    # than the safety supervisor's 0.30 s command timeout would.
+    # velocity_timeout + 1/smoothing_frequency + 0.10 m/s cap / max_decel
+    # = 0.15 + 0.05 + 0.10 <= 0.30 (tests/test_nav2_launch_contracts.py).
+    velocity_timeout: 0.15
     enable_stamped_cmd_vel: false
 
 map_server:
