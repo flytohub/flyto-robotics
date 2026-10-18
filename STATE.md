@@ -1,5 +1,15 @@
 # Flyto2 Robotics State
 
+## Serial-bus arm M0, simulated only (2026-10-18, unreleased)
+
+`SerialArmAdapter` reads arm state, refuses out-of-limit joint targets before
+any write, and reports a stop done only when torque or hold is confirmed by
+read-back, over an injectable `ArmBus`. Verified against `SimulatedArmBus`
+and flyto-core's contract validator and judge. The AM-ARM200 has not arrived:
+no real arm, serial port or LeRobot install has been used, the example
+profile's limits are placeholders (`limits_accepted: false`), and
+`lerobot_arm_bus.py` is unverified. See `docs/ARM_M0.md`.
+
 ## Scan staleness and rosbridge load (2026-10-12, 0.8.2)
 
 A straight drive's LiDAR staleness limit is derived from the measured scan

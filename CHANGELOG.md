@@ -2,14 +2,13 @@
 
 All notable project changes are recorded here.
 
-## [Unreleased]
+## Unreleased
 
-### Fixed
-
-- Twin: `sim/twin/worlds/flyto_demo_room.world` declares its ground plane and
-  sun instead of including them from Gazebo Fuel. On 2026-10-18 Fuel answered
-  HTTP 502, the Gazebo server exited at start and Nav2 never activated; the
-  world now loads with no network. `demo-room-obstacle-stop` passes on it.
+- Serial-bus arm, milestone M0 (AM-ARM200 follower, hardware not yet arrived; see `docs/ARM_M0.md`). `arm_bus.ArmBus` is the bus seam (positions in radians by joint name, torque state, goal write, torque enable/disable; any failure is `BusError`) with `SimulatedArmBus` for tests (stalled joint, dropped connection, ignored torque-off, sagging hold). `arm_adapter.SerialArmAdapter` serves `arm.state`, `arm.move_joints` and `arm.halt` from an `flyto.arm-profile.v1` profile: out-of-limit targets are refused before any write and never clamped, moves are stepped at the declared speed, a stall ends the move with a stop, the stop is `completed` only when the read-back confirms it (hold: torque on and drift within tolerance; torque_off: every joint reads off), a bus error mid-move is `failed` with `state_known: false` and is never re-sent, and moves stay refused until state is read again or, after an unconfirmed stop, until a stop is confirmed. Moves are refused while the profile's `limits_accepted` is false.
+- `arm_contracts.capability_rows(profile)`: `flyto.capability-contract.v1` rows for the three capabilities (read_only state; movement move with finite per-joint bounds and `distance_to` evidence on `joint_positions`; `role: safe_stop` halt with per-joint `delta` evidence in hold mode). Checked with flyto-core 2.40.0 `validate_contract` and `judge` when flyto-core is importable.
+- `lerobot_arm_bus.LeRobotArmBus`: an `ArmBus` over an injected LeRobot-style motors bus, unverified until hardware acceptance; it imports nothing and opens no port.
+- `examples/arm-profiles/am-arm200-follower.json`: placeholder limits, `limits_accepted: false`.
+- Twin: `sim/twin/worlds/flyto_demo_room.world` declares its ground plane and sun instead of including them from Gazebo Fuel. On 2026-10-18 Fuel answered HTTP 502, the Gazebo server exited at start and Nav2 never activated; the world now loads with no network. `demo-room-obstacle-stop` passes on it.
 
 ## 0.8.2 — 2026-10-12
 

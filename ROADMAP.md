@@ -23,7 +23,13 @@
    - return odom/LiDAR/camera evidence;
    - Cloud independently verifies the objective.
 
-4. **Retire appliance compatibility source**
+4. **Serial-bus arm (AM-ARM200 follower)**
+   - M0 in simulation is done (`docs/ARM_M0.md`): state, joint limits,
+     measured stop, fail closed;
+   - run the arrival-day checklist on the physical arm, then wire the host;
+   - M1 tabletop pick and place confirmed by an independent camera.
+
+5. **Retire appliance compatibility source**
    - remove old job-runner/lifecycle/recovery implementation after all
      historical tests/downstream consumers have migrated.
 

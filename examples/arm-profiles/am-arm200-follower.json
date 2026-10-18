@@ -1,0 +1,22 @@
+{
+  "schema": "flyto.arm-profile.v1",
+  "resource_id": "am-arm200-follower",
+  "note": "Placeholder, unverified until hardware acceptance. Joint names, limits, speed and tolerances are conservative guesses for a six-joint tabletop follower arm, not measured on the AM-ARM200. limits_accepted stays false until the arrival-day checklist (docs/ARM_M0.md) has measured them on the physical arm.",
+  "limits_accepted": false,
+  "position_unit": "rad",
+  "joints": [
+    {"name": "shoulder_pan", "min_rad": -0.5, "max_rad": 0.5},
+    {"name": "shoulder_lift", "min_rad": -0.5, "max_rad": 0.5},
+    {"name": "elbow_flex", "min_rad": -0.5, "max_rad": 0.5},
+    {"name": "wrist_flex", "min_rad": -0.5, "max_rad": 0.5},
+    {"name": "wrist_roll", "min_rad": -0.5, "max_rad": 0.5},
+    {"name": "gripper", "min_rad": 0.0, "max_rad": 0.5}
+  ],
+  "position_tolerance_rad": 0.05,
+  "max_joint_speed_rad_s": 0.2,
+  "control_period_s": 0.05,
+  "move_deadline_s": 15.0,
+  "stall": {"window_s": 1.0, "min_progress_rad": 0.005},
+  "settle": {"samples": 3, "max_drift_rad": 0.01},
+  "stop": {"mode": "hold", "confirm_samples": 5, "confirm_period_s": 0.05, "max_drift_rad": 0.02}
+}

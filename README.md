@@ -534,6 +534,7 @@ software on the robot.
 | [Demo](docs/DEMO.md) | Gazebo and lab workflows |
 | [Virtual Robot Lab](docs/VIRTUAL_ROBOT_LAB.md) | simulation matrix |
 | [Showcase evidence](docs/SHOWCASE_EVIDENCE.md) | evidence interpretation |
+| [Serial-bus arm M0](docs/ARM_M0.md) | arm state, joint limits, measured stop; arrival-day checklist |
 | [Historical handoffs](handoffs/_registry.md) | old Pi/runtime work and findings |
 
 Dated handoffs and Git history preserve retired-appliance evidence; current

@@ -23,6 +23,16 @@
 - [ ] Verify Cloud objective completion only from bound independent evidence.
 - [ ] Remove historical appliance source after migration dependencies are gone.
 
+## Serial-bus arm (AM-ARM200 follower)
+
+- [x] M0 in simulation: state, refused out-of-limit targets, measured stop,
+      fail closed on a lost connection (`docs/ARM_M0.md`).
+- [ ] Arrival-day checklist on the physical arm (connect, state, limits,
+      measured stop, low-speed move); replace the placeholder profile.
+- [ ] Host wiring: entry point and flyto-modules-robotics pack rows, after
+      the checklist passes.
+- [ ] M1 tabletop pick and place confirmed by an independent camera.
+
 ## Verification
 
 Before landing source changes:
