@@ -161,3 +161,14 @@ def test_flyto_core_judges_a_confirmed_hold_usable_and_a_sagging_one_not():
     sagged = adapter.safe_stop()
     observed = sagged.evidence["observations"]["joint_positions"]
     assert not all(core.judge(spec, {}, observed)["usable"] for spec in specs)
+
+
+def test_every_arm_call_but_the_stop_is_cancellable_as_cloud_reads_it():
+    """Cloud's vocabulary cancels every dispatched call except the stop and a stream; a read
+    is cancellable too (cancelling it stops waiting). The adapter must say the same."""
+    from flyto_robotics.adapter_contract import _CAPABILITY_METADATA
+
+    manipulation = {
+        cap: row for cap, row in _CAPABILITY_METADATA.items() if cap.startswith("manipulation.")
+    }
+    assert manipulation and all(row["cancellable"] for row in manipulation.values())

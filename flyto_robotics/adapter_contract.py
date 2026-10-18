@@ -152,8 +152,8 @@ _CAPABILITY_METADATA: Mapping[str, Mapping[str, Any]] = {
         "safety_class": "read_only",
         "required_permissions": (),
         "requires_safe_stop": False,
-        # A read that returns at once leaves no call to withdraw.
-        "cancellable": False,
+        # Cancellable as every dispatched read is in Cloud's vocabulary.
+        "cancellable": True,
     },
     "manipulation.move_joints": {
         "display_name": "Move joints",

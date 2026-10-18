@@ -62,7 +62,7 @@ def state_row(profile: ArmProfile) -> dict[str, Any]:
             "actuates": False,
             "safety_class": "read_only",
             "requires_safe_stop": False,
-            "cancellable": False,
+            "cancellable": True,
             "idempotent": True,
         },
     }
