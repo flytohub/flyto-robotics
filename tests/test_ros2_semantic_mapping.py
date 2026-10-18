@@ -1,10 +1,10 @@
 """ROS 2 semantic mapping: a graph interface is evidence, never an authorization.
 
 The ROS 2 pairing manifest maps a Flyto2 capability onto a standard ROS 2
-interface. The approved interfaces per stack are one declarative table
-(``_STACK_INTERFACES``); these tests hold every row of it to the rule that an
-interface the table does not approve for that stack is refused, whatever the
-manifest claims.
+interface. The approved interfaces per stack (``_STACK_INTERFACES``) are
+derived from one declarative table, ``ros2_interfaces.INTERFACES``; these
+tests hold every stack to the rule that an interface it does not approve is
+refused, whatever the manifest claims.
 """
 
 from __future__ import annotations
@@ -75,8 +75,9 @@ def test_an_interface_approved_for_another_stack_is_refused(
 
 
 @pytest.mark.parametrize("interface_type", [
-    "nav2_msgs/action/NavigateThroughPoses",
-    "nav2_msgs/action/DriveOnHeading",
+    # Real Nav2 actions the generic adapter never drives.
+    "nav2_msgs/action/FollowPath",
+    "nav2_msgs/action/ComputePathToPose",
     "example_vendor_msgs/action/NavigateToPose",
 ])
 def test_a_plausible_but_unapproved_nav2_interface_is_refused(interface_type: str) -> None:

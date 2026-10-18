@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from .capabilities import default_capability_registry
+from .ros2_interfaces import stack_interfaces
 
 ROS2_ADAPTER_CONTRACT_VERSION = "flyto.robotics.ros2-adapter-manifest.v1"
 ROS2_RUNTIME_CONTRACT_VERSION = "flyto.robotics.ros2-runtime-snapshot.v1"
@@ -83,23 +84,10 @@ _UNSAFE_INTERFACE_MARKERS = (
     "wheel_speed",
     "joint_jog",
 )
-_STACK_INTERFACES = {
-    "nav2": frozenset({"nav2_msgs/action/NavigateToPose"}),
-    "moveit2": frozenset(
-        {
-            "moveit_msgs/action/MoveGroup",
-            "moveit_msgs/action/Pickup",
-            "moveit_msgs/action/Place",
-        }
-    ),
-    "ros2_control": frozenset(
-        {
-            "control_msgs/action/FollowJointTrajectory",
-            "control_msgs/action/GripperCommand",
-        }
-    ),
-}
-
+#: Stack -> approved interface types, derived from the one table the generic
+#: ROS 2 adapter drives from, so an approval can never name an action the
+#: adapter does not use, nor miss one it does.
+_STACK_INTERFACES = stack_interfaces()
 
 class Ros2PairingError(ValueError):
     """Raised when a ROS 2 manifest or readiness snapshot is unsafe."""

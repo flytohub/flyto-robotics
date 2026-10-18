@@ -50,6 +50,7 @@ from . import (
     path_clearance,
     places,
     provider_evidence,
+    ros2_interfaces,
     sim_time,
     ssh_transport,
 )
@@ -675,55 +676,15 @@ def _supervised_arguments(
         )
     return bounded, None
 
-DEFAULT_INTERFACES = {
-    "motion.navigate": (
-        "action",
-        os.getenv("FLYTO_ROS2_NAVIGATE_ACTION", "/navigate_to_pose"),
-        "nav2_msgs/action/NavigateToPose",
-    ),
-    "vision.observe": (
-        "topic",
-        os.getenv("FLYTO_ROS2_CAMERA_COMPRESSED_TOPIC", "/camera/image_raw/compressed"),
-        "sensor_msgs/msg/CompressedImage",
-    ),
-    "sensing.map": (
-        "topic",
-        os.getenv("FLYTO_ROS2_MAP_TOPIC", "/map"),
-        "nav_msgs/msg/OccupancyGrid",
-    ),
-    "motion.advance": (
-        "action",
-        os.getenv("FLYTO_ROS2_ADVANCE_ACTION", "/drive_on_heading"),
-        "nav2_msgs/action/DriveOnHeading",
-    ),
-    "motion.retreat": (
-        "action",
-        os.getenv("FLYTO_ROS2_BACKUP_ACTION", "/backup"),
-        "nav2_msgs/action/BackUp",
-    ),
-    "motion.rotate": (
-        "action",
-        os.getenv("FLYTO_ROS2_SPIN_ACTION", "/spin"),
-        "nav2_msgs/action/Spin",
-    ),
-    "motion.halt": (
-        "topic",
-        os.getenv("FLYTO_ROS2_CMD_VEL_TOPIC", "/cmd_vel"),
-        "geometry_msgs/msg/Twist|geometry_msgs/msg/TwistStamped",
-    ),
-}
+#: Capability id -> (kind, graph name, type), derived from the one interface
+#: table that the ROS 2 pairing approval is derived from too.
+DEFAULT_INTERFACES = ros2_interfaces.declared_interfaces()
 
 # Interfaces the adapter uses on its own behalf, never declared as capabilities:
 # an escape from an obstacle's inflation sends its waypoint and the original
 # goal as one NavigateThroughPoses goal when the graph has it.
 NAVIGATE_THROUGH = "motion.navigate_through_poses"
-ESCAPE_INTERFACES = {
-    NAVIGATE_THROUGH: (
-        "action",
-        os.getenv("FLYTO_ROS2_NAVIGATE_THROUGH_ACTION", "/navigate_through_poses"),
-        "nav2_msgs/action/NavigateThroughPoses",
-    ),
-}
+ESCAPE_INTERFACES = ros2_interfaces.own_interfaces()
 GET_PARAMETERS_TYPE = "rcl_interfaces/srv/GetParameters"
 
 
@@ -3613,18 +3574,7 @@ class RclpyROS2Backend(_ObservationState):
         return evidence
 
     def _action_type(self, capability_id: str):
-        from nav2_msgs.action import BackUp, DriveOnHeading, NavigateToPose, Spin
-
-        if capability_id == NAVIGATE_THROUGH:
-            from nav2_msgs.action import NavigateThroughPoses
-
-            return NavigateThroughPoses
-        return {
-            "motion.navigate": NavigateToPose,
-            "motion.advance": DriveOnHeading,
-            "motion.retreat": BackUp,
-            "motion.rotate": Spin,
-        }[capability_id]
+        return ros2_interfaces.interface_class(_interface(capability_id)[2])
 
     def action_available(self, capability_id: str) -> bool:
         """Whether the graph offers an action the adapter uses on its own behalf."""

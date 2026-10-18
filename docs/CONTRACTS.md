@@ -112,7 +112,14 @@ actuator values.
 The standard profile maps the existing executable navigation atoms to Nav2's
 cancellable `NavigateToPose` action. Every adapter must declare both simulation
 and hardware support, so the mission contract cannot fork between Gazebo and a
-physical robot. MoveIt 2 and ros2_control action types are allowlisted for later
+physical robot. The interface types a manifest may map onto a stack come from
+one table, `flyto_robotics/ros2_interfaces.py` (`INTERFACES`), which the
+generic ROS 2 adapter also drives from: Nav2 approves exactly the actions the
+adapter sends goals to (`NavigateToPose`, `DriveOnHeading`, `BackUp`, `Spin`
+and the escape's `NavigateThroughPoses`), and never a topic such as the zero
+`Twist` stop. Approval is not execution: the grant-bound action executor still
+runs only `NavigateToPose` for semantic navigation and refuses any other
+authorized type. MoveIt 2 and ros2_control action types are allowlisted for later
 adapters, but a manifest is rejected until its Flyto2 capability is actually
 registered; the pairing report therefore cannot claim an integration that the
 runtime cannot execute.
