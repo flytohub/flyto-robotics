@@ -1,4 +1,10 @@
-"""Grant-bound, semantic-only ROS 2 NavigateToPose execution."""
+"""Grant-bound, semantic-only ROS 2 navigation execution.
+
+The one action executed is the ``executed`` row of
+:data:`flyto_robotics.ros2_interfaces.INTERFACES` (Nav2 ``NavigateToPose``),
+the same table the adapter and the pairing approval read. A grant for any
+other interface is refused.
+"""
 
 from __future__ import annotations
 
@@ -11,6 +17,7 @@ from typing import Any
 
 from .contracts import StationPose
 from .ros2_execution import resolve_ros2_execution_target
+from .ros2_interfaces import executed_interface, interface_class
 from .semantic_map import parse_semantic_location_map
 
 FAULT_SCENARIOS = {
@@ -173,9 +180,10 @@ def prepare_authorized_navigation(
         runtime,
         observed_at=observed_at,
     )
-    if target.interface_kind != "action":
+    executed = executed_interface()
+    if target.interface_kind != executed.kind:
         raise Ros2ActionExecutionError("authorized adapter is not an action")
-    if target.interface_type != "nav2_msgs/action/NavigateToPose":
+    if target.interface_type != executed.interface_type:
         raise Ros2ActionExecutionError("authorized action type is unsupported")
     if target.capability_id not in {
         "robotics.motion.navigate@1",
@@ -424,7 +432,6 @@ def execute_rclpy_navigation(
 
     import rclpy
     from action_msgs.msg import GoalStatus
-    from nav2_msgs.action import NavigateToPose
     from nav_msgs.msg import Odometry
     from rclpy.action import ActionClient
     from rclpy.duration import Duration
@@ -535,9 +542,11 @@ def execute_rclpy_navigation(
         execution_publisher.publish(message)
 
     publish_execution_state(False)
+    # The goal fields below are NavigateToPose's; the class comes from the table.
+    navigate_action = interface_class(executed_interface().interface_type)
     action_client = ActionClient(
         node,
-        NavigateToPose,
+        navigate_action,
         prepared.target.interface_name,
     )
     stop_client = node.create_client(Trigger, emergency_stop_service)
@@ -584,7 +593,7 @@ def execute_rclpy_navigation(
         # before goal submission rather than a one-shot topic sighting.
         _ = transform_listener
 
-        goal = NavigateToPose.Goal()
+        goal = navigate_action.Goal()
         goal.pose.header.frame_id = prepared.frame_id
         goal.pose.header.stamp = node.get_clock().now().to_msg()
         goal.pose.pose.position.x = prepared.pose.x

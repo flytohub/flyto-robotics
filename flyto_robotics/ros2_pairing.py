@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from .capabilities import default_capability_registry
-from .ros2_interfaces import stack_interfaces
+from .ros2_interfaces import executed_interface, stack_interfaces
 
 ROS2_ADAPTER_CONTRACT_VERSION = "flyto.robotics.ros2-adapter-manifest.v1"
 ROS2_RUNTIME_CONTRACT_VERSION = "flyto.robotics.ros2-runtime-snapshot.v1"
@@ -368,6 +368,7 @@ def standard_ros2_adapter_manifest(robot_id: str) -> dict[str, Any]:
     """Build the portable Nav2 profile for the currently executable atoms."""
 
     normalized_robot_id = _identifier(robot_id, "robot_id")
+    executed = executed_interface()
     manifest: dict[str, Any] = {
         "contract_version": ROS2_ADAPTER_CONTRACT_VERSION,
         "profile_id": "flyto2.ros2.standard.v1",
@@ -383,11 +384,11 @@ def standard_ros2_adapter_manifest(robot_id: str) -> dict[str, Any]:
                     "robotics.motion.navigate@1",
                     "robotics.motion.navigate_to_location@1",
                 ],
-                "stack": "nav2",
+                "stack": executed.stack,
                 "interface": {
-                    "kind": "action",
-                    "name": "/navigate_to_pose",
-                    "type": "nav2_msgs/action/NavigateToPose",
+                    "kind": executed.kind,
+                    "name": executed.default_name,
+                    "type": executed.interface_type,
                 },
                 "managed_nodes": [
                     "/behavior_server",

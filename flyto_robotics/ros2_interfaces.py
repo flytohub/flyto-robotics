@@ -6,7 +6,10 @@ Every consumer derives its view from ``INTERFACES``:
   and the ones it uses on its own behalf (``own_interfaces``);
 - the action class the adapter sends a goal with (``interface_class``);
 - the action types the ROS 2 pairing manifest approves per stack
-  (``stack_interfaces``).
+  (``stack_interfaces``);
+- the one action the grant-bound executor (``ros2_action_executor``) runs,
+  and the interface the standard pairing profile names for it
+  (``executed_interface``).
 
 A pairing approval is therefore exactly the set of actions the adapter can
 drive, plus the rows reserved for stacks no adapter here drives yet. Adding a
@@ -44,12 +47,15 @@ class Ros2Interface:
     #: The environment variable that renames the graph endpoint, and its default.
     name_env: str | None = None
     default_name: str | None = None
+    #: The grant-bound executor runs goals on this interface. Exactly one row.
+    executed: bool = False
 
 
 INTERFACES: tuple[Ros2Interface, ...] = (
     Ros2Interface(
         "nav2_msgs/action/NavigateToPose", "action", DECLARED, "nav2",
         "motion.navigate", "FLYTO_ROS2_NAVIGATE_ACTION", "/navigate_to_pose",
+        executed=True,
     ),
     Ros2Interface(
         "sensor_msgs/msg/CompressedImage", "topic", DECLARED, None,
@@ -124,6 +130,16 @@ def stack_interfaces() -> dict[str, frozenset[str]]:
         if row.stack is not None:
             stacks.setdefault(row.stack, set()).add(row.interface_type)
     return {stack: frozenset(types) for stack, types in stacks.items()}
+
+
+def executed_interface() -> Ros2Interface:
+    """The one row the grant-bound executor runs; anything else it refuses."""
+    rows = [row for row in INTERFACES if row.executed]
+    if len(rows) != 1:
+        raise RuntimeError(
+            f"exactly one interface row must be executed, found {len(rows)}"
+        )
+    return rows[0]
 
 
 def interface_class(interface_type: str):

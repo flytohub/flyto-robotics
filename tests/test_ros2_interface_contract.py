@@ -121,3 +121,77 @@ def test_the_action_class_is_resolved_from_the_table_type(monkeypatch) -> None:
     for capability_id, interface_type in _driven_actions().items():
         resolved = backend._action_type(capability_id)
         assert resolved is classes[interface_type.rsplit("/", 1)[1]], capability_id
+
+
+# -- the grant-bound executor reads the same table --------------------------------
+
+
+def _with_executed(monkeypatch, **changes) -> None:
+    """Swap the executed row of the one table for an altered copy."""
+    from dataclasses import replace
+
+    from flyto_robotics import ros2_interfaces
+
+    rows = tuple(
+        replace(row, **changes) if row.executed else row
+        for row in ros2_interfaces.INTERFACES
+    )
+    monkeypatch.setattr(ros2_interfaces, "INTERFACES", rows)
+
+
+def test_the_executor_executes_exactly_one_row_and_it_is_declared_and_approved() -> None:
+    from flyto_robotics.ros2_interfaces import (
+        declared_interfaces,
+        executed_interface,
+        stack_interfaces,
+    )
+
+    row = executed_interface()
+
+    assert (row.kind, row.interface_type) == ("action", "nav2_msgs/action/NavigateToPose")
+    # The adapter declares it, and the pairing approves it for its stack.
+    assert declared_interfaces()[row.capability_id][2] == row.interface_type
+    assert row.interface_type in stack_interfaces()[row.stack]
+
+
+def test_the_executor_refuses_what_the_table_does_not_say_it_executes(monkeypatch) -> None:
+    from tests.test_ros2_action_executor import _prepared
+
+    # Unchanged, the grant for NavigateToPose prepares.
+    assert _prepared()[0].target.interface_type == "nav2_msgs/action/NavigateToPose"
+    _with_executed(monkeypatch, interface_type="nav2_msgs/action/NavigateThroughPoses")
+
+    with pytest.raises(Exception, match="authorized action type is unsupported"):
+        _prepared()
+
+
+def test_the_standard_pairing_profile_names_the_executed_row(monkeypatch) -> None:
+    from flyto_robotics.ros2_interfaces import executed_interface
+    from flyto_robotics.ros2_pairing import standard_ros2_adapter_manifest
+
+    def interface() -> dict:
+        (adapter,) = standard_ros2_adapter_manifest("robot-1")["adapters"]
+        return adapter["interface"]
+
+    row = executed_interface()
+    assert interface() == {
+        "kind": row.kind, "name": row.default_name, "type": row.interface_type,
+    }
+    _with_executed(monkeypatch, default_name="/navigate_somewhere")
+    assert interface()["name"] == "/navigate_somewhere"
+
+
+def test_more_than_one_executed_row_is_an_error(monkeypatch) -> None:
+    from dataclasses import replace
+
+    from flyto_robotics import ros2_interfaces
+
+    rows = tuple(
+        replace(row, executed=True) if row.use == ros2_interfaces.DECLARED and
+        row.kind == "action" else row
+        for row in ros2_interfaces.INTERFACES
+    )
+    monkeypatch.setattr(ros2_interfaces, "INTERFACES", rows)
+
+    with pytest.raises(RuntimeError, match="exactly one"):
+        ros2_interfaces.executed_interface()
