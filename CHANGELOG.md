@@ -2,6 +2,15 @@
 
 All notable project changes are recorded here.
 
+## [Unreleased]
+
+### Fixed
+
+- Twin: `sim/twin/worlds/flyto_demo_room.world` declares its ground plane and
+  sun instead of including them from Gazebo Fuel. On 2026-10-18 Fuel answered
+  HTTP 502, the Gazebo server exited at start and Nav2 never activated; the
+  world now loads with no network. `demo-room-obstacle-stop` passes on it.
+
 ## 0.8.2 — 2026-10-12
 
 - A late scan no longer stops a straight drive that has room to stop. Physical robot, 2026-10-12 23:29 (0.8.1): a 2.0 m `motion.advance` ended at 0.612 m with `sensor_stale`; the log reads `stale {'scan_age_s': 0.965, 'limit_s': 0.96}`. The limit was `max(FLYTO_ROS2_STOP_SCAN_TIMEOUT_S 0.5, 3 x worst recent scan interval 0.32)`. Read-only through the same tunnel afterwards the LiDAR's header stamps stepped 0.100 s while receipt intervals reached 0.36 s, and every receipt gap over 0.2 s stalled odometry with it: the scans were held up in transport (rosbridge on the robot at 75 % of a core), not missing.
