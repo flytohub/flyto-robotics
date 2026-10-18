@@ -4,13 +4,13 @@ Built from an :class:`~flyto_robotics.arm_adapter.ArmProfile`, so the bounds a
 host enforces and the tolerances it judges with are exactly the ones the
 adapter enforces itself:
 
-* ``arm.state``: read only, no evidence.
-* ``arm.move_joints``: one ``number`` parameter per joint (``<joint>_rad``)
+* ``manipulation.state``: read only, no evidence.
+* ``manipulation.move_joints``: one ``number`` parameter per joint (``<joint>_rad``)
   whose ``min``/``max`` are the profile's joint limits, and one ``distance_to``
   evidence spec per joint on ``joint_positions`` in frame ``joints``. The
   tolerance is the adapter's arrival tolerance plus its settle drift, so the
   contract accepts no end pose the adapter would not have reported as arrived.
-* ``arm.halt``: ``role: safe_stop``. In ``hold`` mode one ``delta`` spec per
+* ``motion.halt``: ``role: safe_stop``. In ``hold`` mode one ``delta`` spec per
   joint says the joint did not move more than the stop's drift tolerance
   between the hold being written and the end of the confirmation window. A
   ``torque_off`` stop is confirmed by the torque read-back the adapter reports

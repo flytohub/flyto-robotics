@@ -13,7 +13,12 @@ import math
 
 import pytest
 
-from flyto_robotics.adapter_contract import OUTCOME_COMPLETED, CallRequest
+from flyto_robotics.adapter_contract import (
+    KNOWN_CAPABILITY_IDS,
+    OUTCOME_COMPLETED,
+    CallRequest,
+    capability_metadata,
+)
 from flyto_robotics.arm_adapter import (
     CAPABILITY_HALT,
     CAPABILITY_MOVE,
@@ -34,6 +39,24 @@ def rows_by_id(profile):
 @pytest.fixture(params=["hold", "torque_off"])
 def profile(request):
     return parse_profile(raw_profile(stop_mode=request.param))
+
+
+def test_the_arm_serves_the_shared_vocabulary_ids(profile):
+    """Cloud approves only vocabulary capabilities, so the arm speaks them, not ids of its own.
+
+    A manipulator's state and joint moves are the ``manipulation`` family; its
+    stop is the one shipped safe stop, whatever is moving.
+    """
+    rows = rows_by_id(profile)
+
+    assert set(rows) == {"manipulation.state", "manipulation.move_joints", "motion.halt"}
+    assert {"manipulation.grasp", "manipulation.release"} <= KNOWN_CAPABILITY_IDS
+    for capability_id, row in rows.items():
+        assert capability_id in KNOWN_CAPABILITY_IDS and row["module_id"] == capability_id
+        metadata = capability_metadata(capability_id)
+        assert row["contract"]["safety_class"] == metadata["safety_class"]
+        assert row["contract"]["requires_safe_stop"] == metadata["requires_safe_stop"]
+        assert row["contract"]["cancellable"] == metadata["cancellable"]
 
 
 def test_the_three_m0_capabilities_are_declared(profile):

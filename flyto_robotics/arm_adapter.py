@@ -5,13 +5,13 @@ the declared joint limits, and stop it with a stop that is *measured*. It has
 three capabilities, each with a ``flyto.capability-contract.v1`` row in
 :mod:`flyto_robotics.arm_contracts`:
 
-``arm.state``
+``manipulation.state``
     read every declared joint's position and torque state. Nothing is written.
-``arm.move_joints``
+``manipulation.move_joints``
     move every joint to an absolute target, bounded by the profile's limits
     and speed. A target outside a limit is refused before the bus is touched;
     it is never clamped.
-``arm.halt``
+``motion.halt``
     the safe stop. In ``hold`` mode the adapter writes the measured pose as the
     goal, reads back that torque is on and that no joint drifts beyond the
     declared tolerance over the confirmation window. In ``torque_off`` mode it
@@ -64,9 +64,13 @@ from .arm_bus import ArmBus, BusError
 
 PROFILE_SCHEMA = "flyto.arm-profile.v1"
 
-CAPABILITY_STATE = "arm.state"
-CAPABILITY_MOVE = "arm.move_joints"
-CAPABILITY_HALT = "arm.halt"
+# The shared capability vocabulary's ids (``adapter_contract.KNOWN_CAPABILITY_IDS``,
+# Cloud's ``capabilities.CAPABILITIES``): a Space approves only those. The
+# state read and joint moves are the ``manipulation`` family; the stop is the
+# one shipped safe stop, whatever machine it stops.
+CAPABILITY_STATE = "manipulation.state"
+CAPABILITY_MOVE = "manipulation.move_joints"
+CAPABILITY_HALT = "motion.halt"
 
 STOP_HOLD = "hold"
 STOP_TORQUE_OFF = "torque_off"
@@ -369,7 +373,9 @@ class SerialArmAdapter:
         if capability_id == CAPABILITY_STATE:
             if request.arguments:
                 result = CallResult(
-                    request.call_id, OUTCOME_REFUSED, detail="arm.state takes no arguments"
+                    request.call_id,
+                    OUTCOME_REFUSED,
+                    detail=f"{CAPABILITY_STATE} takes no arguments",
                 )
             else:
                 result = self.read_state(request.call_id)

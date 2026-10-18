@@ -144,6 +144,38 @@ _CAPABILITY_METADATA: Mapping[str, Mapping[str, Any]] = {
         "cancellable": True,
         "revision": 1,
     },
+    # A manipulator: any arm, gripper or end effector. The bounds are the
+    # device's own declared arguments; the stop is ``motion.halt``.
+    "manipulation.state": {
+        "display_name": "Manipulator state",
+        "description": "Read where the manipulator's joints and gripper are now",
+        "safety_class": "read_only",
+        "required_permissions": (),
+        "requires_safe_stop": False,
+        # A read that returns at once leaves no call to withdraw.
+        "cancellable": False,
+    },
+    "manipulation.move_joints": {
+        "display_name": "Move joints",
+        "description": "Move the manipulator's joints to a target pose within their limits",
+        "safety_class": "movement",
+        "required_permissions": ("robot.motion",),
+        "requires_safe_stop": True,
+    },
+    "manipulation.grasp": {
+        "display_name": "Grasp",
+        "description": "Close the gripper on an object and hold it",
+        "safety_class": "movement",
+        "required_permissions": ("robot.motion",),
+        "requires_safe_stop": True,
+    },
+    "manipulation.release": {
+        "display_name": "Release",
+        "description": "Open the gripper and let go of what it holds",
+        "safety_class": "movement",
+        "required_permissions": ("robot.motion",),
+        "requires_safe_stop": True,
+    },
     "vision.stream": {
         "display_name": "Vision Stream",
         "description": "Open an approved expiring live-view reference",
