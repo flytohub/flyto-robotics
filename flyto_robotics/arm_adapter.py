@@ -1,8 +1,9 @@
 """A joint-space arm adapter over any :class:`~flyto_robotics.arm_bus.ArmBus`.
 
 Milestone M0 for a serial-bus arm: read its state, refuse any target outside
-the declared joint limits, and stop it with a stop that is *measured*. It has
-three capabilities, each with a ``flyto.capability-contract.v1`` row in
+the declared joint limits, and stop it with a stop that is *measured*. M1 adds
+a gripper: grasp and release, each confirmed by read-back. Every capability
+has a ``flyto.capability-contract.v1`` row in
 :mod:`flyto_robotics.arm_contracts`:
 
 ``manipulation.state``
@@ -18,6 +19,16 @@ three capabilities, each with a ``flyto.capability-contract.v1`` row in
     disables torque and reads back that every joint reports torque off. The
     stop is ``completed`` only when that read-back confirms it, and ``failed``
     otherwise.
+``manipulation.grasp``
+    close the profile's gripper joint toward its closed limit. ``completed``
+    only when read-back shows the jaws stopped short of the closed limit by at
+    least ``object_min_gap_rad`` and held there within ``hold.max_drift_rad``
+    over the hold window: closed on something. Jaws that close fully are a
+    ``failed`` grasp with ``object_held: false``, never a completed one.
+``manipulation.release``
+    open the gripper to ``open_to_rad``, which must lie between the profile's
+    release position and the gripper's open limit. ``completed`` only when
+    read-back shows the jaws there and staying there.
 
 Everything the adapter decides comes from an :class:`ArmProfile`: joint names,
 limits, tolerances, speed, stall window and stop mode. Nothing here names a
@@ -34,6 +45,8 @@ Fail closed:
   read succeeds;
 * a stop that cannot be confirmed latches: moves stay refused until a later
   stop is confirmed.
+
+Grasp and release are moves: they follow every rule above.
 
 Results reuse :mod:`flyto_robotics.adapter_contract` (``CallRequest``,
 ``CallResult``, the outcome constants), so a host invokes this adapter the way
@@ -71,6 +84,8 @@ PROFILE_SCHEMA = "flyto.arm-profile.v1"
 CAPABILITY_STATE = "manipulation.state"
 CAPABILITY_MOVE = "manipulation.move_joints"
 CAPABILITY_HALT = "motion.halt"
+CAPABILITY_GRASP = "manipulation.grasp"
+CAPABILITY_RELEASE = "manipulation.release"
 
 STOP_HOLD = "hold"
 STOP_TORQUE_OFF = "torque_off"
@@ -82,6 +97,17 @@ FRAME = "joints"
 # Every target argument is the joint name plus this suffix.
 ARGUMENT_SUFFIX = "_rad"
 
+# The gripper's observations: the jaw position (frame ``joints``, keyed by the
+# gripper joint's name) and whether the jaws hold an object (``held``: 1 or 0,
+# next to the jaw position it was decided at).
+GRIPPER_OBSERVATION = "gripper_position"
+HELD_OBSERVATION = "object_held"
+HELD_FIELD = "held"
+# The release call's one argument.
+RELEASE_ARGUMENT = "open_to_rad"
+# Which end of the gripper joint's travel is closed.
+CLOSES_TOWARD = ("min", "max")
+
 # Why a call ended, machine readable (``evidence.arm_outcome.reason``).
 REASON_COMPLETED = "completed"
 REASON_STALLED = "stalled"
@@ -91,6 +117,11 @@ REASON_CANCELLED = "cancelled"
 REASON_STOP_CONFIRMED = "stop_confirmed"
 REASON_STOP_UNCONFIRMED = "stop_unconfirmed"
 REASON_STATE_INCOMPLETE = "state_incomplete"
+REASON_OBJECT_HELD = "object_held"
+REASON_NO_OBJECT = "no_object"
+REASON_SLIPPING = "slipping"
+REASON_RELEASED = "released"
+REASON_NOT_OPEN = "not_open"
 
 _IDENTIFIER_CHARS = set("abcdefghijklmnopqrstuvwxyz0123456789_")
 
@@ -104,6 +135,35 @@ class JointLimit:
     name: str
     min_rad: float
     max_rad: float
+
+
+@dataclass(frozen=True)
+class GripperProfile:
+    """A gripper as one of the arm's joints, with its travel read as jaws."""
+
+    joint: str
+    closed_rad: float
+    open_rad: float
+    release_rad: float
+    max_speed_rad_s: float
+    position_tolerance_rad: float
+    object_min_gap_rad: float
+    hold_samples: int
+    hold_max_drift_rad: float
+
+    @property
+    def opening(self) -> float:
+        """The sign of the opening direction."""
+        return 1.0 if self.open_rad > self.closed_rad else -1.0
+
+    def gap(self, position: float) -> float:
+        """How far ``position`` is open from the closed limit."""
+        return (position - self.closed_rad) * self.opening
+
+    @property
+    def release_range(self) -> tuple[float, float]:
+        """``(min, max)`` of a release target: release position to open limit."""
+        return tuple(sorted((self.release_rad, self.open_rad)))  # type: ignore[return-value]
 
 
 @dataclass(frozen=True)
@@ -125,6 +185,7 @@ class ArmProfile:
     stop_confirm_samples: int
     stop_confirm_period_s: float
     stop_max_drift_rad: float
+    gripper: GripperProfile | None = None
 
     @property
     def joint_names(self) -> tuple[str, ...]:
@@ -155,7 +216,7 @@ def _count(value: Any, where: str) -> int:
 PROFILE_KEYS = frozenset({
     "schema", "resource_id", "note", "limits_accepted", "position_unit", "joints",
     "position_tolerance_rad", "max_joint_speed_rad_s", "control_period_s",
-    "move_deadline_s", "stall", "settle", "stop",
+    "move_deadline_s", "stall", "settle", "stop", "gripper",
 })
 _NESTED_KEYS = {
     "stall": frozenset({"window_s", "min_progress_rad"}),
@@ -163,6 +224,11 @@ _NESTED_KEYS = {
     "stop": frozenset({"mode", "confirm_samples", "confirm_period_s", "max_drift_rad"}),
 }
 _JOINT_KEYS = frozenset({"name", "min_rad", "max_rad"})
+_GRIPPER_KEYS = frozenset({
+    "joint", "closes_toward", "release_rad", "max_speed_rad_s",
+    "position_tolerance_rad", "object_min_gap_rad", "hold",
+})
+_GRIPPER_HOLD_KEYS = frozenset({"samples", "max_drift_rad"})
 
 
 def _closed(value: Any, keys: frozenset[str], where: str) -> Mapping[str, Any]:
@@ -172,6 +238,57 @@ def _closed(value: Any, keys: frozenset[str], where: str) -> Mapping[str, Any]:
     if unknown:
         raise ProfileInvalid(f"{where} has unknown keys: {unknown}")
     return value
+
+
+def _parse_gripper(raw: Any, joints: Mapping[str, JointLimit]) -> GripperProfile:
+    """The gripper section, every key required; its travel is a declared joint's limits."""
+    _closed(raw, _GRIPPER_KEYS, "gripper")
+    joint = raw.get("joint")
+    if joint not in joints:
+        raise ProfileInvalid("gripper.joint must name one of the declared joints")
+    limit = joints[joint]
+    toward = raw.get("closes_toward")
+    if toward not in CLOSES_TOWARD:
+        raise ProfileInvalid(f"gripper.closes_toward must be one of {CLOSES_TOWARD}")
+    closed, opened = (
+        (limit.min_rad, limit.max_rad) if toward == "min" else (limit.max_rad, limit.min_rad)
+    )
+    release = _finite(raw.get("release_rad"), "gripper.release_rad")
+    tolerance = _finite(
+        raw.get("position_tolerance_rad"), "gripper.position_tolerance_rad", positive=True
+    )
+    min_gap = _finite(raw.get("object_min_gap_rad"), "gripper.object_min_gap_rad", positive=True)
+    hold = _closed(raw.get("hold"), _GRIPPER_HOLD_KEYS, "gripper.hold")
+    gripper = GripperProfile(
+        joint=joint,
+        closed_rad=closed,
+        open_rad=opened,
+        release_rad=release,
+        max_speed_rad_s=_finite(
+            raw.get("max_speed_rad_s"), "gripper.max_speed_rad_s", positive=True
+        ),
+        position_tolerance_rad=tolerance,
+        object_min_gap_rad=min_gap,
+        hold_samples=_count(hold.get("samples"), "gripper.hold.samples"),
+        hold_max_drift_rad=_finite(
+            hold.get("max_drift_rad"), "gripper.hold.max_drift_rad", positive=True
+        ),
+    )
+    if not limit.min_rad <= release <= limit.max_rad:
+        # Never clamped into range: a release position off the joint is an error.
+        raise ProfileInvalid("gripper.release_rad must lie within the gripper joint's limits")
+    if not min_gap > tolerance:
+        # Otherwise jaws that closed fully, within tolerance, could read as holding.
+        raise ProfileInvalid(
+            "gripper.object_min_gap_rad must be greater than gripper.position_tolerance_rad"
+        )
+    if not gripper.gap(release) > min_gap + tolerance:
+        # A released gripper must never read as closed on an object.
+        raise ProfileInvalid(
+            "gripper.release_rad must be open from the closed limit by more than "
+            "object_min_gap_rad plus position_tolerance_rad"
+        )
+    return gripper
 
 
 def parse_profile(raw: Mapping[str, Any]) -> ArmProfile:
@@ -219,6 +336,13 @@ def parse_profile(raw: Mapping[str, Any]) -> ArmProfile:
     mode = stop.get("mode")
     if mode not in STOP_MODES:
         raise ProfileInvalid(f"stop.mode must be one of {STOP_MODES}")
+    # A gripper is optional as a whole (an arm may have none); if declared,
+    # every key of it is required.
+    gripper = (
+        _parse_gripper(raw["gripper"], {joint.name: joint for joint in joints})
+        if "gripper" in raw
+        else None
+    )
     return ArmProfile(
         resource_id=resource_id,
         joints=tuple(joints),
@@ -245,6 +369,7 @@ def parse_profile(raw: Mapping[str, Any]) -> ArmProfile:
             stop.get("confirm_period_s"), "stop.confirm_period_s", positive=True
         ),
         stop_max_drift_rad=_finite(stop.get("max_drift_rad"), "stop.max_drift_rad", positive=True),
+        gripper=gripper,
     )
 
 
@@ -254,6 +379,12 @@ def load_profile(path: str | Path) -> ArmProfile:
 
 class _Unreadable(Exception):
     """A read that answered, but not with every declared joint as a number."""
+
+
+def _held(held: bool | None) -> dict[str, Any]:
+    # ``None``: whether anything is held is not known (lost connection, a
+    # stop mid-grasp); a host treats it as not held.
+    return {HELD_OBSERVATION: held}
 
 
 def _outcome(reason: str, *, state_known: bool = True, **extra: Any) -> dict[str, Any]:
@@ -381,6 +512,8 @@ class SerialArmAdapter:
                 result = self.read_state(request.call_id)
         elif capability_id == CAPABILITY_MOVE:
             result = self._move(request)
+        elif capability_id in (CAPABILITY_GRASP, CAPABILITY_RELEASE):
+            result = self._grip(request)
         else:
             result = CallResult(
                 request.call_id, OUTCOME_REFUSED, detail=f"unsupported capability {capability_id}"
@@ -422,12 +555,8 @@ class SerialArmAdapter:
     def _refuse(self, call_id: str, detail: str) -> CallResult:
         return CallResult(call_id, OUTCOME_REFUSED, detail=detail)
 
-    def _move(self, request: CallRequest) -> CallResult:
-        call_id = request.call_id
-        try:
-            targets = self.targets(request.arguments)
-        except ValueError as error:
-            return self._refuse(call_id, str(error))
+    def _motion_refusal(self, call_id: str) -> CallResult | None:
+        """Why no motion may start now, or ``None``. Reads and writes nothing."""
         if not self.profile.limits_accepted:
             return self._refuse(
                 call_id,
@@ -440,18 +569,26 @@ class SerialArmAdapter:
             return self._refuse(
                 call_id, "the arm's state is unknown after a lost connection; read state first"
             )
+        return None
+
+    def _run_guarded(
+        self, call_id: str, what: str, run: Callable[[], CallResult], **unknown: Any
+    ) -> CallResult:
+        """Run a motion; a bus fault in it is ``failed`` with the state unknown."""
         self._stop_requested.clear()
         try:
-            return self._run_move(call_id, targets)
+            return run()
         except BusError as error:
             self._state_unknown = True
             return CallResult(
                 call_id,
                 OUTCOME_FAILED,
-                evidence={"arm_outcome": _outcome(REASON_CONNECTION_LOST, state_known=False)},
+                evidence={
+                    "arm_outcome": _outcome(REASON_CONNECTION_LOST, state_known=False, **unknown)
+                },
                 detail=(
-                    f"connection lost during the move ({error}); where the arm stopped is "
-                    "unknown and the move will not be retried"
+                    f"connection lost during the {what} ({error}); where the arm stopped is "
+                    f"unknown and the {what} will not be retried"
                 ),
             )
         except _Unreadable as error:
@@ -459,11 +596,25 @@ class SerialArmAdapter:
             return CallResult(
                 call_id,
                 OUTCOME_FAILED,
-                evidence={"arm_outcome": _outcome(REASON_STATE_INCOMPLETE, state_known=False)},
-                detail=f"{error}; the move will not be retried",
+                evidence={
+                    "arm_outcome": _outcome(REASON_STATE_INCOMPLETE, state_known=False, **unknown)
+                },
+                detail=f"{error}; the {what} will not be retried",
             )
 
-    def _run_move(self, call_id: str, targets: Mapping[str, float]) -> CallResult:
+    def _move(self, request: CallRequest) -> CallResult:
+        call_id = request.call_id
+        try:
+            targets = self.targets(request.arguments)
+        except ValueError as error:
+            return self._refuse(call_id, str(error))
+        refusal = self._motion_refusal(call_id)
+        if refusal is not None:
+            return refusal
+        return self._run_guarded(call_id, "move", lambda: self._run_move(call_id, targets))
+
+    def _start_pose(self, call_id: str) -> tuple[dict[str, float] | None, CallResult | None]:
+        """The measured pose with torque on and holding it, or why not."""
         profile = self.profile
         before = self._read_positions()
         outside = [
@@ -472,14 +623,17 @@ class SerialArmAdapter:
             if not profile.limit(name).min_rad <= value <= profile.limit(name).max_rad
         ]
         if outside:
-            return self._refuse(
+            return None, self._refuse(
                 call_id, f"the arm is outside its declared limits before moving: {sorted(outside)}"
             )
+        return before, None
+
+    def _enable_torque(self, call_id: str, before: Mapping[str, float]) -> CallResult | None:
         torque = self._read_torque()
         if not all(torque.values()):
             # Hold the measured pose first, so enabling torque moves nothing.
             with self._lock:
-                self._bus.write_goal_positions(before)
+                self._bus.write_goal_positions(dict(before))
                 self._bus.set_torque(True)
             if not all(self._read_torque().values()):
                 return CallResult(
@@ -488,6 +642,17 @@ class SerialArmAdapter:
                     evidence={"arm_outcome": _outcome("torque_not_enabled")},
                     detail="torque did not read back as enabled; nothing was moved",
                 )
+        return None
+
+    def _run_move(self, call_id: str, targets: Mapping[str, float]) -> CallResult:
+        profile = self.profile
+        before, refused = self._start_pose(call_id)
+        if refused is not None:
+            return refused
+        assert before is not None
+        failed = self._enable_torque(call_id, before)
+        if failed is not None:
+            return failed
         step = profile.max_joint_speed_rad_s * profile.control_period_s
         setpoint = dict(before)
         deadline = self._clock() + profile.move_deadline_s
@@ -595,6 +760,247 @@ class SerialArmAdapter:
             "observations": {OBSERVATION: phases},
             "arm_outcome": _outcome(reason, **extra),
         }
+
+    # -- gripper -------------------------------------------------------------
+
+    def release_target(self, arguments: Mapping[str, Any]) -> float:
+        """The release call's target, or ``ValueError``. Never clamped."""
+        gripper = self.profile.gripper
+        assert gripper is not None
+        unknown = sorted(set(arguments) - {RELEASE_ARGUMENT})
+        if unknown:
+            raise ValueError(f"unsupported arguments: {unknown}")
+        if RELEASE_ARGUMENT not in arguments:
+            raise ValueError(f"{RELEASE_ARGUMENT} is required")
+        raw = arguments[RELEASE_ARGUMENT]
+        if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+            raise ValueError(f"{RELEASE_ARGUMENT} must be a number")
+        value = float(raw)
+        if not math.isfinite(value):
+            raise ValueError(f"{RELEASE_ARGUMENT} must be finite")
+        low, high = gripper.release_range
+        if not low <= value <= high:
+            raise ValueError(
+                f"{RELEASE_ARGUMENT} {value} is outside the gripper's release range "
+                f"[{low}, {high}] (release position to open limit)"
+            )
+        return value
+
+    def _grip(self, request: CallRequest) -> CallResult:
+        call_id = request.call_id
+        grasp = request.capability_id == CAPABILITY_GRASP
+        gripper = self.profile.gripper
+        if gripper is None:
+            return self._refuse(call_id, "this arm's profile declares no gripper")
+        try:
+            if grasp:
+                if request.arguments:
+                    raise ValueError(
+                        f"{CAPABILITY_GRASP} takes no arguments; it closes toward the "
+                        "gripper's closed limit"
+                    )
+                target = gripper.closed_rad
+            else:
+                target = self.release_target(request.arguments)
+        except ValueError as error:
+            return self._refuse(call_id, str(error))
+        refusal = self._motion_refusal(call_id)
+        if refusal is not None:
+            return refusal
+        what = "grasp" if grasp else "release"
+        return self._run_guarded(
+            call_id, what, lambda: self._run_grip(call_id, grasp, target), **_held(None)
+        )
+
+    def _grip_evidence(
+        self,
+        reason: str,
+        phases: Mapping[str, float],
+        held: bool | None,
+        held_phases: Mapping[str, Mapping[str, float]] | None = None,
+        **extra: Any,
+    ) -> dict[str, Any]:
+        joint = self.profile.gripper.joint  # type: ignore[union-attr]
+        observations: dict[str, Any] = {
+            GRIPPER_OBSERVATION: {
+                phase: {"frame": FRAME, joint: value} for phase, value in phases.items()
+            }
+        }
+        if held_phases is not None:
+            observations[HELD_OBSERVATION] = {
+                phase: dict(values) for phase, values in held_phases.items()
+            }
+        return {
+            "observations": observations,
+            "arm_outcome": _outcome(reason, **_held(held), **extra),
+        }
+
+    def _run_grip(self, call_id: str, grasp: bool, target: float) -> CallResult:
+        profile = self.profile
+        gripper = profile.gripper
+        assert gripper is not None
+        joint = gripper.joint
+        before, refused = self._start_pose(call_id)
+        if refused is not None:
+            return refused
+        assert before is not None
+        start = before[joint]
+        if grasp and gripper.gap(start) < gripper.gap(gripper.release_rad) - (
+            gripper.position_tolerance_rad
+        ):
+            return self._refuse(
+                call_id,
+                f"the gripper is not open (at {start:.4f} rad, release position "
+                f"{gripper.release_rad}); release it first",
+            )
+        failed = self._enable_torque(call_id, before)
+        if failed is not None:
+            return failed
+        step = gripper.max_speed_rad_s * profile.control_period_s
+        tolerance = gripper.position_tolerance_rad
+        setpoint = start
+        deadline = self._clock() + profile.move_deadline_s
+        reference = start
+        progress_at = self._clock()
+        position = start
+
+        def ended(outcome: str, reason: str, detail: str, *, stop: bool, **extra: Any):
+            evidence = self._grip_evidence(
+                reason, {"before": start, "after": position}, False if grasp else None, **extra
+            )
+            if stop:
+                halt = self._stop()
+                evidence["stop"] = halt.evidence.get("stop_confirmation")
+                if halt.outcome != OUTCOME_COMPLETED:
+                    detail = f"{detail}; the stop afterwards was NOT confirmed: {halt.detail}"
+            return CallResult(call_id, outcome, evidence=evidence, detail=detail)
+
+        while True:
+            if self._stop_requested.is_set():
+                return CallResult(
+                    call_id,
+                    OUTCOME_CANCELLED,
+                    evidence=self._grip_evidence(
+                        REASON_CANCELLED, {"before": start, "after": position}, None
+                    ),
+                    detail="stopped by a safe stop",
+                )
+            now = self._clock()
+            if now > deadline:
+                return ended(
+                    OUTCOME_TIMEOUT, REASON_TIMEOUT,
+                    f"the gripper did not finish within {profile.move_deadline_s} s", stop=True,
+                )
+            gap = target - setpoint
+            setpoint += math.copysign(min(abs(gap), step), gap)
+            with self._lock:
+                if self._stop_requested.is_set():
+                    continue
+                self._bus.write_goal_positions({joint: setpoint})
+            self._sleep(profile.control_period_s)
+            position = self._read_positions()[joint]
+            now = self._clock()
+            if abs(position - reference) >= profile.stall_min_progress_rad:
+                reference, progress_at = position, now
+            if setpoint == target and abs(position - target) <= tolerance:
+                if grasp:
+                    # Closed all the way: there was nothing between the jaws.
+                    return ended(
+                        OUTCOME_FAILED, REASON_NO_OBJECT,
+                        "the gripper closed fully; it is holding nothing", stop=False,
+                    )
+                return self._confirm_open(call_id, start, position, target)
+            stopped = (
+                abs(setpoint - position) > tolerance
+                and now - progress_at >= profile.stall_window_s
+            )
+            if not stopped:
+                continue
+            if not grasp or abs(position - start) < profile.stall_min_progress_rad:
+                # Opening is never blocked by an object; and jaws that never
+                # moved from open have closed on nothing: both are a stall.
+                return ended(
+                    OUTCOME_FAILED, REASON_STALLED,
+                    f"the gripper made no progress for {profile.stall_window_s} s", stop=True,
+                    stalled=[joint],
+                )
+            if gripper.gap(position) < gripper.object_min_gap_rad:
+                return ended(
+                    OUTCOME_FAILED, REASON_NO_OBJECT,
+                    f"the gripper stopped {gripper.gap(position):.4f} rad from closed, under "
+                    f"the {gripper.object_min_gap_rad} rad an object needs", stop=True,
+                )
+            return self._confirm_hold(call_id, start, position)
+
+    def _confirm_hold(self, call_id: str, start: float, contact: float) -> CallResult:
+        """Closed on something: held only if the jaws stay put, still short of closed."""
+        gripper = self.profile.gripper
+        assert gripper is not None
+        joint = gripper.joint
+        position = contact
+        drift = 0.0
+        for _ in range(gripper.hold_samples):
+            self._sleep(self.profile.control_period_s)
+            position = self._read_positions()[joint]
+            drift = max(drift, abs(position - contact))
+        held = (
+            drift <= gripper.hold_max_drift_rad
+            and gripper.gap(position) >= gripper.object_min_gap_rad
+        )
+        evidence = self._grip_evidence(
+            REASON_OBJECT_HELD if held else REASON_SLIPPING,
+            {"before": start, "after": contact, "settled": position},
+            held,
+            # What the hold was decided on: from contact to the end of the
+            # hold window, with whether it held.
+            {
+                "before": {HELD_FIELD: 0, joint: contact},
+                "after": {HELD_FIELD: 1 if held else 0, joint: position},
+            },
+            hold_drift_rad=drift,
+        )
+        if held:
+            return CallResult(call_id, OUTCOME_COMPLETED, evidence=evidence)
+        halt = self._stop()
+        evidence["stop"] = halt.evidence.get("stop_confirmation")
+        detail = (
+            f"the object slipped: the jaws moved {drift:.4f} rad while holding, over "
+            f"{gripper.hold_max_drift_rad} rad"
+        )
+        if halt.outcome != OUTCOME_COMPLETED:
+            detail = f"{detail}; the stop afterwards was NOT confirmed: {halt.detail}"
+        return CallResult(call_id, OUTCOME_FAILED, evidence=evidence, detail=detail)
+
+    def _confirm_open(
+        self, call_id: str, start: float, arrived: float, target: float
+    ) -> CallResult:
+        """Opened to the target: released only if the jaws stay there."""
+        gripper = self.profile.gripper
+        assert gripper is not None
+        position = arrived
+        drift = 0.0
+        for _ in range(gripper.hold_samples):
+            self._sleep(self.profile.control_period_s)
+            position = self._read_positions()[gripper.joint]
+            drift = max(drift, abs(position - arrived))
+        opened = (
+            drift <= gripper.hold_max_drift_rad
+            and abs(position - target) <= gripper.position_tolerance_rad
+        )
+        evidence = self._grip_evidence(
+            REASON_RELEASED if opened else REASON_NOT_OPEN,
+            {"before": start, "after": arrived, "settled": position},
+            False if opened else None,
+            settle_drift_rad=drift,
+        )
+        if opened:
+            return CallResult(call_id, OUTCOME_COMPLETED, evidence=evidence)
+        return CallResult(
+            call_id,
+            OUTCOME_FAILED,
+            evidence=evidence,
+            detail=f"the gripper did not stay open at {target} rad (drifted {drift:.4f} rad)",
+        )
 
     # -- stop ----------------------------------------------------------------
 

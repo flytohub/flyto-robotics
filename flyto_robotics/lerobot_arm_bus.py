@@ -20,6 +20,13 @@ example a 0..100 gripper range) is not converted by a guess: the bus refuses
 to start unless every joint is declared in degrees. Each of these is an item
 on the arrival-day checklist in ``docs/ARM_M0.md``.
 
+A gripper is one more joint to this bus. It is mapped only when the caller
+names it (``gripper=``) and the injected bus lists a motor of that name in its
+``motors`` mapping (unverified LeRobot attribute); otherwise construction
+fails. Like every joint it must be declared in degrees: LeRobot usually
+calibrates a gripper to a 0..100 range, which this bus refuses rather than
+guess a conversion.
+
 Any exception from ``motors_bus`` is re-raised as :class:`BusError`, which the
 adapter treats as "state unknown" and fails closed on.
 """
@@ -40,7 +47,14 @@ TORQUE_ENABLE = "Torque_Enable"  # unverified register name
 class LeRobotArmBus:
     """Radians in, degrees out, every failure a :class:`BusError`."""
 
-    def __init__(self, motors_bus: Any, *, joints: Iterable[str], degree_joints: Iterable[str]):
+    def __init__(
+        self,
+        motors_bus: Any,
+        *,
+        joints: Iterable[str],
+        degree_joints: Iterable[str],
+        gripper: str | None = None,
+    ):
         self._bus = motors_bus
         self._joints = tuple(joints)
         undeclared = sorted(set(self._joints) - set(degree_joints))
@@ -49,6 +63,19 @@ class LeRobotArmBus:
                 f"joints without a declared degrees scale: {undeclared}; "
                 "no unit conversion is guessed"
             )
+        if gripper is not None:
+            if gripper not in self._joints:
+                raise ValueError(f"gripper {gripper!r} is not one of the joints")
+            # Mapped only when the motors bus itself lists it (LeRobot's
+            # ``motors`` mapping, unverified); a bus that lists no motors
+            # cannot show that it has one, so the gripper is not mapped.
+            motors = getattr(motors_bus, "motors", None)
+            if not isinstance(motors, Mapping) or gripper not in motors:
+                raise ValueError(
+                    f"the motors bus does not expose a motor named {gripper!r}; "
+                    "the gripper is not mapped"
+                )
+        self.gripper = gripper
 
     def _call(self, what: str, fn, *args):
         try:

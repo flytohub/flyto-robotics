@@ -20,8 +20,10 @@ from flyto_robotics.adapter_contract import (
     capability_metadata,
 )
 from flyto_robotics.arm_adapter import (
+    CAPABILITY_GRASP,
     CAPABILITY_HALT,
     CAPABILITY_MOVE,
+    CAPABILITY_RELEASE,
     CAPABILITY_STATE,
     SerialArmAdapter,
     load_profile,
@@ -30,6 +32,7 @@ from flyto_robotics.arm_adapter import (
 from flyto_robotics.arm_bus import SimulatedArmBus
 from flyto_robotics.arm_contracts import capability_rows
 from tests.test_arm_adapter import EXAMPLE_PROFILE, JOINTS, FakeClock, raw_profile
+from tests.test_arm_gripper import gripper_arm, gripper_profile
 
 
 def rows_by_id(profile):
@@ -93,7 +96,58 @@ def test_move_evidence_is_measured_from_read_back_joint_positions(profile):
 
 
 def test_the_example_profile_produces_rows_too():
-    assert len(capability_rows(load_profile(EXAMPLE_PROFILE))) == 3
+    # Its gripper is declared, so it serves grasp and release as well.
+    assert [row["module_id"] for row in capability_rows(load_profile(EXAMPLE_PROFILE))] == [
+        CAPABILITY_STATE, CAPABILITY_MOVE, CAPABILITY_HALT, CAPABILITY_GRASP, CAPABILITY_RELEASE,
+    ]
+
+
+# -- grasp and release -----------------------------------------------------------
+
+
+@pytest.fixture(params=["min", "max"])
+def gripper(request):
+    return parse_profile(gripper_profile(request.param))
+
+
+def test_a_declared_gripper_serves_grasp_and_release_under_the_shared_vocabulary(gripper):
+    rows = rows_by_id(gripper)
+
+    assert set(rows) == {
+        CAPABILITY_STATE, CAPABILITY_MOVE, CAPABILITY_HALT, CAPABILITY_GRASP, CAPABILITY_RELEASE,
+    }
+    for capability_id in (CAPABILITY_GRASP, CAPABILITY_RELEASE):
+        contract = rows[capability_id]["contract"]
+        metadata = capability_metadata(capability_id)
+        assert capability_id in KNOWN_CAPABILITY_IDS
+        for key in ("safety_class", "requires_safe_stop", "cancellable"):
+            assert contract[key] == metadata[key], (capability_id, key)
+        assert contract["cancellable"] is True
+        assert contract["actuates"] is True and contract["idempotent"] is False
+
+
+def test_the_release_target_is_bounded_by_the_profile_and_grasp_takes_none(gripper):
+    rows = rows_by_id(gripper)
+    schema = rows[CAPABILITY_RELEASE]["params_schema"]["open_to_rad"]
+
+    assert rows[CAPABILITY_GRASP]["params_schema"] == {}
+    assert schema["required"] is True
+    assert (schema["min"], schema["max"]) == gripper.gripper.release_range
+
+
+def test_grip_evidence_reads_the_jaw_position_and_whether_an_object_is_held(gripper):
+    rows = rows_by_id(gripper)
+    grasp = rows[CAPABILITY_GRASP]["contract"]["evidence"]
+    release = rows[CAPABILITY_RELEASE]["contract"]["evidence"]
+
+    assert {spec["observe"] for spec in grasp} == {"object_held"}
+    assert [spec["measure"]["fields"] for spec in grasp] == [["held"], ["gripper"]]
+    assert [spec["observe"] for spec in release] == ["gripper_position"]
+    assert release[0]["measure"]["op"] == "distance_to"
+
+
+def test_an_arm_without_a_gripper_declares_no_grip_rows(profile):
+    assert not {CAPABILITY_GRASP, CAPABILITY_RELEASE} & set(rows_by_id(profile))
 
 
 # -- flyto-core, when installed ------------------------------------------------
@@ -172,3 +226,78 @@ def test_every_arm_call_but_the_stop_is_cancellable_as_cloud_reads_it():
         cap: row for cap, row in _CAPABILITY_METADATA.items() if cap.startswith("manipulation.")
     }
     assert manipulation and all(row["cancellable"] for row in manipulation.values())
+
+
+def test_every_served_manipulation_row_is_cancellable_and_the_stop_is_not(gripper):
+    """Grasp and release included: the rows the adapter serves say what Cloud reads."""
+    rows = rows_by_id(gripper)
+
+    manipulation = {cap for cap in rows if cap.startswith("manipulation.")}
+    assert manipulation == {
+        CAPABILITY_STATE, CAPABILITY_MOVE, CAPABILITY_GRASP, CAPABILITY_RELEASE,
+    }
+    assert all(rows[cap]["contract"]["cancellable"] is True for cap in manipulation)
+    assert rows[CAPABILITY_HALT]["contract"]["cancellable"] is False
+
+
+def test_flyto_core_admits_the_grip_rows(gripper):
+    core = _core()
+    rows = rows_by_id(gripper)
+    for capability_id in (CAPABILITY_GRASP, CAPABILITY_RELEASE):
+        row = rows[capability_id]
+        assert core.validate_contract(row["contract"], row["params_schema"])["evidence"]
+
+
+def test_flyto_core_refuses_the_release_row_if_its_bound_is_dropped(gripper):
+    core = _core()
+    row = rows_by_id(gripper)[CAPABILITY_RELEASE]
+    del row["params_schema"]["open_to_rad"]["min"]
+
+    with pytest.raises(Exception):  # noqa: B017 - core's own error type
+        core.validate_contract(row["contract"], row["params_schema"])
+
+
+def test_flyto_core_judges_a_held_grasp_usable_and_an_empty_or_slipping_one_not():
+    core = _core()
+    adapter, bus = gripper_arm()
+    specs = rows_by_id(adapter.profile)[CAPABILITY_GRASP]["contract"]["evidence"]
+
+    def verdicts(result):
+        observed = result.evidence["observations"]
+        return {spec["kind"]: core.judge(spec, {}, observed[spec["observe"]])["usable"]
+                for spec in specs}
+
+    bus.place_object("gripper", 0.2)
+    held = adapter.invoke(CallRequest("g1", CAPABILITY_GRASP))
+    assert held.outcome == OUTCOME_COMPLETED
+    assert verdicts(held) == {"gripper.object_held": True, "gripper.hold_stable": True}
+
+    adapter, bus = gripper_arm()
+    empty = adapter.invoke(CallRequest("g2", CAPABILITY_GRASP))
+    # Closed on nothing: no hold was observed, so neither spec can be proven.
+    assert "object_held" not in empty.evidence["observations"]
+    assert not any(
+        core.judge(spec, {}, empty.evidence["observations"].get(spec["observe"], {}))["usable"]
+        for spec in specs
+    )
+
+    adapter, bus = gripper_arm()
+    bus.place_object("gripper", 0.2, slip_rad_per_read=0.01, slip_after_reads=11)
+    slipped = adapter.invoke(CallRequest("g3", CAPABILITY_GRASP))
+    assert verdicts(slipped) == {"gripper.object_held": False, "gripper.hold_stable": False}
+
+
+def test_flyto_core_judges_an_open_release_usable_and_a_short_one_not():
+    core = _core()
+    adapter, bus = gripper_arm()
+    bus.place_object("gripper", 0.2)
+    assert adapter.invoke(CallRequest("g", CAPABILITY_GRASP)).outcome == OUTCOME_COMPLETED
+    arguments = {"open_to_rad": 0.45}
+    result = adapter.invoke(CallRequest("r", CAPABILITY_RELEASE, arguments))
+    assert result.outcome == OUTCOME_COMPLETED
+    (spec,) = rows_by_id(adapter.profile)[CAPABILITY_RELEASE]["contract"]["evidence"]
+    observed = result.evidence["observations"]["gripper_position"]
+
+    assert core.judge(spec, arguments, observed)["usable"]
+    short = {phase: {**values, "gripper": 0.3} for phase, values in observed.items()}
+    assert not core.judge(spec, arguments, short)["usable"]

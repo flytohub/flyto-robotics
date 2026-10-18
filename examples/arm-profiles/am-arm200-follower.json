@@ -1,7 +1,7 @@
 {
   "schema": "flyto.arm-profile.v1",
   "resource_id": "am-arm200-follower",
-  "note": "Placeholder, unverified until hardware acceptance. Joint names, limits, speed and tolerances are conservative guesses for a six-joint tabletop follower arm, not measured on the AM-ARM200. limits_accepted stays false until the arrival-day checklist (docs/ARM_M0.md) has measured them on the physical arm.",
+  "note": "Placeholder, unverified until hardware acceptance. Joint names, limits, speed and tolerances are conservative guesses for a six-joint tabletop follower arm, and the gripper's closing direction, release position and object gap are guesses too, not measured on the AM-ARM200. limits_accepted stays false until the arrival-day checklist (docs/ARM_M0.md) has measured them on the physical arm.",
   "limits_accepted": false,
   "position_unit": "rad",
   "joints": [
@@ -18,5 +18,14 @@
   "move_deadline_s": 15.0,
   "stall": {"window_s": 1.0, "min_progress_rad": 0.005},
   "settle": {"samples": 3, "max_drift_rad": 0.01},
-  "stop": {"mode": "hold", "confirm_samples": 5, "confirm_period_s": 0.05, "max_drift_rad": 0.02}
+  "stop": {"mode": "hold", "confirm_samples": 5, "confirm_period_s": 0.05, "max_drift_rad": 0.02},
+  "gripper": {
+    "joint": "gripper",
+    "closes_toward": "min",
+    "release_rad": 0.35,
+    "max_speed_rad_s": 0.2,
+    "position_tolerance_rad": 0.02,
+    "object_min_gap_rad": 0.05,
+    "hold": {"samples": 5, "max_drift_rad": 0.01}
+  }
 }
