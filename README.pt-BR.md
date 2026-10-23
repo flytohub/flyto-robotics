@@ -12,6 +12,8 @@
 
 [Início rápido](#início-rápido) · [Destaques](#destaques) · [Como funciona](#como-funciona) · [Para desenvolvedores](#para-desenvolvedores)
 
+<img src="docs/assets/demo-dry-run.gif" alt="A simulated delivery: the robot drives to the pharmacy, stops for an obstacle, then delivers to Ward A" width="760">
+
 </div>
 
 ## Início rápido
