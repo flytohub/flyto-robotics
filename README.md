@@ -59,7 +59,7 @@ robot's own native ROS 2 / Nav2 stack. It is never firmware, and nothing from
 Flyto2 is installed on the robot: the lab robots stay stock TurtleBot3. It does
 not declare capabilities to Flyto2 either; the `flyto-modules-robotics` pack
 does that through flyto-core's `@register_module` capability contract. See
-`DECISIONS.md` (2026-10-04).
+`docs/project/DECISIONS.md` (2026-10-04).
 
 Production topology:
 
@@ -580,7 +580,7 @@ Generated ROS/Gazebo/evidence output stays untracked.
 
 ### Contributing
 
-Read `AGENTS.md`, `ARCHITECTURE.md`, `DECISIONS.md`, and `STATE.md`
+Read `AGENTS.md`, `ARCHITECTURE.md`, `docs/project/DECISIONS.md`, and `docs/project/STATE.md`
 before changing runtime boundaries. New integrations must preserve the split
 between execution computer and commanded equipment and must not require Flyto2
 software on the robot.
@@ -597,7 +597,7 @@ software on the robot.
 | [Virtual Robot Lab](docs/VIRTUAL_ROBOT_LAB.md) | simulation matrix |
 | [Showcase evidence](docs/SHOWCASE_EVIDENCE.md) | evidence interpretation |
 | [Serial-bus arm M0](docs/ARM_M0.md) | arm state, joint limits, measured stop; arrival-day checklist |
-| [Historical handoffs](handoffs/_registry.md) | old Pi/runtime work and findings |
+| [Historical handoffs](docs/project/handoffs/_registry.md) | old Pi/runtime work and findings |
 
 Dated handoffs and Git history preserve retired-appliance evidence; current
 installation documentation describes only the external-adapter architecture.

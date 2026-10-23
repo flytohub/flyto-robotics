@@ -2,7 +2,7 @@
 
 ## Before changing code
 
-1. Read `AGENTS.md`, `ARCHITECTURE.md`, `DECISIONS.md`, and `STATE.md`.
+1. Read `AGENTS.md`, `ARCHITECTURE.md`, `docs/project/DECISIONS.md`, and `docs/project/STATE.md`.
 2. Use flyto-indexer search, structure, task planning, and impact analysis.
 3. Identify the contract, primitive, workflow, adapter, and test boundaries.
 4. Confirm that no patient data, credentials, or production endpoint is added.
