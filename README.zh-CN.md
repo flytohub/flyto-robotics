@@ -12,6 +12,8 @@
 
 [快速开始](#快速开始) · [特性](#特性) · [工作原理](#工作原理) · [开发者](#开发者)
 
+<img src="docs/assets/demo-dry-run.gif" alt="A simulated delivery: the robot drives to the pharmacy, stops for an obstacle, then delivers to Ward A" width="760">
+
 </div>
 
 ## 快速开始

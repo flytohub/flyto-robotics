@@ -12,6 +12,8 @@
 
 [クイックスタート](#クイックスタート) · [特長](#特長) · [しくみ](#しくみ) · [開発者向け](#開発者向け)
 
+<img src="docs/assets/demo-dry-run.gif" alt="A simulated delivery: the robot drives to the pharmacy, stops for an obstacle, then delivers to Ward A" width="760">
+
 </div>
 
 ## クイックスタート

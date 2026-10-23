@@ -12,6 +12,8 @@
 
 [빠른 시작](#빠른-시작) · [주요 기능](#주요-기능) · [작동 방식](#작동-방식) · [개발자용](#개발자용)
 
+<img src="docs/assets/demo-dry-run.gif" alt="A simulated delivery: the robot drives to the pharmacy, stops for an obstacle, then delivers to Ward A" width="760">
+
 </div>
 
 ## 빠른 시작
