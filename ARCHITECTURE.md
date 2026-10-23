@@ -12,7 +12,7 @@ Flyto2 is installed on the robot. It owns the safety invariants at the
 equipment: the 0.35 m clearance floor, refuse-never-clamp, refusal when the
 deployment mode disagrees with the ROS graph, and the safe stop. Capabilities
 are declared to Flyto2 by the `flyto-modules-robotics` pack through
-`@register_module`, not by this repository. See `DECISIONS.md` (2026-10-04),
+`@register_module`, not by this repository. See `docs/project/DECISIONS.md` (2026-10-04),
 which also states what a dropped link to the robot leaves bounded.
 
 ```text

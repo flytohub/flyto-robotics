@@ -11,7 +11,7 @@ Claude-specific handoff rules below belong in this file.
 
 This repo is edited by both Codex and Claude, sometimes on the same day.
 
-- Before starting, read the newest `handoffs/_registry.md` entry and check its
+- Before starting, read the newest `docs/project/handoffs/_registry.md` entry and check its
   `Owner` and `Branch`.
 - If an `Active` entry is owned by the other agent, do not edit the same files on
   the shared branch. Work on `claude/<topic>` or pick up different work.

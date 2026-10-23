@@ -73,7 +73,7 @@ and this process is on none of that path.
 **The observation route emits no ROS or device identifier; this one emits an
 address, and an address has whatever shape its server gave it.** On a robot
 serving MJPEG through `web_video_server`, that shape is
-`?topic=/camera/image_raw`. `STATE.md` says of the observation producer that
+`?topic=/camera/image_raw`. `docs/project/STATE.md` says of the observation producer that
 ROS and device identifiers never cross the HTTP boundary, and that remains
 exactly true of the payload it describes — `provider` and an operator-assigned
 `source_id`, nothing else. It was written before there was a second route, and
