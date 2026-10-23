@@ -1,8 +1,52 @@
-<p align="center">
-  <img src="docs/assets/flyto2-logo.png" alt="Flyto2" width="96" height="96">
-</p>
+<div align="center">
+
+<img src="docs/assets/flyto2-logo.png" alt="Flyto2" width="96" height="96">
 
 # Flyto2 Robotics
+
+**Physical AI for the ROS 2 robot you already have. Tell it what to do. Nothing gets installed on the robot.**
+
+![Physical AI](https://img.shields.io/badge/Physical%20AI-ROS%202-6d5dfc) ![Nav2](https://img.shields.io/badge/Nav2-native-22314e) ![Open-RMF](https://img.shields.io/badge/Open--RMF-fleets-0a7d6e) ![License](https://img.shields.io/badge/license-Apache--2.0-blue)
+
+**English** · [日本語](README.ja.md) · [한국어](README.ko.md) · [简体中文](README.zh-CN.md) · [Español](README.es.md) · [Português (BR)](README.pt-BR.md)
+
+[Quick start](#quick-start) · [Highlights](#highlights) · [How it works](#how-it-works) · [FAQ](#faq) · [For developers](#for-developers)
+
+</div>
+
+## Quick start
+
+```bash
+git clone https://github.com/flytohub/flyto-robotics && cd flyto-robotics
+pip install -e .
+python -m flyto_robotics.cli dry-run examples/jobs/pharmacy-to-ward.json   # a full delivery, simulated: no robot needed
+```
+
+Then point it at your robot (`export FLYTO_ROS2_SSH_HOST=ubuntu@my-robot.local`), add the robot to a Flyto2 Space and say:
+
+> Go to the kitchen and take a photo.
+
+## Highlights
+
+- **Zero install on the robot.** A stock TurtleBot3 stays stock. No Flyto2 code and no credentials on board.
+- **Speaks native ROS 2.** Drives the Nav2, odometry, LiDAR and camera your robot already has.
+- **Brakes before it bumps.** It won't drive into anything inside its 0.35 m safety floor.
+- **Finds a way around.** Path blocked? It works a way round to the same destination.
+- **Knows places by name.** "Go to the charging dock." Named places live next to your robot's map.
+- **Arrival you can prove.** Flyto2 checks the map pose itself. "I'm there" from the robot isn't enough.
+- **From one robot to a fleet.** Open-RMF fleets run through the very same contract.
+- **Try it without a robot.** A full simulated delivery, obstacle stop included, runs on your laptop in seconds.
+
+## How it works
+
+1. You say what you want.
+2. Flyto2 plans it and checks permissions.
+3. This adapter drives Nav2 on your robot over standard ROS 2.
+4. Flyto2 checks the map pose before it calls it done.
+
+---
+
+## For developers
 
 External ROS 2 adapter, deterministic control, simulation, safety, and evidence
 toolkit for Flyto2.
@@ -48,7 +92,25 @@ upstream robot packages, sensors, Nav2/SLAM when needed, and generic ROS
 transport. It does **not** need a Flyto2 credential, job runner, gateway,
 scheduler, agent, task database, evidence database, or Flyto2-specific ROS node.
 
-## What this repository owns
+### FAQ
+
+**Do I need a robot to try it?**
+
+No. `python -m flyto_robotics.cli dry-run examples/jobs/pharmacy-to-ward.json` runs a deterministic simulated delivery, obstacle stop included. The Gazebo twin under `sim/` and `scripts/` adds physics.
+
+**What runs on the robot?**
+
+Only its own ROS 2 stack, for example a stock TurtleBot3 with Nav2, SLAM and a camera. `deploy/native_ros2/` holds upstream-only systemd examples with no Flyto2 code.
+
+**My robot's services only listen on 127.0.0.1.**
+
+Set `FLYTO_ROS2_SSH_HOST`. The adapter owns an SSH local forward to the robot and recovers it on its own after a reboot or a Wi-Fi drop.
+
+**Can one computer serve two robots?**
+
+One adapter serves exactly one resource, `FLYTO_ROS2_RESOURCE_ID`. Any other id is refused before a connection opens, so a job can never move the wrong machine.
+
+### What this repository owns
 
 - deterministic ROS 2 motion/controller utilities;
 - Nav2 / standard ROS 2 adapter contracts;
@@ -63,7 +125,7 @@ The repository does **not** own Flyto2 scheduling or task-completion authority.
 A ROS action completing successfully is execution evidence, not proof that the
 user's objective was achieved.
 
-## Architecture
+### Architecture
 
 Equipment adapters are installed on the AI Space execution host, or on a
 companion computer beside the robot, and loaded through a host-neutral adapter
@@ -103,7 +165,7 @@ capability allowlist to one assignment and exposes that authority only through a
 loopback endpoint to Flyto2 Core. The robot itself remains standard equipment
 with no Flyto2 credential or scheduler.
 
-## Robot-side rule
+### Robot-side rule
 
 The current source tree contains no Flyto2 Pi job runner, robot lifecycle
 installer, recovery portal, doctor, delivery gateway, robot credential
@@ -115,7 +177,7 @@ does not retain an executable path back to that topology.
 
 Do not reintroduce Flyto2 runtime as a TurtleBot3 requirement.
 
-## Installation
+### Installation
 
 A clean TurtleBot3 may be installed from upstream ROS 2 / TurtleBot3
 documentation. The physical lab currently uses ROS 2 Jazzy and a Burger base
@@ -131,7 +193,7 @@ Example upstream-only systemd units are in `deploy/native_ros2/`:
 They invoke `/opt/ros/jazzy` packages directly and contain no Flyto2 code.
 They are site-configuration examples, not a proprietary robot runtime.
 
-## Usage
+### Usage
 
 Install this package on the computer that can see the robot's ROS 2 graph:
 
@@ -456,7 +518,7 @@ package exposes `ros2.generic` to the built-in AI Space plugin host and also
 ships `flyto2-adapter-provider-ros2-generic` for process-based hosts such as
 optional Flyto2 Runtime.
 
-## Simulation and deterministic verification
+### Simulation and deterministic verification
 
 The self-contained Gazebo world remains a first-class test surface. It lets the
 same controller/safety/evidence code be exercised without claiming physical
@@ -475,7 +537,7 @@ make ai4all-showcase
 
 Generated reports and simulation output are evidence about simulation only.
 
-## Physical acceptance
+### Physical acceptance
 
 A physical closure is stronger than "nodes are running".
 
@@ -494,7 +556,7 @@ The acceptance ladder is:
 Current physical status is recorded in the 2026-09-21 handoff in
 `flyto-cloud`. No new motion should be sent merely to prove source code.
 
-## API
+### API
 
 The supported production-facing boundary is semantic ROS 2 execution and
 evidence, not Pi lifecycle management. Start with
@@ -504,7 +566,7 @@ and the versioned JSON contracts under `contracts/`. Robot-appliance
 lifecycle, delivery and recovery modules have been removed from the current
 source tree.
 
-## Development
+### Development
 
 Use the repository gates before landing behavior or packaging changes:
 
@@ -516,14 +578,14 @@ flyto-index verify . --strict
 For physical work, source checks never substitute for hardware acceptance.
 Generated ROS/Gazebo/evidence output stays untracked.
 
-## Contributing
+### Contributing
 
 Read `AGENTS.md`, `ARCHITECTURE.md`, `DECISIONS.md`, and `STATE.md`
 before changing runtime boundaries. New integrations must preserve the split
 between execution computer and commanded equipment and must not require Flyto2
 software on the robot.
 
-## Documentation
+### Documentation
 
 | Document | Purpose |
 |---|---|
@@ -540,7 +602,7 @@ software on the robot.
 Dated handoffs and Git history preserve retired-appliance evidence; current
 installation documentation describes only the external-adapter architecture.
 
-## Security
+### Security
 
 This is a research/lab integration toolkit, not a certified safety controller.
 Real deployments need an independent emergency stop and site-specific safety
@@ -551,6 +613,6 @@ remain separate from low-level ROS control. The model never earns authority by
 claiming that it has a capability, and the robot never earns task-completion
 authority by reporting action success.
 
-## License
+### License
 
 Apache-2.0. See `LICENSE`.
