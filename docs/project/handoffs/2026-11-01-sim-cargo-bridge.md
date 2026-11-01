@@ -1,5 +1,7 @@
 # The live twin publishes the simulated tray's cargo state
 
+> Superseded (2026-11-02): `cargo_tray.py`, `rosbridge_link.py` and `arm_place_signal.py` are deleted; the bridge is now the gated implementation described in [2026-11-02-fetch-live-halt-speed](2026-11-02-fetch-live-halt-speed.md).
+
 Owner: claude
 Branch: claude/fetch-live-sim
 Date: 2026-11-01
