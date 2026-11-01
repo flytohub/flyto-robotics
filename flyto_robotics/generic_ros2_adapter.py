@@ -44,6 +44,7 @@ from typing import Any, Callable, Protocol
 from . import adapter_contract as decl
 from . import braking_envelope as braking
 from . import (
+    cargo_sensor,
     inflation_escape,
     live_telemetry,
     motion_outcome,
@@ -842,6 +843,7 @@ ARGUMENTS: Mapping[str, tuple[decl.DeclaredArgument, ...]] = {
         ),
     ),
     "motion.halt": (),
+    cargo_sensor.CAPABILITY_ID: (),
 }
 
 
@@ -1919,7 +1921,20 @@ class GenericROS2Adapter:
                 available.add(capability_id)
         if "motion.navigate" in available:
             available |= PLACE_CAPABILITIES
+        if self._cargo_interface() in interfaces:
+            available.add(cargo_sensor.CAPABILITY_ID)
         return available
+
+    def _cargo_interface(self) -> tuple[str, str, str] | None:
+        """The configured cargo topic, when this transport can read it; else None.
+
+        Opt-in per resource: without ``FLYTO_ROS2_CARGO_TOPIC`` there is none,
+        and a backend with no fresh-read support (rclpy) offers none either.
+        """
+        topic = cargo_sensor.configured_topic()
+        if not topic or not callable(getattr(self.backend, "cargo_reading", None)):
+            return None
+        return ("topic", topic, cargo_sensor.MESSAGE_TYPE)
 
     def describe(self) -> Sequence[decl.CapabilityDeclaration]:
         available = self._discovered_capabilities()
@@ -1927,7 +1942,10 @@ class GenericROS2Adapter:
         declarations: list[decl.CapabilityDeclaration] = []
         for capability_id in sorted(available):
             kind, name, interface_type = (
-                HOST_INTERFACES.get(capability_id) or DEFAULT_INTERFACES[capability_id]
+                HOST_INTERFACES.get(capability_id)
+                or DEFAULT_INTERFACES.get(capability_id)
+                or self._cargo_interface()
+                or ("topic", "", "")
             )
             basis = _safety_basis()
             observations = (
@@ -1945,6 +1963,8 @@ class GenericROS2Adapter:
                     f"{os.getenv('FLYTO_ROS2_ODOM_TOPIC', '/odom')}:{ODOM_TYPE}",
                     f"{os.getenv('FLYTO_ROS2_TF_TOPIC', '/tf')}:tf2_msgs/msg/TFMessage",
                 )
+            elif capability_id == cargo_sensor.CAPABILITY_ID:
+                observations = (cargo_sensor.interface_observation(name),)
             declarations.append(
                 decl.declare(
                     capability_id=capability_id,
@@ -2012,6 +2032,20 @@ class GenericROS2Adapter:
         ):
             return "fresh map-to-odom transform is required before navigation"
         return None
+
+    def _read_cargo(self, request: CallRequest) -> CallResult:
+        """A fresh cargo reading, behind the same graph check as motion.
+
+        A graph that is not the configured deployment (a simulation claimed
+        over physical hardware, or the reverse) refuses the read: a value from
+        the wrong robot is no answer about this one.
+        """
+        mismatch = self._deployment_mismatch()
+        if mismatch is not None:
+            return CallResult(request.call_id, OUTCOME_REFUSED, detail=mismatch)
+        return self.backend.cargo_reading(  # type: ignore[attr-defined]
+            call_id=request.call_id, deadline_seconds=float(request.deadline_seconds)
+        )
 
     def _deployment_mismatch(self) -> str | None:
         """Refuse motion when the graph is not the kind of robot configured.
@@ -2146,6 +2180,8 @@ class GenericROS2Adapter:
                 return resolved
             place = resolved
             arguments = {"x": place.x, "y": place.y, "yaw_radians": place.yaw}
+        if request.capability_id == cargo_sensor.CAPABILITY_ID:
+            return self._read_cargo(request)
         if request.capability_id in CAPTURE_CAPABILITIES:
             capture = getattr(self.backend, "capture", None)
             if not callable(capture):
@@ -3956,6 +3992,8 @@ class RosbridgeROS2Backend(_ObservationState):
         self._reader: threading.Thread | None = None
         self._responses: dict[str, dict[str, Any]] = {}
         self._action_results: dict[str, dict[str, Any]] = {}
+        # The newest reading of the configured cargo topic (sensing.cargo_present).
+        self._cargo = cargo_sensor.CargoSensor()
         # One-shot reads for vision.observe and sensing.map: topic -> waiter.
         self._capture_waits: dict[str, str] = {}
         self._captured: dict[str, dict[str, Any]] = {}
@@ -4257,6 +4295,11 @@ class RosbridgeROS2Backend(_ObservationState):
         ):
             self._track_clock(raw_message, time.monotonic())
             return
+        if topic and topic == cargo_sensor.configured_topic():
+            with self._condition:
+                if self._cargo.record(raw_message, received=time.monotonic()):
+                    self._condition.notify_all()
+            return
         message = dict(raw_message)
         observed = time.monotonic()
         waiter = self._capture_waits.get(topic)
@@ -4294,6 +4337,37 @@ class RosbridgeROS2Backend(_ObservationState):
             return
         with self._condition:
             handler()
+
+    def cargo_reading(self, *, call_id: str, deadline_seconds: float) -> CallResult:
+        """The configured cargo topic's reading, only while it is fresh.
+
+        A fresh reading answers at once. Otherwise the call waits for a new
+        message, at most the freshness window (and never past its deadline),
+        then fails with the typed reason and no value.
+        """
+        if not self._connected:
+            return CallResult(call_id, OUTCOME_REFUSED, detail="rosbridge adapter disconnected")
+        topic = cargo_sensor.configured_topic()
+        if not topic:
+            return CallResult(
+                call_id, OUTCOME_REFUSED, detail=f"{cargo_sensor.TOPIC_ENV} is not configured"
+            )
+        max_age = cargo_sensor.max_age_s()
+        wait_until = time.monotonic() + min(max(0.0, deadline_seconds), max_age)
+        with self._condition:
+            while True:
+                now = time.monotonic()
+                verdict = self._cargo.verdict(now=now, max_age_s=max_age)
+                if verdict.reason is None or now >= wait_until or not self._connected:
+                    break
+                self._condition.wait(wait_until - now)
+        return cargo_sensor.call_result(
+            call_id,
+            verdict,
+            topic=topic,
+            max_age=max_age,
+            deployment_mode=_served_deployment_mode(),
+        )
 
     def _wait_for(
         self,
@@ -4367,6 +4441,13 @@ class RosbridgeROS2Backend(_ObservationState):
             subscriptions = (
                 *subscriptions,
                 (clock_topic, CLOCK_TYPE, "best_effort", sim_time.CLOCK_THROTTLE_MS, 0),
+            )
+        cargo_topic = cargo_sensor.configured_topic()
+        if not self._presence_only and cargo_topic:
+            # Read only, every message: the robot's own cargo sensor.
+            subscriptions = (
+                *subscriptions,
+                (cargo_topic, cargo_sensor.MESSAGE_TYPE, "reliable", 0, 0),
             )
         if not self._presence_only:
             # Read only, sampled: what was commanded while a goal stood still.
@@ -4522,6 +4603,9 @@ class RosbridgeROS2Backend(_ObservationState):
         marker = _simulation_marker_topic()
         if marker and self._topic_types.get(marker) == CLOCK_TYPE:
             found.append(StandardInterface("topic", marker, CLOCK_TYPE))
+        cargo_topic = cargo_sensor.configured_topic()
+        if cargo_topic and self._topic_types.get(cargo_topic) == cargo_sensor.MESSAGE_TYPE:
+            found.append(StandardInterface("topic", cargo_topic, cargo_sensor.MESSAGE_TYPE))
         return tuple(found)
 
     def action_available(self, capability_id: str) -> bool:
@@ -5053,6 +5137,8 @@ class RosbridgeROS2Backend(_ObservationState):
             self._responses.clear()
             self._action_results.clear()
             self._advertised_topics.clear()
+            # A reading belongs to the connection it arrived on.
+            self._cargo.clear()
         self._reader = threading.Thread(
             target=self._reader_loop,
             args=(websocket,),

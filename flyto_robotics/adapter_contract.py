@@ -58,6 +58,15 @@ _CAPABILITY_METADATA: Mapping[str, Mapping[str, Any]] = {
         "requires_safe_stop": False,
         "cancellable": False,
     },
+    # The robot's own cargo sensor, opt-in per resource (flyto_robotics.cargo_sensor).
+    "sensing.cargo_present": {
+        "display_name": "Cargo Present",
+        "description": "Read the robot's own cargo sensor: is a load on board now",
+        "safety_class": "read_only",
+        "required_permissions": (),
+        "requires_safe_stop": False,
+        "cancellable": False,
+    },
     # Named places, kept on the execution host (flyto_robotics.places).
     "places.list": {
         "display_name": "Places",
