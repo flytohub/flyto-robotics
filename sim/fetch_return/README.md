@@ -76,3 +76,76 @@ simulation only and the navigation safety floor must NOT be disabled to pass.
   12 V arm cut-off, and do not let the robot leave before retraction + load
   verification. Exact dimensions depend on the real hardware measurements,
   so none are asserted by this simulated fixture.
+
+## Cargo bridge for the live twin (SIMULATION)
+
+The Gazebo/Nav2 twin has no tray sensor. `cargo_bridge.py` holds the
+**symbolic** cargo state of the simulated tray and publishes it to ROS 2 so
+the robot's adapter reads `sensing.cargo_present` from a topic, exactly as it
+would from a real tray sensor. It is simulation state, not a measurement.
+
+| What | Value |
+| --- | --- |
+| Topic | `$FLYTO_ROS2_CARGO_TOPIC`, default `/flyto/cargo_present` |
+| Type | `std_msgs/msg/Bool` (`{"data": true}` = block in tray) |
+| QoS | advertised with rosbridge `latch: true` (transient local), re-published at `--rate-hz` (default 2 Hz) |
+| Robot pose | `/odom` (`$FLYTO_ROS2_ODOM_TOPIC`) over the same rosbridge, odometry frame |
+| Arm signal | `GET http://127.0.0.1:$E2E_SIM_CONTROL_PORT/sim/truth` (default 7102), rising edge of `inside` |
+| Control | `http://127.0.0.1:$FLYTO_SIM_CARGO_BRIDGE_PORT` (default 7110), loopback only |
+
+Rules the bridge enforces (`cargo_tray.py`):
+
+- The tray starts empty.
+- A place loads the tray only while the robot is **parked at the station**:
+  a fresh (<= 1 s) odometry pose within `--station-tolerance-m` (default
+  0.10 m) of `--station-x/--station-y`, and speed <= 0.01 m/s, <= 0.02 rad/s.
+  A missing, stale or malformed pose is unknown, and an unknown pose refuses
+  the place (`robot_pose_unknown`); away from the station it is
+  `robot_not_at_station`; still moving it is `robot_not_parked`.
+- Once loaded, the cargo stays with the robot wherever it drives; the arm
+  world being reset afterwards does not clear it. Only an explicit unload does.
+- Every place and unload is recorded with its reason in `GET /sim/cargo`.
+
+### Why the arm signal is the e2e host's `/sim/truth`
+
+flyto-cloud's `scripts/e2e_closed_loop/e2e_host.py` already serves
+`GET /sim/truth` on its loopback simulation control port. Its `inside` field
+is MuJoCo ground truth that the block rests in `bin-blue`, the arm world's
+proxy for the docked robot's tray. Polling it needs **no change to Cloud**
+and no change to the arm pack. Only a False -> True transition counts as a
+place: a block already inside when the bridge starts is never reported,
+because nothing says the robot was parked when it got there. An unreachable
+host or a reading without a boolean `inside` is no signal and keeps the last
+value. Note that each `/sim/truth` read integrates the MuJoCo world to now,
+as any reading of the arm does in that harness.
+
+For glue without a truth port (for example `run.py`'s in-process arm), start
+the bridge with `--arm-source http-only` and report the place yourself:
+`POST /sim/cargo/place`; clear it with `POST /sim/cargo/unload`.
+
+### Run
+
+```
+PY=/Users/chester/Projects/flytohub/flyto-robotics/.venv/bin/python
+# 1. The twin is up on ws://127.0.0.1:19090 (sim/twin/compose.yaml).
+# 2. Read where the station is in the odometry frame, e.g. the parked pose:
+#      docker compose -f sim/twin/compose.yaml exec twin \
+#        bash -lc 'ros2 topic echo --once /odom --field pose.pose.position'
+# 3. Start the bridge (the e2e host serving /sim/truth on 7102):
+E2E_SIM_CONTROL_PORT=7102 $PY sim/fetch_return/cargo_bridge.py \
+  --station-x 2.0 --station-y 0.0 --station-tolerance-m 0.10
+#    or without an arm host:
+$PY sim/fetch_return/cargo_bridge.py --station-x 2.0 --station-y 0.0 --arm-source http-only
+# 4. Inspect / drive it:
+curl -s http://127.0.0.1:7110/sim/cargo
+curl -s -X POST http://127.0.0.1:7110/sim/cargo/place
+curl -s -X POST http://127.0.0.1:7110/sim/cargo/unload
+#    and on the ROS side:
+#      ros2 topic echo /flyto/cargo_present std_msgs/msg/Bool \
+#        --qos-durability transient_local
+# Tests (no Docker; fake rosbridge):
+$PY -m pytest -q tests/test_cargo_bridge_sim.py
+```
+
+The bridge never commands motion and never touches the 0.35 m clearance
+floor or any other safety limit.
