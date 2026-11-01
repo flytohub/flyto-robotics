@@ -36,16 +36,15 @@ from typing import Any
 if __package__ in ("", None):
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from flyto_robotics.cargo_sensor import configured_topic
 from sim.fetch_return.arm_place_signal import ArmTruthWatcher, http_fetch, truth_url
 from sim.fetch_return.cargo_tray import CargoTray, Station
 from sim.fetch_return.rosbridge_link import BOOL_TYPE, ODOMETRY_TYPE, RosbridgeLink
 
-DEFAULT_TOPIC = "/flyto/cargo_present"
 DEFAULT_CONTROL_PORT = 7110
 
-
-def configured_topic() -> str:
-    return os.getenv("FLYTO_ROS2_CARGO_TOPIC", "").strip() or DEFAULT_TOPIC
+# configured_topic is the adapter's one definition (flyto_robotics.cargo_sensor),
+# so the twin publishes exactly where the adapter reads.
 
 
 def configured_odom_topic() -> str:

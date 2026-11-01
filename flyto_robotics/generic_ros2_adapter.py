@@ -1926,13 +1926,14 @@ class GenericROS2Adapter:
         return available
 
     def _cargo_interface(self) -> tuple[str, str, str] | None:
-        """The configured cargo topic, when this transport can read it; else None.
+        """The cargo topic, when this transport can read it; else None.
 
-        Opt-in per resource: without ``FLYTO_ROS2_CARGO_TOPIC`` there is none,
-        and a backend with no fresh-read support (rclpy) offers none either.
+        The topic is always named (``cargo_sensor.configured_topic``); whether
+        the robot offers it is the graph's answer. A backend with no fresh-read
+        support (rclpy) offers none.
         """
         topic = cargo_sensor.configured_topic()
-        if not topic or not callable(getattr(self.backend, "cargo_reading", None)):
+        if not callable(getattr(self.backend, "cargo_reading", None)):
             return None
         return ("topic", topic, cargo_sensor.MESSAGE_TYPE)
 
@@ -1941,12 +1942,20 @@ class GenericROS2Adapter:
         self._declared = available
         declarations: list[decl.CapabilityDeclaration] = []
         for capability_id in sorted(available):
-            kind, name, interface_type = (
+            interface = (
                 HOST_INTERFACES.get(capability_id)
                 or DEFAULT_INTERFACES.get(capability_id)
-                or self._cargo_interface()
-                or ("topic", "", "")
+                or (
+                    self._cargo_interface()
+                    if capability_id == cargo_sensor.CAPABILITY_ID
+                    else None
+                )
             )
+            if interface is None or not interface[1] or not interface[2]:
+                # A declaration names the interface it is served by; never a
+                # blank one a planner would take as served by nothing.
+                raise RuntimeError(f"{capability_id} has no interface to declare")
+            kind, name, interface_type = interface
             basis = _safety_basis()
             observations = (
                 f"{os.getenv('FLYTO_ROS2_ODOM_TOPIC', '/odom')}:{ODOM_TYPE}",
@@ -4348,10 +4357,6 @@ class RosbridgeROS2Backend(_ObservationState):
         if not self._connected:
             return CallResult(call_id, OUTCOME_REFUSED, detail="rosbridge adapter disconnected")
         topic = cargo_sensor.configured_topic()
-        if not topic:
-            return CallResult(
-                call_id, OUTCOME_REFUSED, detail=f"{cargo_sensor.TOPIC_ENV} is not configured"
-            )
         max_age = cargo_sensor.max_age_s()
         wait_until = time.monotonic() + min(max(0.0, deadline_seconds), max_age)
         with self._condition:
@@ -4443,7 +4448,7 @@ class RosbridgeROS2Backend(_ObservationState):
                 (clock_topic, CLOCK_TYPE, "best_effort", sim_time.CLOCK_THROTTLE_MS, 0),
             )
         cargo_topic = cargo_sensor.configured_topic()
-        if not self._presence_only and cargo_topic:
+        if not self._presence_only:
             # Read only, every message: the robot's own cargo sensor.
             subscriptions = (
                 *subscriptions,
@@ -4604,7 +4609,7 @@ class RosbridgeROS2Backend(_ObservationState):
         if marker and self._topic_types.get(marker) == CLOCK_TYPE:
             found.append(StandardInterface("topic", marker, CLOCK_TYPE))
         cargo_topic = cargo_sensor.configured_topic()
-        if cargo_topic and self._topic_types.get(cargo_topic) == cargo_sensor.MESSAGE_TYPE:
+        if self._topic_types.get(cargo_topic) == cargo_sensor.MESSAGE_TYPE:
             found.append(StandardInterface("topic", cargo_topic, cargo_sensor.MESSAGE_TYPE))
         return tuple(found)
 

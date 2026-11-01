@@ -7,12 +7,13 @@ topic named by ``FLYTO_ROS2_CARGO_TOPIC``, read over the same rosbridge
 connection as motion and behind the same simulation/hardware graph check.
 What is pinned here, with a fake rosbridge:
 
-* Opt-in per resource: no topic configured, or the topic not on the graph
-  as a Bool, and the capability is not declared, so planning refuses.
+* The topic defaults to the shared interface's ``/flyto/cargo_present``; a
+  topic not on the graph as a Bool is not declared, so planning refuses.
 * A fresh ``true`` or ``false`` is answered as exactly that boolean.
 * No message, a message older than the freshness window, or a message whose
   ``data`` is not a boolean is a failed call with a typed reason and no
-  value: a missing reading is never false and never true.
+  value: a missing reading is never false and never true. A malformed message
+  and a reconnect each discard the last reading.
 * A graph that is not the configured deployment refuses the read.
 """
 
@@ -138,11 +139,23 @@ def test_the_shared_identifiers():
     assert cargo_sensor.RESULT_FIELD == "cargo_present"
 
 
-def test_without_a_configured_topic_the_capability_is_absent(twin, monkeypatch, connect):
+def test_an_unset_topic_is_the_shared_interface_topic(twin, monkeypatch, connect):
+    # The shared interface names /flyto/cargo_present; a resource that sets
+    # nothing reads exactly that topic, and still only when the graph has it.
     monkeypatch.delenv(cargo_sensor.TOPIC_ENV)
+    assert cargo_sensor.configured_topic() == TOPIC
+    monkeypatch.setenv(cargo_sensor.TOPIC_ENV, "   ")
+    assert cargo_sensor.configured_topic() == TOPIC
     adapter, bridge = connect()
+    declaration = declared(adapter)[cargo_sensor.CAPABILITY_ID]
+    assert declaration.required_observations == (f"{TOPIC}:std_msgs/msg/Bool",)
+    assert TOPIC in {item["topic"] for item in bridge.subscribed}
+
+
+def test_an_unset_topic_on_a_robot_without_it_declares_nothing(twin, monkeypatch, connect):
+    monkeypatch.delenv(cargo_sensor.TOPIC_ENV)
+    adapter, _ = connect({**ODOM, "/clock": CLOCK_TYPE})
     assert cargo_sensor.CAPABILITY_ID not in declared(adapter)
-    assert TOPIC not in {item["topic"] for item in bridge.subscribed}
     result = read(adapter)
     assert result.outcome == OUTCOME_REFUSED
     assert cargo_sensor.RESULT_FIELD not in result.evidence
@@ -243,6 +256,60 @@ def test_a_message_without_a_boolean_is_no_reading(twin, connect, data):
     assert result.evidence[cargo_sensor.READING_KEY]["reason"] == cargo_sensor.REASON_MISSING
 
 
+def test_a_malformed_message_invalidates_the_last_reading(twin, connect):
+    # A sensor that just sent garbage is not still reporting its last value.
+    adapter, bridge = connect()
+    adapter.describe()
+    bridge.publish(TOPIC, {"data": True})
+    wait_for_reading(adapter)
+    bridge.publish(TOPIC, {"data": "true"})
+    deadline = time.monotonic() + 2.0
+    while adapter.backend._cargo.latest is not None and time.monotonic() < deadline:
+        time.sleep(0.01)
+    result = read(adapter)
+    assert result.outcome == OUTCOME_FAILED
+    assert cargo_sensor.RESULT_FIELD not in result.evidence
+    assert result.evidence[cargo_sensor.READING_KEY]["reason"] == cargo_sensor.REASON_MISSING
+
+
+def test_a_reconnect_clears_the_last_reading(twin, monkeypatch):
+    # A wide window: without the clear, the old reading would still be fresh.
+    monkeypatch.setenv(cargo_sensor.MAX_AGE_ENV, "30")
+    bridges = [FakeBridge(SIM_GRAPH), FakeBridge(SIM_GRAPH)]
+    sockets = iter(bridges)
+    backend = RosbridgeROS2Backend(
+        url="ws://127.0.0.1:1", connection_factory=lambda _url: next(sockets)
+    )
+    adapter = GenericROS2Adapter(backend=backend, resource_id="turtlebot3-twin")
+    try:
+        adapter.describe()
+        bridges[0].publish(TOPIC, {"data": True})
+        wait_for_reading(adapter)
+        assert read(adapter).evidence[cargo_sensor.RESULT_FIELD] is True
+        backend.reconnect()
+        adapter.describe()
+        result = adapter.invoke(
+            CallRequest("cargo-2", cargo_sensor.CAPABILITY_ID, deadline_seconds=0.2)
+        )
+        assert result.outcome == OUTCOME_FAILED
+        assert cargo_sensor.RESULT_FIELD not in result.evidence
+        assert result.evidence[cargo_sensor.READING_KEY]["reason"] == cargo_sensor.REASON_MISSING
+    finally:
+        adapter.disconnect()
+
+
+def test_describe_never_declares_an_empty_interface(twin, monkeypatch, connect):
+    # The cargo topic vanishing from configuration between discovery and
+    # declaration must fail loudly, never declare a nameless interface.
+    adapter, _ = connect()
+    available = adapter._discovered_capabilities()
+    assert cargo_sensor.CAPABILITY_ID in available
+    monkeypatch.setattr(adapter, "_discovered_capabilities", lambda: available)
+    monkeypatch.setattr(adapter, "_cargo_interface", lambda: None)
+    with pytest.raises(RuntimeError, match=cargo_sensor.CAPABILITY_ID):
+        adapter.describe()
+
+
 def test_the_call_takes_no_arguments(twin, connect):
     adapter, bridge = connect()
     adapter.describe()
@@ -293,6 +360,10 @@ def test_the_judgement_reads_only_a_literal_boolean_inside_the_window():
     assert sensor.record({"data": False}, received=9.5) is True
     fresh = sensor.verdict(now=10.0, max_age_s=1.0)
     assert (fresh.value, fresh.reason) == (False, None)
+    # A malformed message replaces the reading with none at all.
+    assert sensor.record({"data": 0}, received=9.6) is False
+    assert sensor.verdict(now=10.0, max_age_s=1.0).reason == cargo_sensor.REASON_MISSING
+    assert sensor.record({"data": False}, received=9.5) is True
     stale = sensor.verdict(now=11.0, max_age_s=1.0)
     assert (stale.value, stale.reason) == (None, cargo_sensor.REASON_STALE)
 

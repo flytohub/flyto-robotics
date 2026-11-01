@@ -5,14 +5,18 @@ Cloud admits the last step of a delivery only on the literal boolean ``True``
 in ``cargo_present`` (``services/space_tasks/cargo_vocabulary.py``), so this
 module never produces a value it did not read:
 
-* The capability is opt-in per resource. ``FLYTO_ROS2_CARGO_TOPIC`` names the
-  topic (by convention ``/flyto/cargo_present``); unset, the adapter does not
-  declare the capability and a planner has no resource offering it.
+* The topic is the shared interface's ``/flyto/cargo_present`` unless
+  ``FLYTO_ROS2_CARGO_TOPIC`` names another. The capability is declared only
+  when that topic is on the robot's graph as ``std_msgs/msg/Bool``, so a robot
+  without a cargo sensor declares nothing and a planner has no resource
+  offering it.
 * A reading is the ``data`` of one message, and only a literal boolean. A
   message without one is no reading.
 * Only a reading received within ``FLYTO_ROS2_CARGO_MAX_AGE_S`` (default
   2 s) answers. None at all, or only an older one, is a failed call with a
   typed reason and no value: a missing reading is never false and never true.
+* A message without a boolean discards the last reading: a sensor that just
+  sent garbage is not still reporting its previous value.
 
 ``std_msgs/msg/Bool`` carries no stamp, so age is measured from when this host
 received the message. The subscription is volatile: a latched value published
@@ -36,7 +40,7 @@ CAPABILITY_ID = "sensing.cargo_present"
 MESSAGE_TYPE = "std_msgs/msg/Bool"
 TOPIC_ENV = "FLYTO_ROS2_CARGO_TOPIC"
 MAX_AGE_ENV = "FLYTO_ROS2_CARGO_MAX_AGE_S"
-#: The topic name the Flyto2 simulation publishes; a host still has to set it.
+#: The shared interface's topic: what a robot publishes and the simulation does.
 CONVENTIONAL_TOPIC = "/flyto/cargo_present"
 DEFAULT_MAX_AGE_S = 2.0
 MIN_MAX_AGE_S = 0.1
@@ -51,8 +55,8 @@ REASON_STALE = "cargo_reading_stale"
 
 
 def configured_topic() -> str:
-    """The cargo topic configured for this resource, or ``""`` when none is."""
-    return os.getenv(TOPIC_ENV, "").strip()
+    """The cargo topic for this resource: the configured one, else the shared one."""
+    return os.getenv(TOPIC_ENV, "").strip() or CONVENTIONAL_TOPIC
 
 
 def max_age_s() -> float:
@@ -96,9 +100,10 @@ class CargoSensor:
         self.latest: Reading | None = None
 
     def record(self, message: Any, *, received: float) -> bool:
-        """Keep a message's reading; False (and nothing kept) when it has none."""
+        """Keep a message's reading; False, and the last one discarded, when it has none."""
         data = message.get("data") if isinstance(message, Mapping) else None
         if type(data) is not bool:
+            self.latest = None
             return False
         self.latest = Reading(data, received)
         return True
