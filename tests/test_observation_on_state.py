@@ -829,25 +829,31 @@ class _Handle:
         )
 
 
-def test_a_stop_publishes_first_and_tries_a_stale_goal_only_once(fake_rclpy, clock):
+def test_a_stop_publishes_first_and_keeps_a_goal_whose_cancel_is_refused(fake_rclpy, clock):
+    # Was: completed, the goal forgotten after one try. A refused cancel
+    # means Nav2 may still drive that goal, so the halt is effect_unknown,
+    # the handle is kept, and the next halt cancels it again.
     backend, _condition = rclpy_backend(clock)
     calls: list[str] = []
     backend._publish_zero = lambda: calls.append("zero") or True
-    backend._goal_handles["old-call"] = _Handle(calls)
+    handle = _Handle(calls)
+    backend._goal_handles["old-call"] = handle
     backend._result_futures["old-call"] = SimpleNamespace(done=lambda: False)
 
-    assert backend.safe_stop("stop-1").outcome == "completed"
-    assert calls[0] == "zero"
-    assert calls.count("cancel") == 1
+    result = backend.safe_stop("stop-1")
+
+    assert result.outcome == "failed"
+    assert result.evidence["reason_code"] == "effect_unknown"
+    assert result.evidence["halt_confirmation"]["unconfirmed"].keys() == {"old-call"}
     # The action server could overwrite the first zero until its cancel
-    # landed, so the last command the stop sends comes after the cancel
-    # (cancel() publishes its own zero too; the stop does not rely on it).
-    assert calls == ["zero", "cancel", "zero", "zero"]
-    assert backend._goal_handles == {} and backend._result_futures == {}
+    # landed, so the last command the stop sends comes after the cancel.
+    assert calls[:4] == ["zero", "cancel", "zero", "zero"]
+    assert backend._goal_handles == {"old-call": handle}
+    assert backend.held_goals() == ("old-call",)
 
     calls.clear()
-    assert backend.safe_stop("stop-2").outcome == "completed"
-    assert calls == ["zero"]
+    assert backend.safe_stop("stop-2").outcome == "failed"
+    assert calls[:2] == ["zero", "cancel"]
     backend.disconnect()
 
 
@@ -866,7 +872,10 @@ def test_call_history_is_bounded(fake_rclpy, clock):
     backend.disconnect()
 
 
-def test_a_rosbridge_stop_publishes_first_and_forgets_the_old_goal(no_sleep):
+def test_a_rosbridge_stop_publishes_first_and_keeps_an_unanswered_goal(no_sleep):
+    # Was: completed, the goal forgotten. An unanswered cancel (Nav2
+    # restarted) proves nothing stopped, so the halt is effect_unknown and
+    # the goal is kept for the next halt to cancel again.
     backend = quiet_backend()
     sent: list[str] = []
     backend._topic_types = {"/cmd_vel": "geometry_msgs/msg/Twist"}
@@ -874,16 +883,19 @@ def test_a_rosbridge_stop_publishes_first_and_forgets_the_old_goal(no_sleep):
     backend._wait_for = lambda *_args, **_kwargs: None  # the cancel goes unanswered
     backend._active_actions["old-call"] = "/drive_on_heading"
 
-    assert backend.safe_stop("stop-1").outcome == "completed"
+    result = backend.safe_stop("stop-1")
+
+    assert result.outcome == "failed"
+    assert result.evidence["reason_code"] == "effect_unknown"
+    assert result.evidence["effect_unknown"] is True
     assert sent.index("publish") < sent.index("cancel_action_goal")
     # The last word on cmd_vel is the stop's, after the cancel.
     assert sent[-1] == "publish"
-    assert max(i for i, op in enumerate(sent) if op == "cancel_action_goal") < len(sent) - 1
-    assert backend._active_actions == {}
+    assert backend._active_actions == {"old-call": "/drive_on_heading"}
 
     sent.clear()
     backend.safe_stop("stop-2")
-    assert "cancel_action_goal" not in sent
+    assert "cancel_action_goal" in sent
     backend.disconnect()
 
 
@@ -899,19 +911,29 @@ def test_a_rosbridge_reconnect_drops_goal_ids_of_the_old_socket(no_sleep):
 
 def test_a_stop_after_a_cancel_that_never_reaches_zero_still_ends_on_zero(fake_rclpy, clock):
     # A goal whose cancel times out never reaches cancel()'s own zero; the
-    # stop still ends with one, and reports it only if one went out.
+    # stop still ends with one, and reports whether one went out.
     backend, _condition = rclpy_backend(clock)
     calls: list[str] = []
     zeros = iter([False, True])
-    backend._publish_zero = lambda: calls.append("zero") or next(zeros)
-    backend.cancel = lambda call_id: calls.append("cancel")
+    backend._publish_zero = lambda: calls.append("zero") or next(zeros, False)
+
+    from flyto_robotics.adapter_contract import CallResult
+
+    def timed_out(call_id):
+        calls.append("cancel")
+        return CallResult(call_id, "failed", detail="ROS 2 cancel timed out")
+
+    backend.cancel = timed_out
     backend._goal_handles["old-call"] = object()
     backend._result_futures["old-call"] = SimpleNamespace(done=lambda: False)
 
     result = backend.safe_stop("stop-1")
 
-    assert calls == ["zero", "cancel", "zero"]
-    assert result.outcome == "completed"
+    assert calls[:3] == ["zero", "cancel", "zero"]
+    # Was: completed. The zero went out, but nothing confirmed the goal
+    # stopped driving, so the halt is effect_unknown.
+    assert result.outcome == "failed"
+    assert result.evidence["reason_code"] == "effect_unknown"
     assert result.evidence["zero_velocity_published"] is True
     backend.disconnect()
 

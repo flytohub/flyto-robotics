@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import math
 import queue
@@ -15,6 +16,7 @@ from flyto_robotics.adapter_contract import (
     OUTCOME_CANCELLED,
     OUTCOME_COMPLETED,
     OUTCOME_FAILED,
+    OUTCOME_REFUSED,
     OUTCOME_TIMEOUT,
 )
 from flyto_robotics.generic_ros2_adapter import RosbridgeROS2Backend
@@ -233,16 +235,35 @@ class ScriptedRosbridge:
         pass
 
 
-def odom(x):
+def odom(x, linear=0.0):
     return {
         "op": "publish",
         "topic": "/odom",
         "msg": {
             "pose": {"pose": {"position": {"x": x, "y": 0.0},
                               "orientation": {"x": 0.0, "y": 0.0, "z": 0.0, "w": 1.0}}},
-            "twist": {"twist": {"linear": {"x": 0.0}, "angular": {"z": 0.0}}},
+            "twist": {"twist": {"linear": {"x": linear}, "angular": {"z": 0.0}}},
         },
     }
+
+
+@contextlib.contextmanager
+def odometry_streaming(backend, linear=0.0):
+    """Odometry at about 50 Hz, as a robot publishes it; still unless ``linear``."""
+    stop = threading.Event()
+
+    def run():
+        while not stop.is_set():
+            backend._handle_message(odom(0.1, linear))
+            stop.wait(0.02)
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    try:
+        yield
+    finally:
+        stop.set()
+        thread.join()
 
 
 def scan(front):
@@ -332,9 +353,11 @@ def test_rosbridge_deadline_reports_timeout_and_keeps_tracking(monkeypatch):
     assert result.evidence["motion_outcome"]["reason"] == "timeout"
     assert result.detail.startswith("ROS 2 action still running")
     assert "adv-4" in backend._motion_tracks
-    # An emergency stop forgets the goal, and with it the track.
+    # An emergency stop forgets the goal, and with it the track, once its
+    # cancel is confirmed and odometry shows the robot still.
     backend._topic_types["/cmd_vel"] = "geometry_msgs/msg/Twist"
-    assert backend.safe_stop("stop-1").outcome == OUTCOME_COMPLETED
+    with odometry_streaming(backend):
+        assert backend.safe_stop("stop-1").outcome == OUTCOME_COMPLETED
     assert backend._motion_tracks == {}
     backend.disconnect()
 
@@ -403,7 +426,8 @@ def test_a_safe_stop_for_one_job_does_not_strand_another_jobs_goal(monkeypatch):
         time.sleep(0.01)
     assert "nav-b" in backend._active_actions
 
-    stop = backend.safe_stop("stop-a")
+    with odometry_streaming(backend):  # the halt completes on a robot seen still
+        stop = backend.safe_stop("stop-a")
     worker.join(timeout=8.0)
     backend.disconnect()
 
@@ -428,3 +452,140 @@ def test_cancel_with_nobody_waiting_keeps_no_result_behind(monkeypatch):
                            arguments={"distance_m": 0.3}, deadline_seconds=0.2)
     assert again.outcome == OUTCOME_CANCELLED
     backend.disconnect()
+
+
+# --- motion.halt is completed only when the stop is confirmed ----------------
+
+
+class CancelRosbridge(ScriptedRosbridge):
+    """A rosbridge whose action server answers a cancel only while ``answers``."""
+
+    def __init__(self):
+        super().__init__(lambda _id: [])
+        self.answers = False
+
+    def send(self, raw):
+        message = json.loads(raw)
+        if message.get("op") == "cancel_action_goal" and not self.answers:
+            self.sent.append(message)  # Nav2 restarted: nobody answers
+            return
+        super().send(raw)
+
+    def zeros(self):
+        return sum(
+            1 for m in list(self.sent) if m.get("op") == "publish" and m.get("topic") == "/cmd_vel"
+        )
+
+
+def halting_backend(monkeypatch, answers):
+    monkeypatch.setenv("FLYTO_ROS2_OBSERVATION_WAIT_SECONDS", "0.25")
+    socket = CancelRosbridge()
+    socket.answers = answers
+    backend = RosbridgeROS2Backend(url="ws://127.0.0.1:1", connection_factory=lambda _u: socket)
+    backend._topic_types = {"/cmd_vel": "geometry_msgs/msg/Twist"}
+    backend._active_actions["nav-1"] = "/navigate_to_pose"
+    return backend, socket
+
+
+def test_a_halt_is_completed_once_the_cancel_lands_and_the_robot_is_seen_still(monkeypatch):
+    backend, _socket = halting_backend(monkeypatch, answers=True)
+    with odometry_streaming(backend):
+        result = backend.safe_stop("halt-1")
+    backend.disconnect()
+    assert result.outcome == OUTCOME_COMPLETED
+    confirmation = result.evidence["halt_confirmation"]
+    assert confirmation["cancelled"] == ["nav-1"] and confirmation["unconfirmed"] == {}
+    assert confirmation["stillness"]["stationary"] is True
+    assert result.evidence["zero_velocity_published"] is True
+    assert backend._active_actions == {}
+
+
+def test_a_halt_whose_robot_is_still_moving_is_effect_unknown(monkeypatch):
+    backend, _socket = halting_backend(monkeypatch, answers=True)
+    with odometry_streaming(backend, linear=0.2):
+        result = backend.safe_stop("halt-1")
+    backend.disconnect()
+    assert result.outcome == OUTCOME_FAILED
+    assert result.evidence["reason_code"] == "effect_unknown"
+    assert result.evidence["effect_unknown"] is True
+    assert result.evidence["halt_confirmation"]["stillness"]["stationary"] is False
+    assert result.detail.startswith("effect_unknown")
+
+
+def test_an_unanswered_cancel_keeps_the_goal_and_keeps_publishing_zero(monkeypatch):
+    backend, socket = halting_backend(monkeypatch, answers=False)
+
+    result = backend.safe_stop("halt-1")
+
+    # Was: completed, and the goal forgotten. Nothing confirmed Nav2 let go
+    # of the goal, so the base may still be driven: the halt is a typed
+    # failure Cloud holds the task on, and the handle stays to cancel again.
+    assert result.outcome == OUTCOME_FAILED
+    assert result.evidence["reason_code"] == "effect_unknown"
+    assert result.evidence["halt_confirmation"]["unconfirmed"].keys() == {"nav-1"}
+    assert result.evidence["halt_confirmation"]["zero_velocity_held"] is True
+    assert "nav-1" in backend._active_actions
+    assert backend.held_goals() == ("nav-1",)
+    # Zero velocity keeps going out after the call returned.
+    before = socket.zeros()
+    time.sleep(0.35)
+    assert socket.zeros() >= before + 2
+
+    # The next halt cancels the same goal again; once it lands and the robot
+    # is seen still, the halt is completed and the hold ends.
+    socket.answers = True
+    with odometry_streaming(backend):
+        again = backend.safe_stop("halt-2")
+    assert again.outcome == OUTCOME_COMPLETED
+    assert [m["id"] for m in socket.sent if m.get("op") == "cancel_action_goal"] == [
+        "nav-1", "nav-1",
+    ]
+    assert backend.held_goals() == ()
+    time.sleep(0.25)
+    settled = socket.zeros()
+    time.sleep(0.3)
+    assert socket.zeros() == settled
+    backend.disconnect()
+
+
+def test_motion_is_refused_while_a_halt_is_unconfirmed(monkeypatch):
+    from flyto_robotics.adapter_contract import CallRequest
+    from flyto_robotics.generic_ros2_adapter import GenericROS2Adapter
+
+    backend, socket = halting_backend(monkeypatch, answers=False)
+    adapter = GenericROS2Adapter(backend=backend, resource_id="robot")
+    adapter._declared = {"motion.advance", "motion.halt"}
+    assert backend.safe_stop("halt-1").outcome == OUTCOME_FAILED
+
+    result = adapter.invoke(CallRequest("adv-1", "motion.advance", {"distance_m": 0.3}))
+
+    assert result.outcome == OUTCOME_REFUSED
+    assert result.detail.startswith("effect_unknown") and "nav-1" in result.detail
+    assert not [m for m in socket.sent if m.get("op") == "send_action_goal"]
+    adapter.disconnect()
+
+
+def test_a_cancel_is_confirmed_even_when_the_goals_own_call_takes_the_result(monkeypatch):
+    # The goal's own invoke() waits for its result and takes it the moment it
+    # lands. The cancel used to read the same store, lose that race, and call
+    # a confirmed cancel unconfirmed.
+    backend, _socket = backend_with(lambda _id: [odom(0.1)], monkeypatch)
+    backend._topic_types = {"/cmd_vel": "geometry_msgs/msg/Twist"}
+    outcome: dict = {}
+    worker = threading.Thread(
+        target=lambda: outcome.setdefault("result", backend.invoke(
+            call_id="nav-b", capability_id="motion.advance",
+            arguments={"distance_m": 0.3}, deadline_seconds=4.0,
+        ))
+    )
+    worker.start()
+    deadline = time.monotonic() + 2.0
+    while "nav-b" not in backend._active_actions and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+    cancelled = backend.cancel("nav-b")
+    worker.join(timeout=8.0)
+    backend.disconnect()
+
+    assert cancelled.outcome == OUTCOME_CANCELLED
+    assert outcome["result"].outcome == OUTCOME_CANCELLED

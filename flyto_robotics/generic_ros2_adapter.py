@@ -107,6 +107,16 @@ REQUIRE_MAP_TF = "map_tf"
 STILL_SAMPLES = 3
 STILL_LINEAR_MPS = 0.01
 STILL_ANGULAR_RADPS = 0.02
+# motion.halt with a goal running is completed only once odometry shows the
+# robot still, within this long after the cancel was confirmed.
+HALT_STILL_WAIT_S = 2.0
+# While a halted goal's cancel is unconfirmed, zero velocity is re-sent this
+# often, so the action server's last command never stands.
+ZERO_HOLD_PERIOD_S = 0.1
+# The typed reason of a halt that could not confirm the robot stopped. It is
+# Flyto2 Cloud's own code (services/space_tasks/uncertain_task_effect.py), so
+# the task is held for inspection rather than taken as stopped.
+REASON_EFFECT_UNKNOWN = "effect_unknown"
 # Per-call results and execution counts kept for idempotent retries of the
 # same call_id. A warm adapter lives as long as its host, so this is bounded.
 CALL_HISTORY_LIMIT = 256
@@ -892,6 +902,11 @@ class _ObservationState:
 
     def _init_observation_state(self) -> None:
         self._condition = threading.Condition()
+        # Goals a halt could not confirm cancelled: zero velocity is held for
+        # them, and motion is refused, until they end or a halt confirms them.
+        self._hold_lock = threading.Lock()
+        self._held_goals: set[str] = set()
+        self._zero_holder: threading.Thread | None = None
         # Told when the transport drops or returns, so a host keeping this
         # connection warm reconnects on the drop rather than on a timer.
         self._connection_listeners: list[Callable[[bool], None]] = []
@@ -1646,6 +1661,159 @@ class _ObservationState:
             "waited_seconds": round(time.monotonic() - started, 3),
         }
 
+    # -- motion.halt: completed only when motion is confirmed stopped --------
+
+    def _active_goal_ids(self) -> tuple[str, ...]:
+        raise NotImplementedError
+
+    def _goal_active(self, call_id: str) -> bool:
+        raise NotImplementedError
+
+    def _cancel_for_halt(self, call_id: str) -> str | None:
+        """None once the goal is over (cancel confirmed, or it ended); else why not."""
+        raise NotImplementedError
+
+    def _release_goal(self, call_id: str) -> None:
+        raise NotImplementedError
+
+    def _publish_zero(self) -> bool:
+        raise NotImplementedError
+
+    def _zero_published(self) -> bool:
+        try:
+            return bool(self._publish_zero())
+        except RuntimeError:
+            return False
+
+    def held_goals(self) -> tuple[str, ...]:
+        """Goals a halt could not confirm cancelled and that are still running."""
+        with self._hold_lock:
+            return tuple(sorted(goal for goal in self._held_goals if self._goal_active(goal)))
+
+    def _halt(self, call_id: str, evidence: Mapping[str, Any]) -> CallResult:
+        """Stop the base, and say ``completed`` only when the stop is confirmed.
+
+        Confirmed means no goal was running, or every running goal's cancel
+        was confirmed (or the goal ended), zero velocity was published, and
+        odometry then shows the robot still. Anything less is ``failed`` with
+        the typed reason ``effect_unknown``: a goal whose cancel was refused
+        or went unanswered keeps its handle, so the next halt cancels it
+        again, and zero velocity is re-sent until it ends.
+        """
+        # Zero velocity goes out first, so the stop never waits behind a cancel.
+        stopped = self._zero_published()
+        active = self._active_goal_ids()
+        cancelled: list[str] = []
+        unconfirmed: dict[str, str] = {}
+        for goal in active:
+            why = self._cancel_for_halt(goal)
+            if why is None:
+                self._release_goal(goal)
+                cancelled.append(goal)
+            else:
+                unconfirmed[goal] = why[:200]
+        if active:
+            # Until its cancel landed the action server could overwrite the
+            # first zero; the last command on cmd_vel must be this stop's.
+            stopped = self._zero_published() or stopped
+        confirmation: dict[str, Any] = {
+            "active_goals": sorted(active),
+            "cancelled": cancelled,
+            "unconfirmed": unconfirmed,
+        }
+        evidence = {
+            "adapter": "generic_ros2",
+            **evidence,
+            "standard_interface": {
+                "kind": "topic",
+                "name": DEFAULT_INTERFACES["motion.halt"][1],
+                "type": "geometry_msgs/msg/Twist|TwistStamped",
+            },
+            "zero_velocity_published": stopped,
+        }
+        if unconfirmed:
+            self._hold_zero(unconfirmed)
+            confirmation["zero_velocity_held"] = True
+            return self._halt_unconfirmed(
+                call_id,
+                evidence,
+                confirmation,
+                "cancel not confirmed for " + ", ".join(sorted(unconfirmed)),
+            )
+        if not stopped:
+            return self._halt_unconfirmed(
+                call_id, evidence, confirmation, "standard cmd_vel stop unavailable"
+            )
+        if active:
+            stillness = self.wait_until_stationary(HALT_STILL_WAIT_S)
+            confirmation["stillness"] = stillness
+            if not stillness["stationary"]:
+                return self._halt_unconfirmed(
+                    call_id,
+                    evidence,
+                    confirmation,
+                    f"odometry did not show the robot still within {HALT_STILL_WAIT_S:g} s",
+                )
+        self._count_execution(call_id)
+        return self._keep_result(
+            call_id,
+            CallResult(
+                call_id,
+                OUTCOME_COMPLETED,
+                evidence={**evidence, "halt_confirmation": confirmation},
+            ),
+        )
+
+    @staticmethod
+    def _halt_unconfirmed(
+        call_id: str,
+        evidence: Mapping[str, Any],
+        confirmation: Mapping[str, Any],
+        why: str,
+    ) -> CallResult:
+        return CallResult(
+            call_id,
+            OUTCOME_FAILED,
+            evidence={
+                **evidence,
+                "reason_code": REASON_EFFECT_UNKNOWN,
+                "effect_unknown": True,
+                "halt_confirmation": dict(confirmation),
+            },
+            detail=f"{REASON_EFFECT_UNKNOWN}: halt not confirmed: {why}",
+        )
+
+    def _hold_zero(self, goals: Iterable[str]) -> None:
+        """Keep re-sending zero velocity while any of ``goals`` is still running."""
+        with self._hold_lock:
+            self._held_goals.update(goals)
+            if self._zero_holder is not None and self._zero_holder.is_alive():
+                return
+            holder = threading.Thread(
+                target=self._zero_hold_loop, name="halt-zero-hold", daemon=True
+            )
+            self._zero_holder = holder
+        holder.start()
+
+    def _zero_hold_loop(self) -> None:
+        pause = threading.Event()
+        while True:
+            # The halt has just sent its own zero; the hold follows it.
+            pause.wait(ZERO_HOLD_PERIOD_S)
+            with self._hold_lock:
+                ended = [goal for goal in self._held_goals if not self._goal_active(goal)]
+                self._held_goals.difference_update(ended)
+                if not self._held_goals or not self._connected:
+                    self._zero_holder = None
+                    held = False
+                else:
+                    held = True
+            for goal in ended:
+                self._release_goal(goal)
+            if not held:
+                return
+            self._zero_published()
+
 
 def _travelled_along(
     start: Mapping[str, Any] | None,
@@ -1994,6 +2162,13 @@ class GenericROS2Adapter:
         """None when the motion may start; else why not (a refused path with evidence)."""
         if capability_id == "motion.halt":
             return None
+        held = getattr(self.backend, "held_goals", None)
+        if callable(held) and held():
+            # The base may still be driven by a goal nobody confirmed stopped.
+            return (
+                f"{REASON_EFFECT_UNKNOWN}: a halt was not confirmed for "
+                f"{', '.join(held())}; halt again (or reconnect) before motion"
+            )
         mismatch = self._deployment_mismatch()
         if mismatch is not None:
             return mismatch
@@ -3881,41 +4056,25 @@ class RclpyROS2Backend(_ObservationState):
         )
 
     def safe_stop(self, call_id: str) -> CallResult:
-        # Zero velocity goes out first, so the stop never waits behind a cancel.
-        stopped = self._publish_zero()
-        active = tuple(self._goal_handles)
-        for active_call in active:
-            future = self._result_futures.get(active_call)
-            if future is None or not future.done():
-                self.cancel(active_call)
-            # Tried once: a goal whose cancel went unanswered (Nav2 restarted)
-            # must not cost every later emergency stop another wait.
-            self._forget_goal(active_call)
-        if active:
-            # The action server kept writing cmd_vel until its cancel landed,
-            # over the first zero. A server that stops without a zero of its
-            # own would leave the base on its last command, so the last word
-            # on cmd_vel is this stop's.
-            stopped = self._publish_zero() or stopped
-        if not stopped:
-            return CallResult(
-                call_id, OUTCOME_FAILED, detail="standard cmd_vel stop unavailable"
-            )
-        self._count_execution(call_id)
-        result = CallResult(
-            call_id,
-            OUTCOME_COMPLETED,
-            evidence={
-                "adapter": "generic_ros2",
-                "standard_interface": {
-                    "kind": "topic",
-                    "name": DEFAULT_INTERFACES["motion.halt"][1],
-                    "type": "geometry_msgs/msg/Twist|TwistStamped",
-                },
-                "zero_velocity_published": True,
-            },
-        )
-        return self._keep_result(call_id, result)
+        return self._halt(call_id, {})
+
+    def _active_goal_ids(self) -> tuple[str, ...]:
+        return tuple(self._goal_handles)
+
+    def _goal_active(self, call_id: str) -> bool:
+        future = self._result_futures.get(call_id)
+        return call_id in self._goal_handles and not (future is not None and future.done())
+
+    def _cancel_for_halt(self, call_id: str) -> str | None:
+        if not self._goal_active(call_id):
+            return None  # the goal already ended
+        result = self.cancel(call_id)
+        if result.outcome == OUTCOME_CANCELLED or not self._goal_active(call_id):
+            return None
+        return result.detail or "ROS 2 cancel was not confirmed"
+
+    def _release_goal(self, call_id: str) -> None:
+        self._forget_goal(call_id)
 
     def execution_count(self, call_id: str) -> int:
         return self._counts.get(call_id, 0)
@@ -4001,6 +4160,10 @@ class RosbridgeROS2Backend(_ObservationState):
         self._reader: threading.Thread | None = None
         self._responses: dict[str, dict[str, Any]] = {}
         self._action_results: dict[str, dict[str, Any]] = {}
+        # The terminal status of every goal that ended, by owning call id. Never
+        # taken by a waiter, so a cancel confirms against it even after the
+        # goal's own invoke() took the result message.
+        self._goal_ended: dict[str, int] = {}
         # The newest reading of the configured cargo topic (sensing.cargo_present).
         self._cargo = cargo_sensor.CargoSensor()
         # One-shot reads for vision.observe and sensing.map: topic -> waiter.
@@ -4098,6 +4261,12 @@ class RosbridgeROS2Backend(_ObservationState):
                 self._condition.notify_all()
             elif operation == "action_result":
                 self._action_results[owner] = message
+                status = message.get("status")
+                _remember(
+                    self._goal_ended,
+                    owner,
+                    int(status) if isinstance(status, (int, float)) else 0,
+                )
                 self._condition.notify_all()
             elif operation == "action_feedback":
                 self._track_feedback(owner, message.get("values"))
@@ -4376,12 +4545,12 @@ class RosbridgeROS2Backend(_ObservationState):
 
     def _wait_for(
         self,
-        store: dict[str, dict[str, Any]],
+        store: dict[str, Any],
         identifier: str,
         deadline: float,
         *,
         consume: bool = True,
-    ) -> dict[str, Any] | None:
+    ) -> Any:
         with self._condition:
             while identifier not in store and self._connected:
                 remaining = deadline - time.monotonic()
@@ -4749,6 +4918,9 @@ class RosbridgeROS2Backend(_ObservationState):
         if call_id not in self._active_actions:
 
             _, action_name, action_type = _interface(capability_id)
+            with self._condition:
+                # A new goal: an earlier one's end says nothing about it.
+                self._goal_ended.pop(call_id, None)
             try:
                 self._send(
                     {
@@ -5035,25 +5207,22 @@ class RosbridgeROS2Backend(_ObservationState):
             }
         )
         stopped = self._publish_zero()
-        # Read, not take: the goal may belong to another job on this shared
-        # connection (a safe stop cancels every active goal), and its own
-        # invoke() must still receive the result.
-        result_message = self._wait_for(
-            self._action_results,
+        # The goal's terminal status, never its result message: the goal may
+        # belong to another job on this shared connection (a safe stop cancels
+        # every active goal), whose own invoke() takes the message when it
+        # lands and must still receive it.
+        status = self._wait_for(
+            self._goal_ended,
             call_id,
             time.monotonic() + 3.0,
             consume=False,
         )
-        confirmed = result_message is not None and int(result_message.get("status", 0)) == 5
+        confirmed = status == 5
         with self._condition:
             if confirmed and call_id not in self._result_waiters:
                 # Nobody is waiting; the kept CANCELLED result answers later.
                 self._action_results.pop(call_id, None)
-        if (
-            result_message is None
-            or int(result_message.get("status", 0)) != 5
-            or not stopped
-        ):
+        if not confirmed or not stopped:
             return CallResult(
                 call_id,
                 OUTCOME_FAILED,
@@ -5066,46 +5235,31 @@ class RosbridgeROS2Backend(_ObservationState):
         )
 
     def safe_stop(self, call_id: str) -> CallResult:
-        # Zero velocity goes out first, so the stop never waits behind a cancel.
+        return self._halt(call_id, {"transport": "rosbridge"})
+
+    def _active_goal_ids(self) -> tuple[str, ...]:
+        return tuple(self._active_actions)
+
+    def _goal_active(self, call_id: str) -> bool:
+        # A terminal status that came back means the server ended the goal.
+        return call_id in self._active_actions and call_id not in self._goal_ended
+
+    def _cancel_for_halt(self, call_id: str) -> str | None:
         try:
-            stopped = self._publish_zero()
-        except RuntimeError:
-            stopped = False
-        active = tuple(self._active_actions)
-        for active_call in active:
-            with contextlib.suppress(RuntimeError):
-                self.cancel(active_call)
-            # Tried once: an unanswered cancel must not cost every later
-            # emergency stop another wait.
-            self._active_actions.pop(active_call, None)
-            self._forget_track(active_call)
-        if active:
-            # Until the cancel landed the action server could overwrite the
-            # first zero; the last command on cmd_vel must be this stop's.
-            with contextlib.suppress(RuntimeError):
-                stopped = self._publish_zero() or stopped
-        if not stopped:
-            return CallResult(
-                call_id,
-                OUTCOME_FAILED,
-                detail="standard cmd_vel stop unavailable",
-            )
-        self._count_execution(call_id)
-        result = CallResult(
-            call_id,
-            OUTCOME_COMPLETED,
-            evidence={
-                "adapter": "generic_ros2",
-                "transport": "rosbridge",
-                "standard_interface": {
-                    "kind": "topic",
-                    "name": DEFAULT_INTERFACES["motion.halt"][1],
-                    "type": "geometry_msgs/msg/Twist|TwistStamped",
-                },
-                "zero_velocity_published": True,
-            },
-        )
-        return self._keep_result(call_id, result)
+            result = self.cancel(call_id)
+        except RuntimeError as error:
+            result = CallResult(call_id, OUTCOME_FAILED, detail=f"cancel not sent: {error}")
+        if result.outcome == OUTCOME_CANCELLED:
+            return None
+        with self._condition:
+            ended = call_id in self._goal_ended
+        if ended:
+            return None
+        return result.detail or "ROS 2 cancel was not confirmed"
+
+    def _release_goal(self, call_id: str) -> None:
+        self._active_actions.pop(call_id, None)
+        self._forget_track(call_id)
 
     def execution_count(self, call_id: str) -> int:
         return self._counts.get(call_id, 0)
@@ -5141,6 +5295,7 @@ class RosbridgeROS2Backend(_ObservationState):
             self._keepalive_stop = keepalive_stop
             self._responses.clear()
             self._action_results.clear()
+            self._goal_ended.clear()
             self._advertised_topics.clear()
             # A reading belongs to the connection it arrived on.
             self._cargo.clear()
