@@ -53,6 +53,7 @@ from . import (
     places,
     provider_evidence,
     ros2_interfaces,
+    safety_profile,
     sim_time,
     ssh_transport,
 )
@@ -857,64 +858,74 @@ ARGUMENTS: Mapping[str, tuple[decl.DeclaredArgument, ...]] = {
     cargo_sensor.CAPABILITY_ID: (),
 }
 
-#: The resource's own top linear speed in m/s (0.22 on a TurtleBot3 Burger).
-#: Unset, the contract's bounds stand; set, it only ever tightens them.
-MAX_LINEAR_SPEED_ENV = "FLYTO_ROS2_MAX_LINEAR_SPEED_MPS"
+#: The one speed ceiling above the contract: the site safety profile's
+#: ``max_linear_speed`` (``safety_profile.CONSTRAINABLE``, ``at_most``), the
+#: same limit every job's SafetyLimits is folded into.
+SITE_SPEED_LIMIT = "max_linear_speed"
 
 
-def _resource_speed_limit() -> float | None:
-    """The resource's declared top speed, None when it declares none.
+def _site_speed_ceiling() -> float | None:
+    """The site's ``max_linear_speed`` in m/s, None when the site sets none.
 
-    Raises ValueError for a value that is not a finite speed of at least the
-    smallest declared one: a robot whose limit cannot be read does not move.
+    Raises ``SafetyProfileError`` when the profile exists but cannot be read:
+    a robot whose site limit cannot be read does not move.
     """
-    raw = os.getenv(MAX_LINEAR_SPEED_ENV, "").strip()
-    if not raw:
-        return None
-    try:
-        value = float(raw)
-    except ValueError:
-        raise ValueError(f"{MAX_LINEAR_SPEED_ENV} {raw!r} is not a number") from None
-    if not math.isfinite(value) or value < braking.MIN_SPEED_MPS:
-        raise ValueError(
-            f"{MAX_LINEAR_SPEED_ENV} {raw!r} is not a speed of at least "
-            f"{braking.MIN_SPEED_MPS} m/s"
-        )
-    return value
+    return safety_profile.configured_profile().get(SITE_SPEED_LIMIT)
 
 
 def _speed_limit_problem() -> str | None:
-    """Why motion is refused because of the resource's speed limit, or None."""
+    """Why motion is refused because of the site's speed ceiling, or None."""
     try:
-        _resource_speed_limit()
-    except ValueError as error:
-        return str(error)
+        ceiling = _site_speed_ceiling()
+    except safety_profile.SafetyProfileError as error:
+        return f"site safety profile is unreadable, so motion is refused: {error}"
+    if ceiling is None:
+        return None
+    slowest = min(
+        (
+            item.minimum
+            for arguments in ARGUMENTS.values()
+            for item in arguments
+            if item.name == "speed_mps" and item.minimum is not None
+        ),
+        default=braking.MIN_SPEED_MPS,
+    )
+    if ceiling < slowest:
+        return (
+            f"site safety profile {SITE_SPEED_LIMIT} {ceiling:g} m/s is below the slowest "
+            f"declared drive speed {slowest:g} m/s, so no drive can obey it"
+        )
     return None
 
 
 def declared_arguments(capability_id: str) -> tuple[decl.DeclaredArgument, ...]:
-    """A capability's arguments as this resource declares them.
+    """A capability's arguments as this installation declares them.
 
-    The contract's ``speed_mps`` maximum and default are lowered to the
-    resource's top speed when it declares a lower one; never raised. An
-    unreadable limit leaves the contract as it is (motion is refused by the
-    preflight instead).
+    The contract's ``speed_mps`` maximum and default are folded under the
+    site's ``max_linear_speed`` (``safety_profile.apply_profile``): lowered
+    when the site's ceiling is lower, never raised. An unreadable profile, or
+    a ceiling below the contract's minimum, leaves the contract as it is and
+    motion is refused by the preflight instead.
     """
     arguments = ARGUMENTS[capability_id]
     try:
-        limit = _resource_speed_limit()
-    except ValueError:
-        limit = None
-    if limit is None:
+        profile = safety_profile.configured_profile()
+    except safety_profile.SafetyProfileError:
         return arguments
-    tightened: list[decl.DeclaredArgument] = []
+    if SITE_SPEED_LIMIT not in profile:
+        return arguments
+    site = {SITE_SPEED_LIMIT: profile[SITE_SPEED_LIMIT]}
+    folded: list[decl.DeclaredArgument] = []
     for item in arguments:
-        if item.name == "speed_mps" and item.maximum is not None and limit < item.maximum:
-            maximum = max(limit, item.minimum or 0.0)
+        if item.name == "speed_mps" and item.maximum is not None:
+            maximum = safety_profile.apply_profile(
+                site, {SITE_SPEED_LIMIT: item.maximum}
+            ).values[SITE_SPEED_LIMIT]
+            maximum = max(maximum, item.minimum or 0.0)
             default = None if item.default is None else min(item.default, maximum)
             item = dataclasses.replace(item, maximum=maximum, default=default)
-        tightened.append(item)
-    return tuple(tightened)
+        folded.append(item)
+    return tuple(folded)
 
 
 def declared_default(capability_id: str, name: str) -> float:

@@ -193,6 +193,9 @@ DEFAULT_PROFILE_PATH = "/etc/flyto/safety-profile.json"
 #: Appended to on every change, never rewritten.
 DEFAULT_AUDIT_PATH = "/etc/flyto/safety-profile.audit.jsonl"
 
+#: Names another profile file (a test, a second robot on one computer).
+PROFILE_PATH_ENV = "FLYTO_SAFETY_PROFILE"
+
 MAX_PROFILE_BYTES = 16 * 1024
 
 
@@ -219,6 +222,18 @@ def load_profile(path: Any) -> dict[str, float]:
     except (OSError, UnicodeError, ValueError) as exc:
         raise SafetyProfileError(f"{profile_path} is not readable JSON") from exc
     return parse_profile(document)
+
+
+def configured_profile() -> dict[str, float]:
+    """This installation's profile: ``$FLYTO_SAFETY_PROFILE``, else the default path.
+
+    Every reader of the site's limits (a job's SafetyLimits, the ROS 2
+    adapter's declared speed) goes through here, so they cannot read two
+    different files. Raises SafetyProfileError like ``load_profile``.
+    """
+    import os as _os
+
+    return load_profile(_os.getenv(PROFILE_PATH_ENV, DEFAULT_PROFILE_PATH))
 
 
 def change_record(

@@ -2,28 +2,44 @@
 
 ``motion.advance`` and ``motion.retreat`` declare ``speed_mps`` with bounds and
 a default in their input schema. A call that names no speed is sent at the
-declared default; a resource declares its own top speed
-(``FLYTO_ROS2_MAX_LINEAR_SPEED_MPS``, 0.22 m/s on a TurtleBot3 Burger), which
-can only tighten the declared bound and the default, never widen them. The
-braking plan still lowers the speed near obstacles and the clearance floor is
-untouched.
+declared default. The one speed ceiling above that is the site safety
+profile's ``max_linear_speed`` (``safety_profile.CONSTRAINABLE``, ``at_most``),
+the same limit every job is folded into: it can only tighten the declared
+bound and the default, never widen them, and a profile that cannot be read
+refuses motion. The braking plan still lowers the speed near obstacles and the
+clearance floor is untouched.
 """
 
 from __future__ import annotations
 
 import dataclasses
+import json
 
 import pytest
 
 from flyto_robotics import adapter_contract as decl
 from flyto_robotics import generic_ros2_adapter as adapter_module
+from flyto_robotics.adapter_contract import CallRequest
 from flyto_robotics.generic_ros2_adapter import (
+    GenericROS2Adapter,
     RosbridgeROS2Backend,
     declared_arguments,
     declared_default,
 )
+from flyto_robotics.safety_profile import PROFILE_CONTRACT_VERSION
 
-LIMIT_ENV = "FLYTO_ROS2_MAX_LINEAR_SPEED_MPS"
+RETIRED_ENV = "FLYTO_ROS2_MAX_LINEAR_SPEED_MPS"
+
+
+def site_profile(tmp_path, monkeypatch, limits):
+    """Point the adapter at a site safety profile with these limits."""
+    path = tmp_path / "safety-profile.json"
+    path.write_text(
+        json.dumps({"contract_version": PROFILE_CONTRACT_VERSION, "limits": limits}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("FLYTO_SAFETY_PROFILE", str(path))
+    return path
 
 
 class QuietSocket:
@@ -54,8 +70,9 @@ def with_speed_default(monkeypatch, capability_id, default):
 
 
 @pytest.fixture(autouse=True)
-def no_resource_limit(monkeypatch):
-    monkeypatch.delenv(LIMIT_ENV, raising=False)
+def no_site_profile(monkeypatch, tmp_path):
+    monkeypatch.setenv("FLYTO_SAFETY_PROFILE", str(tmp_path / "absent.json"))
+    monkeypatch.delenv(RETIRED_ENV, raising=False)
 
 
 @pytest.mark.parametrize("capability_id", ["motion.advance", "motion.retreat"])
@@ -88,28 +105,29 @@ def test_a_drive_without_a_speed_is_sent_at_the_declared_default(monkeypatch, ca
         backend.disconnect()
 
 
-def test_the_resource_limit_tightens_the_declared_bound_and_default(monkeypatch):
-    monkeypatch.setenv(LIMIT_ENV, "0.22")
+def test_the_site_ceiling_tightens_the_declared_bound_and_default(monkeypatch, tmp_path):
+    site_profile(tmp_path, monkeypatch, {"max_linear_speed": 0.22})
     advance = speed_argument("motion.advance")
     assert advance.maximum == pytest.approx(0.22)
     retreat = speed_argument("motion.retreat")
-    # Already below the robot's limit: the contract's own bound stands.
+    # Already below the site's ceiling: the contract's own bound stands.
     assert retreat.maximum == adapter_module.ARGUMENTS["motion.retreat"][1].maximum
 
     with_speed_default(monkeypatch, "motion.advance", 0.25)
     assert declared_default("motion.advance", "speed_mps") == pytest.approx(0.22)
 
 
-def test_a_resource_limit_above_the_contract_never_widens_it(monkeypatch):
-    monkeypatch.setenv(LIMIT_ENV, "3.0")
+def test_a_site_ceiling_above_the_contract_never_widens_it(monkeypatch, tmp_path):
+    site_profile(tmp_path, monkeypatch, {"max_linear_speed": 3.0})
     contract = next(
         item for item in adapter_module.ARGUMENTS["motion.advance"] if item.name == "speed_mps"
     )
     assert speed_argument("motion.advance").maximum == contract.maximum
+    assert speed_argument("motion.advance").default == contract.default
 
 
-def test_a_speed_above_the_resource_limit_is_refused(monkeypatch):
-    monkeypatch.setenv(LIMIT_ENV, "0.22")
+def test_a_speed_above_the_site_ceiling_is_refused(monkeypatch, tmp_path):
+    site_profile(tmp_path, monkeypatch, {"max_linear_speed": 0.22})
     with pytest.raises(ValueError, match="above the declared maximum"):
         adapter_module._numeric_arguments(
             "motion.advance", {"distance_m": 1.0, "speed_mps": 0.24}
@@ -119,11 +137,60 @@ def test_a_speed_above_the_resource_limit_is_refused(monkeypatch):
     )["speed_mps"] == pytest.approx(0.22)
 
 
-@pytest.mark.parametrize("raw", ["fast", "nan", "inf", "0", "-0.1", "0.01"])
-def test_an_unusable_resource_limit_refuses_motion(monkeypatch, raw):
-    monkeypatch.setenv(LIMIT_ENV, raw)
-    problem = adapter_module._speed_limit_problem()
-    assert problem is not None and LIMIT_ENV in problem
+def test_the_retired_adapter_speed_variable_has_no_effect(monkeypatch):
+    # One ceiling: the site profile. The adapter's own variable is gone.
+    monkeypatch.setenv(RETIRED_ENV, "0.05")
+    contract = adapter_module.ARGUMENTS["motion.advance"][1]
+    assert speed_argument("motion.advance").maximum == contract.maximum
+    assert not hasattr(adapter_module, "MAX_LINEAR_SPEED_ENV")
+
+
+def preflight(monkeypatch):
+    """The adapter's motion preflight for an advance, on a graph that never answers."""
+    monkeypatch.setenv("FLYTO_ROS2_SIM_MARKER_TOPIC", "")  # no deployment cross-check
+    monkeypatch.setenv("FLYTO_ROS2_OBSERVATION_WAIT_SECONDS", "0.1")
+    backend = RosbridgeROS2Backend(
+        url="ws://127.0.0.1:1", connection_factory=lambda _url: QuietSocket()
+    )
+    adapter = GenericROS2Adapter(backend=backend, resource_id="robot")
+    adapter._declared = {"motion.advance"}
+    try:
+        return adapter.invoke(CallRequest("adv-1", "motion.advance", {"distance_m": 0.3}))
+    finally:
+        adapter.disconnect()
+
+
+@pytest.mark.parametrize(
+    "document",
+    [
+        "{not json",
+        json.dumps({"contract_version": "other", "limits": {}}),
+        json.dumps({"contract_version": PROFILE_CONTRACT_VERSION, "limits": {"top": 1}}),
+    ],
+)
+def test_an_unreadable_site_profile_refuses_motion(monkeypatch, tmp_path, document):
+    path = tmp_path / "safety-profile.json"
+    path.write_text(document, encoding="utf-8")
+    monkeypatch.setenv("FLYTO_SAFETY_PROFILE", str(path))
+    result = preflight(monkeypatch)
+    assert result.outcome == "refused"
+    assert "safety profile" in result.detail
+
+
+def test_a_site_ceiling_below_every_declared_speed_refuses_motion(monkeypatch, tmp_path):
+    site_profile(tmp_path, monkeypatch, {"max_linear_speed": 0.01})
+    # The declared bound never drops below the contract minimum, so a speed
+    # the site forbids would otherwise stay allowed.
+    result = preflight(monkeypatch)
+    assert result.outcome == "refused"
+    assert "max_linear_speed" in result.detail
+
+
+def test_a_readable_site_ceiling_lets_the_preflight_go_on(monkeypatch, tmp_path):
+    site_profile(tmp_path, monkeypatch, {"max_linear_speed": 0.22})
+    result = preflight(monkeypatch)
+    # Refused further on (the quiet graph has no odometry), not by the ceiling.
+    assert "safety profile" not in result.detail and "max_linear_speed" not in result.detail
 
 
 def test_no_speed_literal_is_left_in_the_adapter():

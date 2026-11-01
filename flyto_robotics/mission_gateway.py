@@ -23,6 +23,7 @@ from .safety_profile import (
     DEFAULT_AUDIT_PATH,
     DEFAULT_PROFILE_PATH,
     PROFILE_CONTRACT_VERSION,
+    PROFILE_PATH_ENV,
     SafetyProfileError,
     audit_tail,
     load_profile,
@@ -317,7 +318,7 @@ class MissionGateway:
         # Outside the deployed tree: a site limit inside it would be replaced
         # by the next git pull, which is the opposite of what it is for.
         self.safety_profile_path = Path(
-            os.getenv("FLYTO_SAFETY_PROFILE", DEFAULT_PROFILE_PATH)
+            os.getenv(PROFILE_PATH_ENV, DEFAULT_PROFILE_PATH)
         )
         self.safety_audit_path = Path(
             os.getenv("FLYTO_SAFETY_PROFILE_AUDIT", DEFAULT_AUDIT_PATH)
