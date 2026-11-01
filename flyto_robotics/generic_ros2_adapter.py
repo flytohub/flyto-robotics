@@ -570,6 +570,27 @@ def _configured_deployment_mode() -> str:
     return "simulation" if mode == "simulation" else "hardware"
 
 
+class SimulationOnlyError(RuntimeError):
+    """A simulation-only action was asked of a deployment not confirmed simulated."""
+
+
+def simulation_publish_refusal() -> str | None:
+    """Why this configuration may not publish simulated state, or None.
+
+    Only a deployment configured as ``simulation`` with the simulator marker
+    check on may; the graph must then also carry the marker
+    (``RosbridgeROS2Backend.publish_simulated_state``).
+    """
+    if _configured_deployment_mode() != "simulation":
+        return (
+            "simulated state is published only to a simulation; "
+            "FLYTO_ROS2_DEPLOYMENT_MODE is not simulation"
+        )
+    if not _simulation_marker_topic():
+        return "the simulator marker check (FLYTO_ROS2_SIM_MARKER_TOPIC) is disabled"
+    return None
+
+
 class ServedIdentityError(RuntimeError):
     """The adapter cannot show which resource it serves, or in which deployment."""
 SCAN_TYPE = "sensor_msgs/msg/LaserScan"
@@ -5359,6 +5380,66 @@ class RosbridgeROS2Backend(_ObservationState):
             for goal_id in [g for g, owner in self._goal_owner.items() if owner == call_id]:
                 self._goal_owner.pop(goal_id, None)
 
+    def _advertise_once(self, topic: str, topic_type: str) -> None:
+        """Advertise a topic this connection publishes, once per connection (volatile)."""
+        key = (topic, topic_type)
+        if key in self._advertised_topics:
+            return
+        self._send(
+            {
+                "op": "advertise",
+                "topic": topic,
+                "type": topic_type,
+                "qos": {
+                    "history": "keep_last",
+                    "depth": 1,
+                    "reliability": "reliable",
+                    "durability": "volatile",
+                },
+            }
+        )
+        self._advertised_topics.add(key)
+
+    def publish_simulated_state(self, topic: str, value: bool) -> None:
+        """SIMULATION ONLY: publish a simulated boolean state (the twin's tray).
+
+        Refused (``SimulationOnlyError``) unless the configured deployment is
+        ``simulation`` and this graph carries the simulator marker, re-read
+        before refusing, so simulated state never reaches a physical robot.
+        Only a ``std_msgs/msg/Bool`` with a literal boolean on an absolute
+        topic: never a command. Volatile, not latched: the caller repeats it
+        at ``cargo_sensor.MIN_PUBLISH_HZ`` or faster.
+        """
+        if type(value) is not bool:
+            raise ValueError("simulated state is a literal boolean")
+        if not isinstance(topic, str) or not topic.startswith("/") or len(topic) > 256:
+            raise ValueError("a state topic is an absolute ROS name")
+        if topic in {DEFAULT_INTERFACES["motion.halt"][1], *_command_watch_topics()}:
+            raise ValueError(f"{topic} is a command topic")
+        refusal = simulation_publish_refusal()
+        if refusal is not None:
+            raise SimulationOnlyError(refusal)
+        marker = _simulation_marker_topic()
+        if not self._marker_on_graph(marker):
+            raise SimulationOnlyError(
+                f"the graph does not carry the simulator marker {marker}; "
+                "it may be a physical robot"
+            )
+        self._advertise_once(topic, cargo_sensor.MESSAGE_TYPE)
+        self._send({"op": "publish", "topic": topic, "msg": {"data": value}})
+
+    def _marker_on_graph(self, marker: str) -> bool:
+        for attempt in range(2):
+            if attempt:
+                self.invalidate_discovery()  # a cached graph may predate a restart
+            try:
+                self.discover()
+            except RuntimeError:
+                continue
+            if self._topic_types.get(marker) == CLOCK_TYPE:
+                return True
+        return False
+
     def _publish_zero(self) -> bool:
         topic = DEFAULT_INTERFACES["motion.halt"][1]
         topic_type = self._topic_types.get(topic)
@@ -5372,22 +5453,7 @@ class RosbridgeROS2Backend(_ObservationState):
             topic_type = self._topic_types.get(topic)
         if topic_type not in CMD_VEL_TYPES:
             return False
-        key = (topic, topic_type)
-        if key not in self._advertised_topics:
-            self._send(
-                {
-                    "op": "advertise",
-                    "topic": topic,
-                    "type": topic_type,
-                    "qos": {
-                        "history": "keep_last",
-                        "depth": 1,
-                        "reliability": "reliable",
-                        "durability": "volatile",
-                    },
-                }
-            )
-            self._advertised_topics.add(key)
+        self._advertise_once(topic, topic_type)
         if topic_type == "geometry_msgs/msg/TwistStamped":
             message: dict[str, Any] = {
                 "header": {

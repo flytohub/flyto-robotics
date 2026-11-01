@@ -80,71 +80,45 @@ simulation only and the navigation safety floor must NOT be disabled to pass.
 ## Cargo bridge for the live twin (SIMULATION)
 
 The Gazebo/Nav2 twin has no tray sensor. `cargo_bridge.py` holds the
-**symbolic** cargo state of the simulated tray and publishes it to ROS 2 so
-the robot's adapter reads `sensing.cargo_present` from a topic, exactly as it
-would from a real tray sensor. It is simulation state, not a measurement.
+**symbolic** tray (`mobile_cargo.MobileCargoSimulator`, the same object
+`run.py` uses) and publishes it so the robot's adapter reads
+`sensing.cargo_present` from a topic. It is simulation state, not a
+measurement, and it can only reach a simulation.
 
 | What | Value |
 | --- | --- |
-| Topic | `$FLYTO_ROS2_CARGO_TOPIC`, default `/flyto/cargo_present` |
+| Topic | `$FLYTO_ROS2_CARGO_TOPIC`, else `/flyto/cargo_present` (the adapter's simulation default) |
 | Type | `std_msgs/msg/Bool` (`{"data": true}` = block in tray) |
-| QoS | advertised with rosbridge `latch: true` (transient local), re-published at `--rate-hz` (default 2 Hz) |
-| Robot pose | `/odom` (`$FLYTO_ROS2_ODOM_TOPIC`) over the same rosbridge, odometry frame |
-| Arm signal | `GET http://127.0.0.1:$E2E_SIM_CONTROL_PORT/sim/truth` (default 7102), rising edge of `inside` |
-| Control | `http://127.0.0.1:$FLYTO_SIM_CARGO_BRIDGE_PORT` (default 7110), loopback only |
+| QoS | volatile, re-published at `--rate-hz` (2-10, default 2); never latched. The rate contract is written once, in `flyto_robotics/cargo_sensor.py` |
+| Publisher | the adapter's `RosbridgeROS2Backend.publish_simulated_state`, presence mode (odometry only, never motion) |
+| Gate | refuses unless `FLYTO_ROS2_DEPLOYMENT_MODE=simulation`, the marker check is on, and the graph carries `/clock`; the process refuses to start otherwise |
+| Robot pose | `/odom` over the same connection, odometry frame |
+| Reports | `--reports FILE`, `flyto.sim-arm-report.v1` lines pushed by the arm's and mission's host (`run.py --reports FILE`); without it the tray never loads |
 
-Rules the bridge enforces (`cargo_tray.py`):
+The tray loads only through `accept_station_handoff`, when all of these hold
+for one place: a completed place, seen inside, released and not held; a
+settled run of the arm's own tray readings (>= 3 readings over 0.5 s of
+simulated time, inside 2 mm, not held); a completed retract to `ready`; and
+odometry within `--station-tolerance-m` of the station, moving less than
+1 cm, with no gap over 1.5 s, **from the place report's `started_at` (taken
+before the place was commanded) until the moment the handoff is decided**.
 
-- The tray starts empty.
-- A place loads the tray only while the robot is **parked at the station**:
-  a fresh (<= 1 s) odometry pose within `--station-tolerance-m` (default
-  0.10 m) of `--station-x/--station-y`, and speed <= 0.01 m/s, <= 0.02 rad/s.
-  A missing, stale or malformed pose is unknown, and an unknown pose refuses
-  the place (`robot_pose_unknown`); away from the station it is
-  `robot_not_at_station`; still moving it is `robot_not_parked`.
-- Once loaded, the cargo stays with the robot wherever it drives; the arm
-  world being reset afterwards does not clear it. Only an explicit unload does.
-- Every place and unload is recorded with its reason in `GET /sim/cargo`.
-
-### Why the arm signal is the e2e host's `/sim/truth`
-
-flyto-cloud's `scripts/e2e_closed_loop/e2e_host.py` already serves
-`GET /sim/truth` on its loopback simulation control port. Its `inside` field
-is MuJoCo ground truth that the block rests in `bin-blue`, the arm world's
-proxy for the docked robot's tray. Polling it needs **no change to Cloud**
-and no change to the arm pack. Only a False -> True transition counts as a
-place: a block already inside when the bridge starts is never reported,
-because nothing says the robot was parked when it got there. An unreachable
-host or a reading without a boolean `inside` is no signal and keeps the last
-value. Note that each `/sim/truth` read integrates the MuJoCo world to now,
-as any reading of the arm does in that harness.
-
-For glue without a truth port (for example `run.py`'s in-process arm), start
-the bridge with `--arm-source http-only` and report the place yourself:
-`POST /sim/cargo/place`; clear it with `POST /sim/cargo/unload`.
-
-### Run
+It empties on an `unload` report (delivered at home), a `mission_end` report
+(and nothing reported before it loads again), a `loss` report, an arm
+reading showing the block out or held again before departure,
+`--max-carry-s` (default 600) of carrying, and when the bridge stops (it
+publishes `false` last).
 
 ```
-PY=/Users/chester/Projects/flytohub/flyto-robotics/.venv/bin/python
-# 1. The twin is up on ws://127.0.0.1:19090 (sim/twin/compose.yaml).
-# 2. Read where the station is in the odometry frame, e.g. the parked pose:
-#      docker compose -f sim/twin/compose.yaml exec twin \
-#        bash -lc 'ros2 topic echo --once /odom --field pose.pose.position'
-# 3. Start the bridge (the e2e host serving /sim/truth on 7102):
-E2E_SIM_CONTROL_PORT=7102 $PY sim/fetch_return/cargo_bridge.py \
-  --station-x 2.0 --station-y 0.0 --station-tolerance-m 0.10
-#    or without an arm host:
-$PY sim/fetch_return/cargo_bridge.py --station-x 2.0 --station-y 0.0 --arm-source http-only
-# 4. Inspect / drive it:
-curl -s http://127.0.0.1:7110/sim/cargo
-curl -s -X POST http://127.0.0.1:7110/sim/cargo/place
-curl -s -X POST http://127.0.0.1:7110/sim/cargo/unload
-#    and on the ROS side:
-#      ros2 topic echo /flyto/cargo_present std_msgs/msg/Bool \
-#        --qos-durability transient_local
+PY=<repo>/.venv/bin/python
+# 1. The twin is up (sim/twin/compose.yaml); the station is the parked pose in
+#    the odometry frame.
+# 2. FLYTO_ROS2_DEPLOYMENT_MODE=simulation $PY sim/fetch_return/cargo_bridge.py \
+#      --station-x 2.0 --station-y 0.0 --reports /tmp/fetch-reports.jsonl
+# 3. The arm/mission host appends to the same file, e.g.
+#      $PY sim/fetch_return/run.py --arm-config <config> --reports /tmp/fetch-reports.jsonl
 # Tests (no Docker; fake rosbridge):
-$PY -m pytest -q tests/test_cargo_bridge_sim.py
+$PY -m pytest -q tests/test_sim_cargo_bridge.py
 ```
 
 The bridge never commands motion and never touches the 0.35 m clearance
