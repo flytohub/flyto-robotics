@@ -264,7 +264,7 @@ def test_topic_default_comes_from_env(monkeypatch):
     from sim.fetch_return import cargo_bridge
 
     monkeypatch.delenv("FLYTO_ROS2_CARGO_TOPIC", raising=False)
-    assert cargo_bridge.configured_topic() == "/flyto/cargo_present"
+    assert cargo_bridge.configured_topic() is None
     monkeypatch.setenv("FLYTO_ROS2_CARGO_TOPIC", "/robot/tray")
     assert cargo_bridge.configured_topic() == "/robot/tray"
 

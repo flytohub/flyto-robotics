@@ -2261,12 +2261,17 @@ class GenericROS2Adapter:
     def _cargo_interface(self) -> tuple[str, str, str] | None:
         """The cargo topic, when this transport can read it; else None.
 
-        The topic is always named (``cargo_sensor.configured_topic``); whether
-        the robot offers it is the graph's answer. A backend with no fresh-read
-        support (rclpy) offers none.
+        The backend names it from configuration and its graph
+        (``cargo_sensor.served_topic``); whether the robot offers it is the
+        graph's answer. A backend with no fresh-read support (rclpy) offers none.
         """
-        topic = cargo_sensor.configured_topic()
-        if not callable(getattr(self.backend, "cargo_reading", None)):
+        cargo_topic = getattr(self.backend, "cargo_topic", None)
+        if not callable(cargo_topic) or not callable(
+            getattr(self.backend, "cargo_reading", None)
+        ):
+            return None
+        topic = cargo_topic()
+        if not topic:
             return None
         return ("topic", topic, cargo_sensor.MESSAGE_TYPE)
 
@@ -4657,7 +4662,7 @@ class RosbridgeROS2Backend(_ObservationState):
         ):
             self._track_clock(raw_message, time.monotonic())
             return
-        if topic and topic == cargo_sensor.configured_topic():
+        if topic and topic == self._cargo_subscription_topic():
             with self._condition:
                 if self._cargo.record(raw_message, received=time.monotonic()):
                     self._condition.notify_all()
@@ -4709,7 +4714,11 @@ class RosbridgeROS2Backend(_ObservationState):
         """
         if not self._connected:
             return CallResult(call_id, OUTCOME_REFUSED, detail="rosbridge adapter disconnected")
-        topic = cargo_sensor.configured_topic()
+        topic = self.cargo_topic()
+        if topic is None:
+            return cargo_sensor.no_topic_result(
+                call_id, deployment_mode=_served_deployment_mode()
+            )
         max_age = cargo_sensor.max_age_s()
         wait_until = time.monotonic() + min(max(0.0, deadline_seconds), max_age)
         with self._condition:
@@ -4725,6 +4734,31 @@ class RosbridgeROS2Backend(_ObservationState):
             topic=topic,
             max_age=max_age,
             deployment_mode=_served_deployment_mode(),
+        )
+
+    def _cargo_subscription_topic(self) -> str | None:
+        """The topic this connection listens to for cargo: configured, or the
+        shared one when it serves a simulation (the graph decides later)."""
+        explicit = cargo_sensor.configured_topic()
+        if explicit is not None:
+            return explicit
+        if _served_deployment_mode() == "simulation":
+            return cargo_sensor.CONVENTIONAL_TOPIC
+        return None
+
+    def cargo_topic(self) -> str | None:
+        """The cargo topic this robot answers on, or None (``served_topic``)."""
+        if self._interfaces is None and self._connected:
+            with contextlib.suppress(RuntimeError):
+                self.discover()
+        return self._served_cargo_topic()
+
+    def _served_cargo_topic(self) -> str | None:
+        """``cargo_sensor.served_topic`` on the graph as last read."""
+        marker = _simulation_marker_topic()
+        return cargo_sensor.served_topic(
+            deployment_mode=_served_deployment_mode(),
+            sim_marker_on_graph=bool(marker) and self._topic_types.get(marker) == CLOCK_TYPE,
         )
 
     def _wait_for(
@@ -4800,8 +4834,8 @@ class RosbridgeROS2Backend(_ObservationState):
                 *subscriptions,
                 (clock_topic, CLOCK_TYPE, "best_effort", sim_time.CLOCK_THROTTLE_MS, 0),
             )
-        cargo_topic = cargo_sensor.configured_topic()
-        if not self._presence_only:
+        cargo_topic = self._cargo_subscription_topic()
+        if not self._presence_only and cargo_topic:
             # Read only, every message: the robot's own cargo sensor.
             subscriptions = (
                 *subscriptions,
@@ -4961,8 +4995,8 @@ class RosbridgeROS2Backend(_ObservationState):
         marker = _simulation_marker_topic()
         if marker and self._topic_types.get(marker) == CLOCK_TYPE:
             found.append(StandardInterface("topic", marker, CLOCK_TYPE))
-        cargo_topic = cargo_sensor.configured_topic()
-        if self._topic_types.get(cargo_topic) == cargo_sensor.MESSAGE_TYPE:
+        cargo_topic = self._served_cargo_topic()
+        if cargo_topic and self._topic_types.get(cargo_topic) == cargo_sensor.MESSAGE_TYPE:
             found.append(StandardInterface("topic", cargo_topic, cargo_sensor.MESSAGE_TYPE))
         return tuple(found)
 

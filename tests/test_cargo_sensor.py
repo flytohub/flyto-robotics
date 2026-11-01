@@ -7,8 +7,12 @@ topic named by ``FLYTO_ROS2_CARGO_TOPIC``, read over the same rosbridge
 connection as motion and behind the same simulation/hardware graph check.
 What is pinned here, with a fake rosbridge:
 
-* The topic defaults to the shared interface's ``/flyto/cargo_present``; a
-  topic not on the graph as a Bool is not declared, so planning refuses.
+* A hardware robot declares the capability only on a topic configured for
+  it (``FLYTO_ROS2_CARGO_TOPIC``). The shared interface's
+  ``/flyto/cargo_present`` is the default only for a served simulation whose
+  graph carries the simulator marker (``/clock``), so the simulated tray can
+  never answer for a real robot. A topic not on the graph as a Bool is not
+  declared, so planning refuses. Evidence always names the deployment mode.
 * A fresh ``true`` or ``false`` is answered as exactly that boolean.
 * No message, a message older than the freshness window, or a message whose
   ``data`` is not a boolean is a failed call with a typed reason and no
@@ -139,13 +143,49 @@ def test_the_shared_identifiers():
     assert cargo_sensor.RESULT_FIELD == "cargo_present"
 
 
-def test_an_unset_topic_is_the_shared_interface_topic(twin, monkeypatch, connect):
-    # The shared interface names /flyto/cargo_present; a resource that sets
-    # nothing reads exactly that topic, and still only when the graph has it.
+def test_only_an_explicit_topic_is_configured():
+    import os
+
+    saved = os.environ.pop(cargo_sensor.TOPIC_ENV, None)
+    try:
+        assert cargo_sensor.configured_topic() is None
+        os.environ[cargo_sensor.TOPIC_ENV] = "   "
+        assert cargo_sensor.configured_topic() is None
+        os.environ[cargo_sensor.TOPIC_ENV] = "/tray/loaded"
+        assert cargo_sensor.configured_topic() == "/tray/loaded"
+    finally:
+        os.environ.pop(cargo_sensor.TOPIC_ENV, None)
+        if saved is not None:
+            os.environ[cargo_sensor.TOPIC_ENV] = saved
+
+
+@pytest.mark.parametrize(
+    ("mode", "marker", "expected"),
+    [
+        ("simulation", True, TOPIC),
+        ("simulation", False, None),
+        ("real", True, None),
+        ("real", False, None),
+    ],
+)
+def test_the_shared_topic_is_the_default_only_for_a_marked_simulation(
+    monkeypatch, mode, marker, expected
+):
+    monkeypatch.delenv(cargo_sensor.TOPIC_ENV, raising=False)
+    assert (
+        cargo_sensor.served_topic(deployment_mode=mode, sim_marker_on_graph=marker) == expected
+    )
+    monkeypatch.setenv(cargo_sensor.TOPIC_ENV, "/tray/loaded")
+    assert (
+        cargo_sensor.served_topic(deployment_mode=mode, sim_marker_on_graph=marker)
+        == "/tray/loaded"
+    )
+
+
+def test_an_unset_topic_on_the_simulation_is_the_shared_interface_topic(
+    twin, monkeypatch, connect
+):
     monkeypatch.delenv(cargo_sensor.TOPIC_ENV)
-    assert cargo_sensor.configured_topic() == TOPIC
-    monkeypatch.setenv(cargo_sensor.TOPIC_ENV, "   ")
-    assert cargo_sensor.configured_topic() == TOPIC
     adapter, bridge = connect()
     declaration = declared(adapter)[cargo_sensor.CAPABILITY_ID]
     assert declaration.required_observations == (f"{TOPIC}:std_msgs/msg/Bool",)
@@ -159,6 +199,60 @@ def test_an_unset_topic_on_a_robot_without_it_declares_nothing(twin, monkeypatch
     result = read(adapter)
     assert result.outcome == OUTCOME_REFUSED
     assert cargo_sensor.RESULT_FIELD not in result.evidence
+
+
+def test_a_hardware_robot_never_takes_the_simulated_default(monkeypatch, connect):
+    # A real robot whose graph happens to carry /flyto/cargo_present (the
+    # simulated tray bridge pointed at it by mistake) declares nothing and
+    # never even subscribes to it unless the topic is configured for it.
+    monkeypatch.setenv("FLYTO_ROS2_DEPLOYMENT_MODE", "hardware")
+    monkeypatch.delenv(cargo_sensor.TOPIC_ENV, raising=False)
+    adapter, bridge = connect({**ODOM, TOPIC: "std_msgs/msg/Bool"})
+    assert cargo_sensor.CAPABILITY_ID not in declared(adapter)
+    assert TOPIC not in {item["topic"] for item in bridge.subscribed}
+    reading = adapter.backend.cargo_reading(call_id="cargo-1", deadline_seconds=0.1)
+    assert reading.outcome == OUTCOME_REFUSED
+    assert cargo_sensor.RESULT_FIELD not in reading.evidence
+    assert reading.evidence[cargo_sensor.READING_KEY]["deployment_mode"] == "real"
+
+
+def test_a_simulation_without_the_marker_on_its_graph_takes_no_default(
+    twin, monkeypatch, connect
+):
+    monkeypatch.delenv(cargo_sensor.TOPIC_ENV)
+    adapter, _ = connect({**ODOM, TOPIC: "std_msgs/msg/Bool"})  # no /clock
+    assert cargo_sensor.CAPABILITY_ID not in declared(adapter)
+
+
+def test_a_simulation_with_the_marker_check_disabled_takes_no_default(
+    twin, monkeypatch, connect
+):
+    monkeypatch.delenv(cargo_sensor.TOPIC_ENV)
+    monkeypatch.setenv("FLYTO_ROS2_SIM_MARKER_TOPIC", "")
+    adapter, _ = connect()
+    assert cargo_sensor.CAPABILITY_ID not in declared(adapter)
+
+
+def test_a_hardware_robot_with_its_own_configured_sensor_declares_it(monkeypatch, connect):
+    monkeypatch.setenv("FLYTO_ROS2_DEPLOYMENT_MODE", "hardware")
+    monkeypatch.setenv("FLYTO_ROS2_SIM_MARKER_TOPIC", "/clock")
+    monkeypatch.setenv(cargo_sensor.TOPIC_ENV, "/tray/loaded")
+    monkeypatch.setenv(cargo_sensor.MAX_AGE_ENV, "0.3")
+    adapter, bridge = connect({**ODOM, "/tray/loaded": "std_msgs/msg/Bool"})
+    assert cargo_sensor.CAPABILITY_ID in declared(adapter)
+    bridge.publish("/tray/loaded", {"data": True})
+    wait_for_reading(adapter)
+    result = read(adapter)
+    assert result.outcome == OUTCOME_COMPLETED
+    assert result.evidence[cargo_sensor.RESULT_FIELD] is True
+    assert result.evidence[cargo_sensor.READING_KEY]["deployment_mode"] == "real"
+
+
+def test_the_publish_rate_contract_is_declared_once():
+    # The subscription is volatile, so a value published before the call is
+    # not delivered as new: a publisher must repeat it inside the window.
+    assert cargo_sensor.MIN_PUBLISH_HZ >= 2.0
+    assert 1.0 / cargo_sensor.MIN_PUBLISH_HZ <= cargo_sensor.DEFAULT_MAX_AGE_S / 2
 
 
 def test_a_configured_topic_missing_from_the_graph_is_not_declared(twin, connect):

@@ -5,11 +5,15 @@ Cloud admits the last step of a delivery only on the literal boolean ``True``
 in ``cargo_present`` (``services/space_tasks/cargo_vocabulary.py``), so this
 module never produces a value it did not read:
 
-* The topic is the shared interface's ``/flyto/cargo_present`` unless
-  ``FLYTO_ROS2_CARGO_TOPIC`` names another. The capability is declared only
-  when that topic is on the robot's graph as ``std_msgs/msg/Bool``, so a robot
-  without a cargo sensor declares nothing and a planner has no resource
-  offering it.
+* The topic is the one ``FLYTO_ROS2_CARGO_TOPIC`` names. Only a served
+  simulation whose graph carries the simulator marker (``/clock``) falls back
+  to the shared interface's ``/flyto/cargo_present``, which the simulated tray
+  publishes: a hardware robot declares the capability only on a topic
+  configured for it, so simulated state can never answer for a real robot.
+  The capability is declared only when the topic is on the robot's graph as
+  ``std_msgs/msg/Bool``, so a robot without a cargo sensor declares nothing
+  and a planner has no resource offering it. Every result names the
+  deployment mode it was read in.
 * A reading is the ``data`` of one message, and only a literal boolean. A
   message without one is no reading.
 * Only a reading received within ``FLYTO_ROS2_CARGO_MAX_AGE_S`` (default
@@ -20,7 +24,12 @@ module never produces a value it did not read:
 
 ``std_msgs/msg/Bool`` carries no stamp, so age is measured from when this host
 received the message. The subscription is volatile: a latched value published
-before the call is never delivered as if it were new.
+before the call is never delivered as if it were new. A publisher of this
+topic (a tray sensor driver, or the simulated tray in
+``sim/fetch_return/cargo_bridge.py``) therefore republishes its current value
+at least ``MIN_PUBLISH_HZ`` times a second and never relies on latching; at
+2 Hz a reading is at most 0.5 s old, inside the default 2 s window even with
+one message lost. This is the one place that contract is written down.
 
 Pure: no ROS and no socket. The rosbridge backend records messages here and
 builds the call's result from :func:`call_result`.
@@ -34,14 +43,17 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from .adapter_contract import OUTCOME_COMPLETED, OUTCOME_FAILED, CallResult
+from .adapter_contract import OUTCOME_COMPLETED, OUTCOME_FAILED, OUTCOME_REFUSED, CallResult
 
 CAPABILITY_ID = "sensing.cargo_present"
 MESSAGE_TYPE = "std_msgs/msg/Bool"
 TOPIC_ENV = "FLYTO_ROS2_CARGO_TOPIC"
 MAX_AGE_ENV = "FLYTO_ROS2_CARGO_MAX_AGE_S"
-#: The shared interface's topic: what a robot publishes and the simulation does.
+#: The shared interface's topic: what the simulated tray publishes. The default
+#: only for a served simulation with its marker on the graph (``served_topic``).
 CONVENTIONAL_TOPIC = "/flyto/cargo_present"
+#: A publisher repeats its current value at least this often (see above).
+MIN_PUBLISH_HZ = 2.0
 DEFAULT_MAX_AGE_S = 2.0
 MIN_MAX_AGE_S = 0.1
 MAX_MAX_AGE_S = 30.0
@@ -52,11 +64,46 @@ RESULT_FIELD = "cargo_present"
 READING_KEY = "cargo_reading"
 REASON_MISSING = "cargo_reading_missing"
 REASON_STALE = "cargo_reading_stale"
+REASON_NO_TOPIC = "cargo_topic_not_configured"
 
 
-def configured_topic() -> str:
-    """The cargo topic for this resource: the configured one, else the shared one."""
-    return os.getenv(TOPIC_ENV, "").strip() or CONVENTIONAL_TOPIC
+def configured_topic() -> str | None:
+    """The cargo topic configured for this resource, or None when none is."""
+    return os.getenv(TOPIC_ENV, "").strip() or None
+
+
+def served_topic(*, deployment_mode: str, sim_marker_on_graph: bool) -> str | None:
+    """The topic to read: the configured one, else the shared one on a simulation.
+
+    ``deployment_mode`` is the served one (``simulation`` / ``real``) and
+    ``sim_marker_on_graph`` whether the graph carries the simulator marker.
+    Anything but a marked simulation without a configured topic has none.
+    """
+    explicit = configured_topic()
+    if explicit is not None:
+        return explicit
+    if deployment_mode == "simulation" and sim_marker_on_graph:
+        return CONVENTIONAL_TOPIC
+    return None
+
+
+def no_topic_result(call_id: str, *, deployment_mode: str) -> CallResult:
+    """A read with no cargo topic for this deployment: refused, no value."""
+    return CallResult(
+        call_id,
+        OUTCOME_REFUSED,
+        evidence={
+            READING_KEY: {
+                "message_type": MESSAGE_TYPE,
+                "deployment_mode": deployment_mode,
+                "reason": REASON_NO_TOPIC,
+            }
+        },
+        detail=(
+            f"{REASON_NO_TOPIC}: no cargo topic for this {deployment_mode} deployment; "
+            f"a robot reads one only when {TOPIC_ENV} names it"
+        ),
+    )
 
 
 def max_age_s() -> float:

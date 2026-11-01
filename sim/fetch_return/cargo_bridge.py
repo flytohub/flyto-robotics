@@ -152,7 +152,7 @@ def main(argv: list[str] | None = None) -> int:
         "--rosbridge-url",
         default=os.getenv("FLYTO_ROSBRIDGE_URL", "").strip() or "ws://127.0.0.1:19090",
     )
-    parser.add_argument("--topic", default=configured_topic())
+    parser.add_argument("--topic", default=configured_topic() or "/flyto/cargo_present")
     parser.add_argument(
         "--arm-source",
         choices=("sim-truth", "http-only"),
