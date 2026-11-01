@@ -38,14 +38,16 @@ import re
 import socket
 import threading
 import time
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Callable, Protocol
 
 from . import adapter_contract as decl
 from . import braking_envelope as braking
 from . import (
     cargo_sensor,
+    fsio,
     inflation_escape,
     live_telemetry,
     motion_outcome,
@@ -759,8 +761,27 @@ def _escape_enabled() -> bool:
     }
 
 
-# How an escape backs off: slowly, since it starts close to an obstacle.
+# How an escape backs off: slowly, since it starts close to an obstacle. Never
+# above the site's ceiling either (see _escape_backoff_arguments).
 ESCAPE_BACKOFF_SPEED_MPS = 0.05
+
+
+def _escape_backoff_arguments(distance_m: float) -> dict[str, Any] | str:
+    """The backoff leg's ``motion.retreat`` arguments, or why it cannot be sent.
+
+    Its speed is ``ESCAPE_BACKOFF_SPEED_MPS`` or the declared ``speed_mps``
+    maximum, which the site's ``max_linear_speed`` lowers
+    (``declared_arguments``), whichever is slower. Its distance is the
+    escape's own (a short backoff is below a caller's declared minimum).
+    """
+    speed = next(item for item in declared_arguments("motion.retreat") if item.name == "speed_mps")
+    chosen = min(ESCAPE_BACKOFF_SPEED_MPS, speed.maximum or ESCAPE_BACKOFF_SPEED_MPS)
+    if speed.minimum is not None and chosen < speed.minimum:
+        return (
+            f"inflation escape backoff cannot be sent: {chosen:g} m/s is below the "
+            f"declared minimum {speed.minimum:g} m/s"
+        )
+    return {"distance_m": distance_m, "speed_mps": chosen}
 
 
 def _goal_pose(frame: str, x: float, y: float, yaw: float) -> dict[str, Any]:
@@ -1815,7 +1836,14 @@ class _ObservationState:
         and arms ``HALT_HOLD``: a goal whose cancel was refused or went
         unanswered keeps its handle, zero velocity is re-sent, and motion is
         refused until a halt sees the robot still.
+
+        The whole halt runs in ``HALT_HOLD.halting()``: no goal is sent while
+        it runs, and nothing admitted before it is sent after it.
         """
+        with HALT_HOLD.halting():
+            return self._halt_in_epoch(call_id, evidence)
+
+    def _halt_in_epoch(self, call_id: str, evidence: Mapping[str, Any]) -> CallResult:
         # Zero velocity goes out first, so the stop never waits behind a cancel.
         stopped = self._zero_published()
         active = self._active_goal_ids()
@@ -1954,8 +1982,39 @@ class _ObservationState:
             self._zero_published()
 
 
+#: Names the file that keeps the halt hold across a restart of the host process.
+HALT_HOLD_FILE_ENV = "FLYTO_ROS2_HALT_HOLD_FILE"
+HALT_HOLD_SCHEMA = "flyto.ros2-halt-hold.v1"
+_MAX_ADMITTED = 512
+
+
+def halt_hold_path() -> Path:
+    """Where the hold is kept: ``$FLYTO_ROS2_HALT_HOLD_FILE``, else
+    ``<data dir>/halt-hold/<resource id>.json`` (``places.data_dir``)."""
+    explicit = os.getenv(HALT_HOLD_FILE_ENV, "").strip()
+    if explicit:
+        return Path(explicit).expanduser()
+    return places.data_dir() / "halt-hold" / f"{_safe_fragment(configured_resource_id())}.json"
+
+
+def _token_to_json(token: Any) -> Any:
+    # A rosbridge cancel token (goal id, action) outlives the process; an rclpy
+    # goal handle does not, so a restarted host only re-sends rosbridge cancels.
+    if isinstance(token, tuple) and len(token) == 2 and all(
+        isinstance(part, str) for part in token
+    ):
+        return list(token)
+    return None
+
+
+def _token_from_json(raw: Any) -> Any:
+    if isinstance(raw, list) and len(raw) == 2 and all(isinstance(part, str) for part in raw):
+        return (raw[0], raw[1])
+    return None
+
+
 class _HaltHold:
-    """The robot's hold after a halt that did not see it stop.
+    """The robot's hold after a halt that did not see it stop, and the halt epoch.
 
     One per process: an adapter host serves one robot (``configured_resource_id``),
     and every connection to it (a reconnect, a per-job adapter, a presence
@@ -1964,37 +2023,179 @@ class _HaltHold:
     released only by a halt that then sees the robot still. While armed,
     motion is refused and each commanding connection re-sends zero velocity
     and the held goals' cancels.
+
+    The hold is also kept in a file (``halt_hold_path``), written when it is
+    armed and removed when it is released, so a host process that restarts
+    starts held. A file that cannot be read holds as well.
+
+    Admission: a motion is admitted (``admit``) when the adapter accepts the
+    call, in the current halt epoch. Every halt (``halting``) starts a new
+    epoch, and every goal send runs under ``sending``, which refuses while
+    the hold is armed, while a halt is in progress, or when a halt started
+    after the motion was admitted. ``halting`` takes the same lock as
+    ``sending`` before the halt reads the running goals, so a goal is either
+    sent before the halt looks (and the halt cancels it) or not at all.
     """
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
+        # Serialises a goal send (send + record it as running) against a halt's start.
+        self._gate = threading.RLock()
         self._reason: str | None = None
         self._goals: dict[str, Any] = {}
+        self._epoch = 0
+        self._halting = 0
+        self._admitted: dict[str, int] = {}
+        self._loaded_from: Path | None = None
+        self._persist_error: str | None = None
+
+    # -- persistence ------------------------------------------------------------
+
+    def _load_locked(self) -> None:
+        """Read the kept hold once per file; a hold in it is armed here too."""
+        path = halt_hold_path()
+        if path == self._loaded_from:
+            return
+        self._loaded_from = path
+        try:
+            raw = path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return
+        except OSError as error:
+            self._arm_locked(f"the kept halt hold {path} cannot be read: {error}", {})
+            return
+        try:
+            document = json.loads(raw)
+            if not isinstance(document, dict) or document.get("schema") != HALT_HOLD_SCHEMA:
+                raise ValueError("not a halt hold record")
+            reason = document["reason"]
+            goals = document.get("goals")
+            if not isinstance(reason, str) or not isinstance(goals, dict):
+                raise ValueError("malformed halt hold record")
+        except (ValueError, KeyError) as error:
+            self._arm_locked(f"the kept halt hold {path} cannot be read: {error}", {})
+            return
+        self._arm_locked(
+            f"kept from before a restart: {reason}",
+            {str(goal): _token_from_json(token) for goal, token in goals.items()},
+        )
+
+    def _arm_locked(self, reason: str, goals: Mapping[str, Any]) -> None:
+        self._reason = str(reason)[:200]
+        self._goals.update(goals)
+        document = {
+            "schema": HALT_HOLD_SCHEMA,
+            "reason": self._reason,
+            "goals": {goal: _token_to_json(token) for goal, token in self._goals.items()},
+        }
+        path = self._loaded_from or halt_hold_path()
+        try:
+            fsio.atomic_write(path, json.dumps(document, separators=(",", ":")))
+            self._persist_error = None
+        except OSError as error:
+            # Still held in this process; the snapshot says it is not kept.
+            self._persist_error = f"{type(error).__name__}: {error}"[:200]
+            logger.error("halt hold could not be kept in %s: %s", path, error)
+
+    # -- the hold ---------------------------------------------------------------
 
     def arm(self, reason: str, goals: Mapping[str, Any]) -> None:
         with self._lock:
-            self._reason = str(reason)[:200]
-            self._goals.update(goals)
+            self._load_locked()
+            self._arm_locked(reason, goals)
 
     def snapshot(self) -> dict[str, Any] | None:
         with self._lock:
+            self._load_locked()
             if self._reason is None:
                 return None
-            return {"reason": self._reason, "goals": sorted(self._goals)}
+            held: dict[str, Any] = {"reason": self._reason, "goals": sorted(self._goals)}
+            if self._persist_error is not None:
+                held["kept_across_restart"] = False
+                held["keep_error"] = self._persist_error
+            return held
 
     def tokens(self) -> dict[str, Any]:
         with self._lock:
+            self._load_locked()
             return dict(self._goals)
 
     def release(self) -> dict[str, Any] | None:
         """Clear the hold; what it held, or None. Only a halt seen still calls it."""
         with self._lock:
+            self._load_locked()
             if self._reason is None:
                 return None
             released = {"reason": self._reason, "goals": sorted(self._goals)}
+            path = self._loaded_from or halt_hold_path()
+            try:
+                path.unlink(missing_ok=True)
+            except OSError as error:
+                # A restart would hold again; that is the safe side.
+                logger.error("kept halt hold %s could not be removed: %s", path, error)
             self._reason = None
             self._goals = {}
+            self._persist_error = None
             return released
+
+    # -- admission and the halt epoch ---------------------------------------------
+
+    def admit(self, call_id: str, *, like: str | None = None) -> None:
+        """Admit a motion in the current halt epoch (or in ``like``'s, for its legs)."""
+        with self._lock:
+            # A leg of a call nobody admitted is never current (-1).
+            epoch = self._epoch if like is None else self._admitted.get(like, -1)
+            self._admitted.pop(call_id, None)
+            self._admitted[call_id] = epoch
+            while len(self._admitted) > _MAX_ADMITTED:
+                self._admitted.pop(next(iter(self._admitted)))
+
+    def admit_if_new(self, call_id: str) -> None:
+        """Admit a call sent straight to a backend (no adapter admitted it)."""
+        with self._lock:
+            known = call_id in self._admitted
+        if not known:
+            self.admit(call_id)
+
+    def motion_refusal(self, call_id: str) -> str | None:
+        """Why this admitted motion may not send a goal now, or None."""
+        with self._lock:
+            self._load_locked()
+            if self._reason is not None:
+                # The base may still be moving, or driven by a goal nobody
+                # confirmed stopped; a reconnect or a restart does not change that.
+                goals = ", ".join(sorted(self._goals)) or "no tracked goal"
+                return (
+                    f"{REASON_EFFECT_UNKNOWN}: a halt did not see the robot stop "
+                    f"({self._reason}; held: {goals}); motion is refused until a "
+                    "halt sees it still"
+                )
+            if self._halting:
+                return "a halt is in progress; motion is refused until it ends"
+            if self._admitted.get(call_id, -1) != self._epoch:
+                return "a halt ran after this motion was admitted; it is not sent"
+            return None
+
+    @contextlib.contextmanager
+    def sending(self, call_id: str) -> Iterator[str | None]:
+        """Hold the send gate; yields why the goal may not be sent, or None.
+
+        The caller sends the goal and records it as running inside the block.
+        """
+        with self._gate:
+            yield self.motion_refusal(call_id)
+
+    @contextlib.contextmanager
+    def halting(self) -> Iterator[None]:
+        """A halt in progress: a new epoch, and no goal is sent until it ends."""
+        with self._gate, self._lock:
+            self._epoch += 1
+            self._halting += 1
+        try:
+            yield
+        finally:
+            with self._lock:
+                self._halting -= 1
 
 
 #: The robot's halt hold; see ``_HaltHold``.
@@ -2348,21 +2549,14 @@ class GenericROS2Adapter:
         return declarations
 
     def _motion_preflight(
-        self, capability_id: str
+        self, call_id: str, capability_id: str
     ) -> str | path_clearance.PathClearance | None:
         """None when the motion may start; else why not (a refused path with evidence)."""
         if capability_id == "motion.halt":
             return None
-        held = HALT_HOLD.snapshot()
+        held = HALT_HOLD.motion_refusal(call_id)
         if held is not None:
-            # The base may still be moving, or driven by a goal nobody
-            # confirmed stopped; a reconnect does not change that.
-            goals = ", ".join(held["goals"]) or "no tracked goal"
-            return (
-                f"{REASON_EFFECT_UNKNOWN}: a halt did not see the robot stop "
-                f"({held['reason']}; held: {goals}); motion is refused until a "
-                "halt sees it still"
-            )
+            return held
         mismatch = self._deployment_mismatch()
         if mismatch is not None:
             return mismatch
@@ -2544,6 +2738,9 @@ class GenericROS2Adapter:
             )
         if request.deadline_seconds <= 0:
             return CallResult(request.call_id, OUTCOME_TIMEOUT, detail="no time to run")
+        if request.capability_id != "motion.halt":
+            # Admitted now: a halt from here on ends this call before it moves.
+            HALT_HOLD.admit(request.call_id)
         try:
             arguments = _numeric_arguments(request.capability_id, request.arguments)
         except ValueError as error:
@@ -2583,7 +2780,7 @@ class GenericROS2Adapter:
             arguments, bound_error = _supervised_arguments(request.capability_id, arguments)
             if bound_error is not None:
                 return CallResult(request.call_id, OUTCOME_REFUSED, detail=bound_error)
-        preflight_error = self._motion_preflight(request.capability_id)
+        preflight_error = self._motion_preflight(request.call_id, request.capability_id)
         if isinstance(preflight_error, path_clearance.PathClearance):
             return CallResult(
                 request.call_id,
@@ -2598,7 +2795,8 @@ class GenericROS2Adapter:
                 detail=preflight_error,
             )
         if request.capability_id == "motion.halt":
-            return self.backend.safe_stop(request.call_id)
+            with HALT_HOLD.halting():
+                return self.backend.safe_stop(request.call_id)
         kept = self._provided.get(request.call_id)
         if kept is not None:
             # The same call again: its result, not a second motion's evidence.
@@ -2647,7 +2845,7 @@ class GenericROS2Adapter:
         else:
             if request.capability_id == "motion.navigate":
                 self._arm_leg_guard(request.call_id, request.capability_id)
-            result = self.backend.invoke(
+            result = self._send_motion(
                 call_id=request.call_id,
                 capability_id=request.capability_id,
                 arguments=arguments,
@@ -2870,6 +3068,31 @@ class GenericROS2Adapter:
             leg=leg,
         )
 
+    def _send_motion(
+        self,
+        *,
+        call_id: str,
+        capability_id: str,
+        arguments: Mapping[str, Any],
+        deadline_seconds: float,
+    ) -> CallResult:
+        """Hand an admitted motion to the backend, unless a halt has run since.
+
+        Checked right before the goal goes out (each leg of an escape too): a
+        halt that started after the call was admitted, or a hold armed since
+        the preflight, ends the call here. The backends check again under the
+        send gate, so nothing slips between this check and the send.
+        """
+        refusal = HALT_HOLD.motion_refusal(call_id)
+        if refusal is not None:
+            return CallResult(call_id, OUTCOME_REFUSED, detail=refusal)
+        return self.backend.invoke(
+            call_id=call_id,
+            capability_id=capability_id,
+            arguments=arguments,
+            deadline_seconds=deadline_seconds,
+        )
+
     def _escape_leg(
         self,
         call_id: str,
@@ -2882,8 +3105,9 @@ class GenericROS2Adapter:
             return CallResult(leg_id, OUTCOME_CANCELLED, detail="cancelled")
         self._arm_leg_guard(leg_id, capability_id)
         self._escape_legs[call_id] = leg_id
+        HALT_HOLD.admit(leg_id, like=call_id)
         try:
-            return self.backend.invoke(
+            return self._send_motion(
                 call_id=leg_id,
                 capability_id=capability_id,
                 arguments=arguments,
@@ -2961,12 +3185,14 @@ class GenericROS2Adapter:
             )
 
         if decision.backoff_m > 0.0:
+            backoff = _escape_backoff_arguments(decision.backoff_m)
+            if isinstance(backoff, str):
+                return ended(
+                    "backoff",
+                    CallResult(f"{call_id}:escape-backoff", OUTCOME_REFUSED, detail=backoff),
+                )
             result = self._escape_leg(
-                call_id,
-                f"{call_id}:escape-backoff",
-                "motion.retreat",
-                {"distance_m": decision.backoff_m, "speed_mps": ESCAPE_BACKOFF_SPEED_MPS},
-                deadline,
+                call_id, f"{call_id}:escape-backoff", "motion.retreat", backoff, deadline
             )
             if result.outcome != OUTCOME_COMPLETED:
                 return ended("backoff", result)
@@ -2995,7 +3221,7 @@ class GenericROS2Adapter:
         if not verdict.admitted:
             return ended("goal", self._destination_refusal(call_id, verdict))
         self._arm_leg_guard(call_id, "motion.navigate")
-        result = self.backend.invoke(
+        result = self._send_motion(
             call_id=call_id,
             capability_id="motion.navigate",
             arguments=target,
@@ -3194,7 +3420,8 @@ class GenericROS2Adapter:
         down = self._transport_down(call_id)
         if down is not None:
             return down
-        return self.backend.safe_stop(call_id)
+        with HALT_HOLD.halting():
+            return self.backend.safe_stop(call_id)
 
     def execution_count(self, call_id: str) -> int:
         return self.backend.execution_count(call_id)
@@ -3544,6 +3771,9 @@ class RclpyROS2Backend(_ObservationState):
         self._graph_ready = False
         self._goal_handles: dict[str, Any] = {}
         self._result_futures: dict[str, Any] = {}
+        # Goals sent and not yet accepted (their send_goal_async futures): a
+        # halt sees and cancels them too.
+        self._pending_goals: dict[str, Any] = {}
         self._results: dict[str, CallResult] = {}
         self._counts: dict[str, int] = {}
         self._publishers: dict[str, Any] = {}
@@ -4112,26 +4342,36 @@ class RclpyROS2Backend(_ObservationState):
                 return CallResult(
                     call_id, OUTCOME_REFUSED, detail="ROS 2 action server unavailable"
                 )
-            started = client.send_goal_async(
-                self._goal(capability_id, arguments),
-                feedback_callback=self._guarded(
-                    lambda message, call_id=call_id: self._track_feedback(
-                        call_id, _message_fields(getattr(message, "feedback", None))
-                    )
-                ),
-            )
+            HALT_HOLD.admit_if_new(call_id)
+            with HALT_HOLD.sending(call_id) as refusal:
+                # Sent and recorded as pending under the gate a halt takes
+                # before it reads the running goals.
+                if refusal is not None:
+                    return CallResult(call_id, OUTCOME_REFUSED, detail=refusal)
+                started = client.send_goal_async(
+                    self._goal(capability_id, arguments),
+                    feedback_callback=self._guarded(
+                        lambda message, call_id=call_id: self._track_feedback(
+                            call_id, _message_fields(getattr(message, "feedback", None))
+                        )
+                    ),
+                )
+                self._pending_goals[call_id] = started
             accept_deadline = time.monotonic() + min(2.0, deadline_seconds)
             if not self._wait_future(started, accept_deadline):
+                # Still pending: a halt keeps seeing it until it is answered.
                 return CallResult(
                     call_id, OUTCOME_TIMEOUT, detail="goal acceptance timed out"
                 )
-            handle = started.result()
-            if handle is None or not handle.accepted:
+            handle = self._accepted_goal(call_id)
+            if handle is None:
+                answered = started.result()
+                if answered is not None and getattr(answered, "accepted", False):
+                    # Accepted, and a halt took it and ended it meanwhile.
+                    return CallResult(call_id, OUTCOME_CANCELLED, detail="cancelled by a halt")
                 return CallResult(
                     call_id, OUTCOME_REFUSED, detail="ROS 2 action goal refused"
                 )
-            self._goal_handles[call_id] = handle
-            self._result_futures[call_id] = handle.get_result_async()
             self._count_execution(call_id)
             self._begin_track(call_id, capability_id, arguments)
 
@@ -4186,9 +4426,31 @@ class RclpyROS2Backend(_ObservationState):
         self._forget_goal(call_id)
         return self._keep_result(call_id, result)
 
+    def _accepted_goal(self, call_id: str) -> Any:
+        """Move an answered pending goal to the running goals; its handle, or None.
+
+        Called by the call that sent it and by a halt, whichever reads the
+        answer first; both get the same handle.
+        """
+        with self._condition:
+            handle = self._goal_handles.get(call_id)
+            if handle is not None:
+                return handle
+            started = self._pending_goals.get(call_id)
+            if started is None or not started.done():
+                return None
+            self._pending_goals.pop(call_id, None)
+            handle = started.result()
+            if handle is None or not handle.accepted:
+                return None
+            self._goal_handles[call_id] = handle
+            self._result_futures[call_id] = handle.get_result_async()
+            return handle
+
     def _forget_goal(self, call_id: str) -> None:
         self._goal_handles.pop(call_id, None)
         self._result_futures.pop(call_id, None)
+        self._pending_goals.pop(call_id, None)
         self._forget_track(call_id)
 
     def _publish_zero(self) -> bool:
@@ -4253,13 +4515,20 @@ class RclpyROS2Backend(_ObservationState):
         return self._halt(call_id, {})
 
     def _active_goal_ids(self) -> tuple[str, ...]:
-        return tuple(self._goal_handles)
+        return tuple(dict.fromkeys([*self._goal_handles, *self._pending_goals]))
 
     def _goal_active(self, call_id: str) -> bool:
         future = self._result_futures.get(call_id)
         return call_id in self._goal_handles and not (future is not None and future.done())
 
     def _cancel_for_halt(self, call_id: str) -> str | None:
+        started = self._pending_goals.get(call_id)
+        if call_id not in self._goal_handles and started is not None:
+            # Sent but not yet answered: wait for the answer, then cancel it.
+            if not self._wait_future(started, time.monotonic() + 2.0):
+                return "goal acceptance was not answered, so it could not be cancelled"
+            if self._accepted_goal(call_id) is None:
+                return None  # refused: it never ran
         if not self._goal_active(call_id):
             return None  # the goal already ended
         try:
@@ -4278,11 +4547,19 @@ class RclpyROS2Backend(_ObservationState):
         self._forget_goal(call_id)
 
     def _cancel_token(self, call_id: str) -> Any:
-        return self._goal_handles.get(call_id)
+        return self._goal_handles.get(call_id) or self._pending_goals.get(call_id)
 
     def _recancel(self, call_id: str, token: Any) -> None:
-        if token is not None:
-            token.cancel_goal_async()
+        if token is None:
+            return
+        if not hasattr(token, "cancel_goal_async"):
+            # A goal whose acceptance was pending: cancel it once it is answered.
+            if not token.done():
+                return
+            token = token.result()
+            if token is None or not getattr(token, "accepted", False):
+                return
+        token.cancel_goal_async()
 
     def execution_count(self, call_id: str) -> int:
         return self._counts.get(call_id, 0)
@@ -4302,6 +4579,7 @@ class RclpyROS2Backend(_ObservationState):
         # Goals sent before the drop are no longer followed by this executor.
         self._goal_handles.clear()
         self._result_futures.clear()
+        self._pending_goals.clear()
         with self._condition:
             self._connected = True
             self._condition.notify_all()
@@ -4856,7 +5134,7 @@ class RosbridgeROS2Backend(_ObservationState):
                 (clock_topic, CLOCK_TYPE, "best_effort", sim_time.CLOCK_THROTTLE_MS, 0),
             )
         cargo_topic = self._cargo_subscription_topic()
-        if not self._presence_only and cargo_topic:
+        if cargo_topic:
             # Read only, every message: the robot's own cargo sensor.
             subscriptions = (
                 *subscriptions,
@@ -5154,24 +5432,30 @@ class RosbridgeROS2Backend(_ObservationState):
         if call_id not in self._active_actions:
 
             _, action_name, action_type = _interface(capability_id)
-            with self._condition:
-                # A new goal: an earlier one's end says nothing about it.
-                self._goal_ended.pop(call_id, None)
-            try:
-                self._send(
-                    {
-                        "op": "send_action_goal",
-                        "id": call_id,
-                        "action": action_name,
-                        "action_type": action_type,
-                        "args": self._action_goal(capability_id, arguments),
-                        "feedback": True,
-                    }
-                )
-            except RuntimeError as error:
-                self.invalidate_discovery()
-                return CallResult(call_id, OUTCOME_REFUSED, detail=str(error))
-            self._active_actions[call_id] = action_name
+            HALT_HOLD.admit_if_new(call_id)
+            with HALT_HOLD.sending(call_id) as refusal:
+                # Sent and recorded as running under the gate a halt takes
+                # before it reads the running goals.
+                if refusal is not None:
+                    return CallResult(call_id, OUTCOME_REFUSED, detail=refusal)
+                with self._condition:
+                    # A new goal: an earlier one's end says nothing about it.
+                    self._goal_ended.pop(call_id, None)
+                try:
+                    self._send(
+                        {
+                            "op": "send_action_goal",
+                            "id": call_id,
+                            "action": action_name,
+                            "action_type": action_type,
+                            "args": self._action_goal(capability_id, arguments),
+                            "feedback": True,
+                        }
+                    )
+                except RuntimeError as error:
+                    self.invalidate_discovery()
+                    return CallResult(call_id, OUTCOME_REFUSED, detail=str(error))
+                self._active_actions[call_id] = action_name
             self._count_execution(call_id)
             self._begin_track(call_id, capability_id, arguments)
 
@@ -5314,7 +5598,23 @@ class RosbridgeROS2Backend(_ObservationState):
 
     def _slow_down(self, call_id: str, capability_id: str) -> None:
         """Preempt a guarded drive with the same heading, the rest of its
-        distance, and the slower speed its room now allows."""
+        distance, and the slower speed its room now allows.
+
+        A preempt is a new goal: it is sent only under ``HALT_HOLD.sending``,
+        never while the hold is armed, while a halt runs, or after a halt that
+        started once the drive was admitted. The renamed goal id is set under
+        the same gate, so a halt's cancel token is always the driving goal's.
+        """
+        with HALT_HOLD.sending(call_id) as refusal:
+            if refusal is not None:
+                with self._condition:
+                    guard = self._guards.get(call_id)
+                    if guard is not None:
+                        guard.slow_to = None  # nothing to carry out
+                return
+            self._send_slower_goal(call_id, capability_id)
+
+    def _send_slower_goal(self, call_id: str, capability_id: str) -> None:
         action_name = self._active_actions.get(call_id)
         with self._condition:
             guard = self._guards.get(call_id)
@@ -5404,8 +5704,11 @@ class RosbridgeROS2Backend(_ObservationState):
         """SIMULATION ONLY: publish a simulated boolean state (the twin's tray).
 
         Refused (``SimulationOnlyError``) unless the configured deployment is
-        ``simulation`` and this graph carries the simulator marker, re-read
-        before refusing, so simulated state never reaches a physical robot.
+        ``simulation`` and this connection's graph carries the simulator
+        marker, so simulated state never reaches a physical robot. The graph
+        is the one read on this connection (a reconnect forgets it and reads
+        the new one); a graph without the marker is read again once before
+        refusing, in case it predates a restart.
         Only a ``std_msgs/msg/Bool`` with a literal boolean on an absolute
         topic: never a command. Volatile, not latched: the caller repeats it
         at ``cargo_sensor.MIN_PUBLISH_HZ`` or faster.
@@ -5586,6 +5889,10 @@ class RosbridgeROS2Backend(_ObservationState):
             self._action_results.clear()
             self._goal_ended.clear()
             self._advertised_topics.clear()
+            # The graph is the new connection's to read: a cached marker or
+            # cargo topic may be another robot's.
+            self._topic_types = {}
+            self._action_names = frozenset()
             # A reading belongs to the connection it arrived on.
             self._cargo.clear()
         self._reader = threading.Thread(

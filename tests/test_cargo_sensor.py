@@ -466,3 +466,65 @@ def test_the_judgement_reads_only_a_literal_boolean_inside_the_window():
 def test_an_unusable_freshness_window_falls_back_to_the_default(monkeypatch, raw):
     monkeypatch.setenv(cargo_sensor.MAX_AGE_ENV, raw)
     assert cargo_sensor.max_age_s() == cargo_sensor.DEFAULT_MAX_AGE_S
+
+
+# --- who subscribes, and the graph each connection judges -----------------------------
+
+
+def _cargo_subscriptions(bridge):
+    return [
+        item
+        for item in bridge.subscribed
+        if item.get("type") == cargo_sensor.MESSAGE_TYPE or item.get("topic") in (None, TOPIC)
+    ]
+
+
+def test_a_hardware_robot_without_a_configured_topic_subscribes_to_no_cargo_topic(
+    monkeypatch, connect
+):
+    monkeypatch.setenv("FLYTO_ROS2_DEPLOYMENT_MODE", "hardware")
+    monkeypatch.delenv(cargo_sensor.TOPIC_ENV, raising=False)
+    _adapter, bridge = connect({**ODOM, TOPIC: "std_msgs/msg/Bool"})
+    assert bridge.subscribed  # the connection did subscribe to its readings
+    assert _cargo_subscriptions(bridge) == []
+
+
+def test_a_presence_only_connection_subscribes_to_no_cargo_topic(twin, monkeypatch):
+    monkeypatch.delenv(cargo_sensor.TOPIC_ENV)
+    bridge = FakeBridge(SIM_GRAPH)
+    backend = RosbridgeROS2Backend(
+        url="ws://127.0.0.1:1", connection_factory=lambda _url: bridge, presence_only=True
+    )
+    try:
+        assert bridge.subscribed
+        assert _cargo_subscriptions(bridge) == []
+    finally:
+        backend.disconnect()
+
+
+def test_the_cargo_topic_is_read_from_the_graph_on_demand(twin, monkeypatch):
+    monkeypatch.delenv(cargo_sensor.TOPIC_ENV)
+    bridge = FakeBridge(SIM_GRAPH)
+    backend = RosbridgeROS2Backend(url="ws://127.0.0.1:1", connection_factory=lambda _url: bridge)
+    try:
+        # Nothing has read the graph yet on this connection.
+        assert backend._interfaces is None
+        assert backend.cargo_topic() == TOPIC
+    finally:
+        backend.disconnect()
+
+
+def test_a_reconnect_forgets_the_graph_the_old_connection_read(twin, monkeypatch):
+    monkeypatch.delenv(cargo_sensor.TOPIC_ENV)
+    bridges = [FakeBridge(SIM_GRAPH), FakeBridge(ODOM)]
+    backend = RosbridgeROS2Backend(
+        url="ws://127.0.0.1:1", connection_factory=lambda _url: bridges.pop(0)
+    )
+    try:
+        assert backend.cargo_topic() == TOPIC
+        backend.reconnect()  # now a graph without the simulator marker
+        # Judged before this connection read its graph: never the old marker.
+        assert backend._served_cargo_topic() is None
+        assert backend.published_topics() == {}
+    finally:
+        backend.disconnect()

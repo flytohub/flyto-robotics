@@ -33,6 +33,14 @@ from flyto_robotics.generic_ros2_adapter import (
 
 ODOM_PERIOD = 0.033
 
+def _admitted(call_id: str = "preflight-1") -> str:
+    """A call the adapter admitted, as ``_invoke`` does before its preflight."""
+    from flyto_robotics import generic_ros2_adapter
+
+    generic_ros2_adapter.HALT_HOLD.admit(call_id)
+    return call_id
+
+
 
 class FakeClock:
     def __init__(self) -> None:
@@ -370,7 +378,7 @@ def test_navigate_preflight_waits_for_the_map_transform_instead_of_refusing(
         lambda: backend._on_tf(MAP_TF),
     ]
 
-    assert adapter._motion_preflight("motion.navigate") is None
+    assert adapter._motion_preflight(_admitted(), "motion.navigate") is None
     assert condition.delivered == 3
     assert condition.timed_out == 0
 
@@ -396,7 +404,7 @@ def test_navigate_still_refuses_once_the_wait_ends_without_a_transform(
     backend._on_odometry(odometry())
     backend._on_scan(SCAN)
 
-    refusal = adapter._motion_preflight("motion.navigate")
+    refusal = adapter._motion_preflight(_admitted(), "motion.navigate")
 
     assert refusal == "fresh map-to-odom transform is required before navigation"
     assert condition.timed_out == 1
@@ -596,7 +604,7 @@ def test_rosbridge_discovery_is_served_from_cache_until_reconnect(no_sleep, monk
     for phase in ("before", "after", "post_stop"):
         adapter.observe(phase=phase, execution_id="call-1")
     assert adapter._deployment_mismatch() is None
-    assert adapter._motion_preflight("motion.advance") is None
+    assert adapter._motion_preflight(_admitted(), "motion.advance") is None
 
     assert queries == {"/rosapi/topics": 1, "/rosapi/action_servers": 1}
 
@@ -1051,7 +1059,7 @@ def test_readings_missing_at_preflight_forget_the_cached_graph(fake_rclpy, clock
     backend.invalidate_discovery = lambda: invalidated.append(True)
     backend._on_tf(MAP_TF)
 
-    assert adapter._motion_preflight("motion.advance") == (
+    assert adapter._motion_preflight(_admitted(), "motion.advance") == (
         "fresh odometry is required before motion"
     )
     assert invalidated == [True]

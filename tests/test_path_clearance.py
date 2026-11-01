@@ -24,6 +24,14 @@ RADIUS = 0.10
 # The live sweep: chair behind, room ahead, walls well to either side.
 LIVE = {168: 0.334, 0: 1.445, 90: 0.80, -90: 0.90}
 
+def _admitted(call_id: str = "preflight-1") -> str:
+    """A call the adapter admitted, as ``_invoke`` does before its preflight."""
+    from flyto_robotics import generic_ros2_adapter
+
+    generic_ros2_adapter.HALT_HOLD.admit(call_id)
+    return call_id
+
+
 
 def judge(points, kind, **kwargs):
     return pc.judge(
@@ -135,7 +143,7 @@ def _live_device(capability_id: str):
 
 
 def test_the_adapter_admits_the_live_forward_advance_at_preflight():
-    assert _live_device("motion.advance")._motion_preflight("motion.advance") is None
+    assert _live_device("motion.advance")._motion_preflight(_admitted(), "motion.advance") is None
 
 
 def test_the_adapter_refuses_the_live_retreat_with_structured_sectors():

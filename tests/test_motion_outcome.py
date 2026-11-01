@@ -469,6 +469,18 @@ class CancelRosbridge(ScriptedRosbridge):
         if message.get("op") == "cancel_action_goal" and not self.answers:
             self.sent.append(message)  # Nav2 restarted: nobody answers
             return
+        if message.get("op") == "call_service":
+            # rosapi: a reconnect reads the robot's graph afresh.
+            values = (
+                {"topics": ["/cmd_vel"], "types": ["geometry_msgs/msg/Twist"]}
+                if message["service"] == "/rosapi/topics"
+                else {"action_servers": ["/navigate_to_pose", "/drive_on_heading"]}
+            )
+            self.sent.append(message)
+            self.inbox.put(json.dumps(
+                {"op": "service_response", "id": message["id"], "result": True, "values": values}
+            ))
+            return
         super().send(raw)
 
     def zeros(self):
