@@ -20,6 +20,7 @@ socket. What is pinned:
 from __future__ import annotations
 
 import json
+import threading
 from pathlib import Path
 
 import pytest
@@ -719,3 +720,132 @@ def test_the_offline_mission_pushes_a_report_trail_that_loads_and_unloads(tmp_pa
     handoff.observe_reports(trail[-2:])
     handoff.evaluate(trail[-1].at + 1.0)
     assert handoff.cargo_present is False
+
+
+# --- review round 3: clocks, late lifecycle reports, retract order, stop -------------
+
+
+def test_a_place_stamped_after_the_decision_time_never_loads():
+    # The robot drove from x=5 onto the station; only the last sample is on it.
+    handoff = CargoHandoff(STATION)
+    now = 1000.0
+    for i in range(20):
+        handoff.observe_pose(now - 10 + i * 0.5, {"x": 5.0 - i * 0.25, "y": 0.0})
+    handoff.observe_pose(now, AT_STATION)
+    _feed(
+        handoff,
+        [
+            _place(now + 60.0, started_at=now + 50.0),
+            reports.retract_report("completed", at=now + 61.0),
+            *[_reading(now + 62.0, t / 10) for t in range(10)],
+        ],
+    )
+    assert handoff.poses.parked(now + 50.0, now, STATION) is False
+    handoff.evaluate(now)
+    assert handoff.cargo_present is False
+    # The future report is retired, not waited for until the clock catches up.
+    _parked(handoff, now + 0.5, now + 70.0)
+    handoff.evaluate(now + 70.0)
+    assert handoff.cargo_present is False
+    assert any(e.get("reason") == "report_from_the_future" for e in handoff.events)
+
+
+@pytest.mark.parametrize("late", ["loss", "unload", "mission_end"])
+def test_a_lifecycle_report_after_the_place_retires_it_before_the_decision(late):
+    handoff = CargoHandoff(STATION)
+    _parked(handoff, 100.0, 104.0)
+    record = {
+        "loss": reports.loss_report("dropped", at=103.2),
+        "unload": reports.unload_report("completed", at=103.2),
+        "mission_end": reports.mission_end_report("failed", at=103.2),
+    }[late]
+    _feed(
+        handoff,
+        [
+            _place(102.0),
+            *_settled(102.1),
+            reports.retract_report("completed", at=103.0),
+            record,
+        ],
+    )
+    handoff.evaluate(104.0)
+    assert handoff.cargo_present is False
+    _parked(handoff, 104.5, 120.0)
+    handoff.evaluate(120.0)
+    assert handoff.cargo_present is False
+
+
+def test_a_retract_stamped_before_the_place_does_not_count():
+    handoff = CargoHandoff(STATION)
+    _parked(handoff, 100.0, 104.0)
+    _feed(
+        handoff,
+        [_place(102.0), *_settled(102.1), reports.retract_report("completed", at=101.0)],
+    )
+    handoff.evaluate(104.0)
+    assert handoff.cargo_present is False
+    assert handoff.events[-1]["accepted"] is False
+
+
+def test_a_place_whose_jaws_still_hold_the_block_never_loads():
+    handoff = CargoHandoff(STATION)
+    _parked(handoff, 100.0, 104.0)
+    _feed(
+        handoff,
+        [
+            _place(102.0, evidence={"object_held": True}),
+            *_settled(102.1),
+            reports.retract_report("completed", at=103.0),
+        ],
+    )
+    assert reports.placement_observed(reports.parse_report(_place(102.0))) is True
+    handoff.evaluate(104.0)
+    assert handoff.cargo_present is False
+
+
+class BlockingLink(FakeLink):
+    """The first publish of ``True`` blocks until released: a tick in flight."""
+
+    def __init__(self):
+        super().__init__()
+        self.entered = threading.Event()
+        self.release = threading.Event()
+
+
+    def publish_simulated_state(self, topic, value):
+        if value is True and not self.entered.is_set():
+            self.entered.set()
+            self.release.wait(2.0)
+        super().publish_simulated_state(topic, value)
+
+
+def _bridge_with_a_tick_in_flight():
+    link = BlockingLink()
+    handoff = CargoHandoff(STATION)
+    _full_handoff(handoff)
+    bridge = CargoBridge(link=link, handoff=handoff, clock=lambda: 104.0)
+    worker = bridge.start(rate_hz=cargo_bridge.MAX_RATE_HZ)
+    assert link.entered.wait(2.0)
+    return link, handoff, bridge, worker
+
+
+def _stop_while_the_tick_publishes(link, bridge):
+    stopper = threading.Thread(target=bridge.stop)
+    stopper.start()
+    stopper.join(0.3)  # stop() must still be waiting for the tick
+    assert stopper.is_alive()
+    link.release.set()
+    stopper.join(3.0)
+    assert not stopper.is_alive()
+
+
+def test_stop_waits_for_a_tick_in_flight_so_false_is_published_last():
+    link, handoff, bridge, _worker = _bridge_with_a_tick_in_flight()
+    _stop_while_the_tick_publishes(link, bridge)
+    assert link.published[-1] == ("/flyto/cargo_present", False)
+    assert handoff.cargo_present is False
+    # A tick queued behind the stop publishes nothing, even for a new handoff.
+    count = len(link.published)
+    _full_handoff(handoff, t0=200.0)
+    bridge.tick()
+    assert len(link.published) == count

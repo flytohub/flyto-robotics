@@ -26,13 +26,16 @@ and only when every input holds for the same place:
   before the place started (the report's ``started_at``) until the moment the
   handoff is decided, with no gap in the readings.
 
-A missing or unreadable input never loads it. It empties on an ``unload``
+A missing or unreadable input never loads it, nor does a place stamped
+later than this process's clock (``MAX_REPORT_SKEW_S``). An ``unload``,
+``loss`` or ``mission_end`` report retires every place reported before it,
+decided or not. It empties on an ``unload``
 report (delivered at home), a ``mission_end`` report, a ``loss`` report, an
 arm reading that shows the block out of the tray or held again before the
 robot left the station, after ``--max-carry-s`` of carrying, and when this
-process stops (it publishes ``false`` last). After departure the arm's tray
-proxy no longer stands for the robot's tray, so arm readings stamped after
-departure are ignored.
+process stops (after any tick in flight, it publishes ``false`` last).
+After departure the arm's tray proxy no longer stands for the robot's tray,
+so arm readings stamped after departure are ignored.
 
 The reports are opt-in (``--reports FILE``) and pushed by the arm's and
 mission's host (``run.py --reports``); this process never reads, steps or
@@ -95,6 +98,11 @@ POSE_MAX_AGE_ENV = "FLYTO_ROS2_OBSERVATION_MAX_AGE_SECONDS"
 POSE_MAX_AGE_S = 1.5
 #: The longest the tray may stay loaded without an unload or mission end.
 MAX_CARRY_S = 600.0
+#: How far ahead of this process's clock a report may be stamped (the arm's
+#: host and this one share a wall clock). A place stamped later than that, or
+#: one that says it started later, is retired: it cannot describe a robot this
+#: process saw parked.
+MAX_REPORT_SKEW_S = 0.5
 HISTORY = 1200
 MAX_REPORTS = 2000
 MAX_EVENTS = 50
@@ -140,9 +148,12 @@ class PoseHistory:
         """Whether the robot stayed parked at the station from ``start`` to ``end``.
 
         None while no sample at or after ``end`` exists yet (undecided). False
-        when the history does not reach back to ``start``, a sample is unknown
-        or off the station, the robot moved, or two samples are too far apart.
+        when ``start`` is after ``end``, the history does not reach back to
+        ``start``, a sample is unknown or off the station, the robot moved, or
+        two samples are too far apart: the samples must cover all of it.
         """
+        if start > end:
+            return False
         samples = list(self._samples)
         before = [i for i, (t, _) in enumerate(samples) if t <= start]
         after = [i for i, (t, _) in enumerate(samples) if t >= end]
@@ -243,10 +254,16 @@ class CargoHandoff:
         self._record({"kind": kind, "was_carrying": was, **detail})
 
     def _apply_lifecycle(self) -> None:
-        """Unload, loss and mission-end reports only ever empty the tray."""
+        """Unload, loss and mission-end reports only ever empty the tray.
+
+        Each also retires every place reported before it, so a place that
+        was still undecided when one of them arrived never loads the tray.
+        """
         new = list(enumerate(self._reports))[self._lifecycle_from :]  # (index, report)
         self._lifecycle_from = len(self._reports)
-        for _index, report in new:
+        for index, report in new:
+            if report.kind in (KIND_UNLOAD, KIND_LOSS, KIND_MISSION_END):
+                self._consumed = max(self._consumed, index)
             if report.kind == KIND_UNLOAD:
                 self.empty("unloaded", outcome=report.fields["outcome"])
             elif report.kind == KIND_LOSS:
@@ -264,8 +281,18 @@ class CargoHandoff:
         p = places[-1]
         place = self._reports[p]
         later = self._reports[p + 1 :]
-        if any(r.kind == KIND_MISSION_END for r in later):
-            self._consumed = p  # nothing the ended mission reported loads the tray
+        if max(place.at, place.fields["started_at"]) > now + MAX_REPORT_SKEW_S:
+            self._consumed = p
+            self._record(
+                {
+                    "kind": "handoff",
+                    "accepted": False,
+                    "reason": "report_from_the_future",
+                    "report_at": place.at,
+                    "started_at": place.fields["started_at"],
+                    "decided_at": now,
+                }
+            )
             return
         retracts = [r for r in later if r.kind == KIND_RETRACT]
         if not retracts:
@@ -344,8 +371,17 @@ class CargoBridge:
         self._clock = clock
         self.last_error: str | None = None
         self._stop = threading.Event()
+        # One tick at a time, and none after stop() published the last false.
+        self._lock = threading.Lock()
+        self._stopped = False
 
     def tick(self) -> bool:
+        with self._lock:
+            if self._stopped:
+                return False
+            return self._tick()
+
+    def _tick(self) -> bool:
         now = self._clock()
         try:
             pose = (self.link.held_observation() or {}).get("pose")
@@ -384,12 +420,26 @@ class CargoBridge:
             self.tick()
             self._stop.wait(period)
 
+    def start(self, *, rate_hz: float = cargo_sensor.MIN_PUBLISH_HZ) -> threading.Thread:
+        """Run the loop on a worker thread."""
+        worker = threading.Thread(
+            target=self.run, kwargs={"rate_hz": rate_hz}, name="cargo-bridge", daemon=True
+        )
+        worker.start()
+        return worker
+
     def stop(self) -> None:
-        """End the loop, empty the tray, and leave ``false`` as the last value."""
+        """End the loop, empty the tray, and leave ``false`` as the last value.
+
+        Ticks and this run under one lock: a tick in flight finishes its
+        publish before the final ``false``, and no tick publishes after it.
+        """
         self._stop.set()
-        if self.handoff.cargo_present:
-            self.handoff.empty("bridge_stopped")
-        self._publish(False)
+        with self._lock:
+            self._stopped = True
+            if self.handoff.cargo_present:
+                self.handoff.empty("bridge_stopped")
+            self._publish(False)
 
     def state(self) -> dict[str, Any]:
         return {
@@ -462,8 +512,7 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as error:
         print(f"[cargo-bridge SIMULATION] rosbridge not reachable yet: {error}", flush=True)
     print(f"[cargo-bridge SIMULATION] {json.dumps(bridge.state())}", flush=True)
-    worker = threading.Thread(target=bridge.run, kwargs={"rate_hz": args.rate_hz}, daemon=True)
-    worker.start()
+    worker = bridge.start(rate_hz=args.rate_hz)
     last: Any = None
     try:
         while worker.is_alive():
