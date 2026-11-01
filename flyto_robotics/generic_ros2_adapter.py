@@ -970,10 +970,9 @@ class _ObservationState:
 
     def _init_observation_state(self) -> None:
         self._condition = threading.Condition()
-        # Goals a halt could not confirm cancelled: zero velocity is held for
-        # them, and motion is refused, until they end or a halt confirms them.
+        # While the robot's halt hold (HALT_HOLD) is armed, this connection
+        # re-sends zero velocity from this thread.
         self._hold_lock = threading.Lock()
-        self._held_goals: set[str] = set()
         self._zero_holder: threading.Thread | None = None
         # Told when the transport drops or returns, so a host keeping this
         # connection warm reconnects on the drop rather than on a timer.
@@ -1708,6 +1707,7 @@ class _ObservationState:
         started = time.monotonic()
         deadline = started + max(0.0, float(max_seconds))
         still = 0
+        messages = 0
         with self._condition:
             seen = self._odom_sequence
             previous = dict(self._pose) if self._pose is not None else None
@@ -1718,6 +1718,7 @@ class _ObservationState:
                         break
                     self._condition.wait(timeout=remaining)
                     continue
+                messages += self._odom_sequence - seen
                 seen = self._odom_sequence
                 still = still + 1 if self._still(previous) else 0
                 previous = dict(self._pose) if self._pose is not None else None
@@ -1726,10 +1727,13 @@ class _ObservationState:
             "stationary": stationary,
             "drifting": not stationary,
             "still_samples": still,
+            # Odometry messages received during the wait: 0 means the robot
+            # was not observed at all, which is never taken as still.
+            "odometry_messages": messages,
             "waited_seconds": round(time.monotonic() - started, 3),
         }
 
-    # -- motion.halt: completed only when motion is confirmed stopped --------
+    # -- motion.halt: completed only when the robot is observed still ----------
 
     def _active_goal_ids(self) -> tuple[str, ...]:
         raise NotImplementedError
@@ -1738,10 +1742,21 @@ class _ObservationState:
         raise NotImplementedError
 
     def _cancel_for_halt(self, call_id: str) -> str | None:
-        """None once the goal is over (cancel confirmed, or it ended); else why not."""
+        """None once the goal is over (cancel confirmed, or it ended); else why not.
+
+        Never raises: a cancel that could not be sent is a reason, not an error.
+        """
         raise NotImplementedError
 
     def _release_goal(self, call_id: str) -> None:
+        raise NotImplementedError
+
+    def _cancel_token(self, call_id: str) -> Any:
+        """What re-sends this goal's cancel from a later connection."""
+        raise NotImplementedError
+
+    def _recancel(self, call_id: str, token: Any) -> None:
+        """Re-send a held goal's cancel without waiting for an answer (may raise)."""
         raise NotImplementedError
 
     def _publish_zero(self) -> bool:
@@ -1753,24 +1768,26 @@ class _ObservationState:
         except RuntimeError:
             return False
 
-    def held_goals(self) -> tuple[str, ...]:
-        """Goals a halt could not confirm cancelled and that are still running."""
-        with self._hold_lock:
-            return tuple(sorted(goal for goal in self._held_goals if self._goal_active(goal)))
+    def halt_hold(self) -> dict[str, Any] | None:
+        """The robot's halt hold (see ``HALT_HOLD``), or None when none is armed."""
+        return HALT_HOLD.snapshot()
 
     def _halt(self, call_id: str, evidence: Mapping[str, Any]) -> CallResult:
-        """Stop the base, and say ``completed`` only when the stop is confirmed.
+        """Stop the base, and say ``completed`` only when the robot is seen still.
 
-        Confirmed means no goal was running, or every running goal's cancel
-        was confirmed (or the goal ended), zero velocity was published, and
-        odometry then shows the robot still. Anything less is ``failed`` with
-        the typed reason ``effect_unknown``: a goal whose cancel was refused
-        or went unanswered keeps its handle, so the next halt cancels it
-        again, and zero velocity is re-sent until it ends.
+        Completed means every running goal's cancel was confirmed (or the goal
+        ended), zero velocity was published, and fresh odometry then shows the
+        robot still. No goal being tracked is not enough: the adapter may have
+        lost a goal on a reconnect, and something else may drive the base.
+        Anything less is ``failed`` with the typed reason ``effect_unknown``
+        and arms ``HALT_HOLD``: a goal whose cancel was refused or went
+        unanswered keeps its handle, zero velocity is re-sent, and motion is
+        refused until a halt sees the robot still.
         """
         # Zero velocity goes out first, so the stop never waits behind a cancel.
         stopped = self._zero_published()
         active = self._active_goal_ids()
+        tokens = {goal: self._cancel_token(goal) for goal in active}
         cancelled: list[str] = []
         unconfirmed: dict[str, str] = {}
         for goal in active:
@@ -1780,7 +1797,10 @@ class _ObservationState:
                 cancelled.append(goal)
             else:
                 unconfirmed[goal] = why[:200]
-        if active:
+        # Goals held from an earlier connection: their cancel is sent again,
+        # unanswerable here, so the robot's stillness decides.
+        reissued = self._recancel_held(skip=active)
+        if active or reissued:
             # Until its cancel landed the action server could overwrite the
             # first zero; the last command on cmd_vel must be this stop's.
             stopped = self._zero_published() or stopped
@@ -1789,6 +1809,8 @@ class _ObservationState:
             "cancelled": cancelled,
             "unconfirmed": unconfirmed,
         }
+        if reissued:
+            confirmation["reissued_cancels"] = reissued
         evidence = {
             "adapter": "generic_ros2",
             **evidence,
@@ -1799,29 +1821,29 @@ class _ObservationState:
             },
             "zero_velocity_published": stopped,
         }
-        if unconfirmed:
-            self._hold_zero(unconfirmed)
+
+        def unconfirmed_halt(why: str) -> CallResult:
+            HALT_HOLD.arm(why, {goal: tokens.get(goal) for goal in unconfirmed})
+            self._hold_zero()
             confirmation["zero_velocity_held"] = True
-            return self._halt_unconfirmed(
-                call_id,
-                evidence,
-                confirmation,
-                "cancel not confirmed for " + ", ".join(sorted(unconfirmed)),
-            )
+            confirmation["hold"] = HALT_HOLD.snapshot()
+            return self._halt_unconfirmed(call_id, evidence, confirmation, why)
+
+        if unconfirmed:
+            return unconfirmed_halt("cancel not confirmed for " + ", ".join(sorted(unconfirmed)))
         if not stopped:
-            return self._halt_unconfirmed(
-                call_id, evidence, confirmation, "standard cmd_vel stop unavailable"
+            return unconfirmed_halt("standard cmd_vel stop unavailable")
+        stillness = self.wait_until_stationary(HALT_STILL_WAIT_S)
+        confirmation["stillness"] = stillness
+        if not stillness["stationary"]:
+            if not stillness.get("odometry_messages"):
+                return unconfirmed_halt(f"no fresh odometry within {HALT_STILL_WAIT_S:g} s")
+            return unconfirmed_halt(
+                f"odometry did not show the robot still within {HALT_STILL_WAIT_S:g} s"
             )
-        if active:
-            stillness = self.wait_until_stationary(HALT_STILL_WAIT_S)
-            confirmation["stillness"] = stillness
-            if not stillness["stationary"]:
-                return self._halt_unconfirmed(
-                    call_id,
-                    evidence,
-                    confirmation,
-                    f"odometry did not show the robot still within {HALT_STILL_WAIT_S:g} s",
-                )
+        released = HALT_HOLD.release()
+        if released is not None:
+            confirmation["released_hold"] = released
         self._count_execution(call_id)
         return self._keep_result(
             call_id,
@@ -1851,10 +1873,35 @@ class _ObservationState:
             detail=f"{REASON_EFFECT_UNKNOWN}: halt not confirmed: {why}",
         )
 
-    def _hold_zero(self, goals: Iterable[str]) -> None:
-        """Keep re-sending zero velocity while any of ``goals`` is still running."""
+    def _recancel_held(self, *, skip: Iterable[str] = ()) -> list[str]:
+        """Re-send the cancel of every held goal not in ``skip``; their ids."""
+        skipped = set(skip)
+        sent: list[str] = []
+        for goal, token in HALT_HOLD.tokens().items():
+            if goal in skipped:
+                continue
+            with contextlib.suppress(Exception):
+                self._recancel(goal, token)
+            sent.append(goal)
+        return sorted(sent)
+
+    def _resume_hold(self) -> None:
+        """On a (re)connection while the robot is held: zero, the held cancels, the hold.
+
+        A presence-only connection never commands, so it only refuses.
+        """
+        if getattr(self, "_presence_only", False) or HALT_HOLD.snapshot() is None:
+            return
+        if not self._connected:
+            return
+        self._zero_published()
+        self._recancel_held()
+        self._zero_published()
+        self._hold_zero()
+
+    def _hold_zero(self) -> None:
+        """Keep re-sending zero velocity on this connection while the robot is held."""
         with self._hold_lock:
-            self._held_goals.update(goals)
             if self._zero_holder is not None and self._zero_holder.is_alive():
                 return
             holder = threading.Thread(
@@ -1869,18 +1916,57 @@ class _ObservationState:
             # The halt has just sent its own zero; the hold follows it.
             pause.wait(ZERO_HOLD_PERIOD_S)
             with self._hold_lock:
-                ended = [goal for goal in self._held_goals if not self._goal_active(goal)]
-                self._held_goals.difference_update(ended)
-                if not self._held_goals or not self._connected:
+                if HALT_HOLD.snapshot() is None or not self._connected:
                     self._zero_holder = None
-                    held = False
-                else:
-                    held = True
-            for goal in ended:
-                self._release_goal(goal)
-            if not held:
-                return
+                    return
             self._zero_published()
+
+
+class _HaltHold:
+    """The robot's hold after a halt that did not see it stop.
+
+    One per process: an adapter host serves one robot (``configured_resource_id``),
+    and every connection to it (a reconnect, a per-job adapter, a presence
+    watch) reads the same hold, so dropping a connection never re-allows
+    motion. Armed by every ``motion.halt`` that ends ``effect_unknown``;
+    released only by a halt that then sees the robot still. While armed,
+    motion is refused and each commanding connection re-sends zero velocity
+    and the held goals' cancels.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._reason: str | None = None
+        self._goals: dict[str, Any] = {}
+
+    def arm(self, reason: str, goals: Mapping[str, Any]) -> None:
+        with self._lock:
+            self._reason = str(reason)[:200]
+            self._goals.update(goals)
+
+    def snapshot(self) -> dict[str, Any] | None:
+        with self._lock:
+            if self._reason is None:
+                return None
+            return {"reason": self._reason, "goals": sorted(self._goals)}
+
+    def tokens(self) -> dict[str, Any]:
+        with self._lock:
+            return dict(self._goals)
+
+    def release(self) -> dict[str, Any] | None:
+        """Clear the hold; what it held, or None. Only a halt seen still calls it."""
+        with self._lock:
+            if self._reason is None:
+                return None
+            released = {"reason": self._reason, "goals": sorted(self._goals)}
+            self._reason = None
+            self._goals = {}
+            return released
+
+
+#: The robot's halt hold; see ``_HaltHold``.
+HALT_HOLD = _HaltHold()
 
 
 def _travelled_along(
@@ -2230,12 +2316,15 @@ class GenericROS2Adapter:
         """None when the motion may start; else why not (a refused path with evidence)."""
         if capability_id == "motion.halt":
             return None
-        held = getattr(self.backend, "held_goals", None)
-        if callable(held) and held():
-            # The base may still be driven by a goal nobody confirmed stopped.
+        held = HALT_HOLD.snapshot()
+        if held is not None:
+            # The base may still be moving, or driven by a goal nobody
+            # confirmed stopped; a reconnect does not change that.
+            goals = ", ".join(held["goals"]) or "no tracked goal"
             return (
-                f"{REASON_EFFECT_UNKNOWN}: a halt was not confirmed for "
-                f"{', '.join(held())}; halt again (or reconnect) before motion"
+                f"{REASON_EFFECT_UNKNOWN}: a halt did not see the robot stop "
+                f"({held['reason']}; held: {goals}); motion is refused until a "
+                "halt sees it still"
             )
         mismatch = self._deployment_mismatch()
         if mismatch is not None:
@@ -4136,13 +4225,27 @@ class RclpyROS2Backend(_ObservationState):
     def _cancel_for_halt(self, call_id: str) -> str | None:
         if not self._goal_active(call_id):
             return None  # the goal already ended
-        result = self.cancel(call_id)
+        try:
+            result = self.cancel(call_id)
+        except Exception as error:  # noqa: BLE001 - an unsent cancel is unconfirmed
+            result = CallResult(
+                call_id,
+                OUTCOME_FAILED,
+                detail=f"cancel not sent: {type(error).__name__}: {error}",
+            )
         if result.outcome == OUTCOME_CANCELLED or not self._goal_active(call_id):
             return None
         return result.detail or "ROS 2 cancel was not confirmed"
 
     def _release_goal(self, call_id: str) -> None:
         self._forget_goal(call_id)
+
+    def _cancel_token(self, call_id: str) -> Any:
+        return self._goal_handles.get(call_id)
+
+    def _recancel(self, call_id: str, token: Any) -> None:
+        if token is not None:
+            token.cancel_goal_async()
 
     def execution_count(self, call_id: str) -> int:
         return self._counts.get(call_id, 0)
@@ -4173,6 +4276,8 @@ class RclpyROS2Backend(_ObservationState):
         # An executor that died at once has announced the drop already.
         if self.is_connected():
             self._notify_connection(True)
+            # The goals were forgotten above; the robot's hold was not.
+            self._resume_hold()
 
 
 
@@ -5326,6 +5431,14 @@ class RosbridgeROS2Backend(_ObservationState):
         self._active_actions.pop(call_id, None)
         self._forget_track(call_id)
 
+    def _cancel_token(self, call_id: str) -> Any:
+        return (self._goal_ids.get(call_id, call_id), self._active_actions.get(call_id))
+
+    def _recancel(self, call_id: str, token: Any) -> None:
+        goal_id, action_name = token if isinstance(token, tuple) else (call_id, None)
+        if action_name:
+            self._send({"op": "cancel_action_goal", "id": goal_id, "action": action_name})
+
     def execution_count(self, call_id: str) -> int:
         return self._counts.get(call_id, 0)
 
@@ -5378,6 +5491,8 @@ class RosbridgeROS2Backend(_ObservationState):
             daemon=True,
         ).start()
         self._subscribe_standard_observations()
+        # Goal ids belonged to the old socket; the robot's hold did not.
+        self._resume_hold()
         self._notify_connection(True)
 
     def _keepalive_loop(self, websocket: Any, stop: threading.Event) -> None:

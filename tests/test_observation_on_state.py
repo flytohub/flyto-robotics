@@ -301,11 +301,15 @@ def test_a_safe_stop_never_waits_for_discovery(fake_rclpy, clock, monkeypatch):
         now=lambda: SimpleNamespace(to_msg=lambda: None)
     )
 
+    # The halt is completed on the odometry that shows the robot still; it
+    # never waits on discovery or a timer for it.
+    condition.feed = [lambda: backend._on_odometry(odometry(0.1))] * 3
+
     result = backend.safe_stop("stop-1")
 
     assert result.outcome == "completed"
     assert len(published) == 1
-    assert condition.timed_out == 0 and clock.now == 100.0
+    assert condition.timed_out == 0 and condition.delivered == 3
 
 
 def test_a_goal_future_is_awaited_by_its_done_callback(fake_rclpy, clock):
@@ -849,7 +853,7 @@ def test_a_stop_publishes_first_and_keeps_a_goal_whose_cancel_is_refused(fake_rc
     # landed, so the last command the stop sends comes after the cancel.
     assert calls[:4] == ["zero", "cancel", "zero", "zero"]
     assert backend._goal_handles == {"old-call": handle}
-    assert backend.held_goals() == ("old-call",)
+    assert backend.halt_hold()["goals"] == ["old-call"]
 
     calls.clear()
     assert backend.safe_stop("stop-2").outcome == "failed"

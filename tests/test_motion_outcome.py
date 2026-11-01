@@ -525,7 +525,7 @@ def test_an_unanswered_cancel_keeps_the_goal_and_keeps_publishing_zero(monkeypat
     assert result.evidence["halt_confirmation"]["unconfirmed"].keys() == {"nav-1"}
     assert result.evidence["halt_confirmation"]["zero_velocity_held"] is True
     assert "nav-1" in backend._active_actions
-    assert backend.held_goals() == ("nav-1",)
+    assert backend.halt_hold()["goals"] == ["nav-1"]
     # Zero velocity keeps going out after the call returned.
     before = socket.zeros()
     time.sleep(0.35)
@@ -540,7 +540,7 @@ def test_an_unanswered_cancel_keeps_the_goal_and_keeps_publishing_zero(monkeypat
     assert [m["id"] for m in socket.sent if m.get("op") == "cancel_action_goal"] == [
         "nav-1", "nav-1",
     ]
-    assert backend.held_goals() == ()
+    assert backend.halt_hold() is None
     time.sleep(0.25)
     settled = socket.zeros()
     time.sleep(0.3)
