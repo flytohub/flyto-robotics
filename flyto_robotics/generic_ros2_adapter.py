@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import base64
 import contextlib
+import dataclasses
 import hashlib
 import json
 import logging
@@ -195,11 +196,9 @@ STRAIGHT_MOTIONS: Mapping[str, float] = {
     "motion.advance": 0.0,
     "motion.retreat": math.pi,
 }
-#: Speed a straight drive is sent at when the caller names none, in m/s.
-DEFAULT_STRAIGHT_SPEED_MPS: Mapping[str, float] = {
-    "motion.advance": 0.12,
-    "motion.retreat": 0.10,
-}
+# A straight drive's speed is declared with its arguments (ARGUMENTS:
+# ``speed_mps`` bounds and the default a call that names none is sent at),
+# tightened by the resource's own top speed; see ``declared_arguments``.
 #: A drive is commanded at this fraction of the fastest speed its room allows,
 #: so the guard is not tripped by the next scan of an approach it is managing.
 SLOWDOWN_FRACTION = 0.8
@@ -836,7 +835,8 @@ ARGUMENTS: Mapping[str, tuple[decl.DeclaredArgument, ...]] = {
             "distance_m", required=True, minimum=0.05, maximum=2.0, unit="m"
         ),
         decl.DeclaredArgument(
-            "speed_mps", required=False, minimum=0.02, maximum=0.25, unit="m/s"
+            "speed_mps", required=False, minimum=0.02, maximum=0.25, unit="m/s",
+            default=0.12,
         ),
     ),
     "motion.retreat": (
@@ -844,7 +844,8 @@ ARGUMENTS: Mapping[str, tuple[decl.DeclaredArgument, ...]] = {
             "distance_m", required=True, minimum=0.05, maximum=2.0, unit="m"
         ),
         decl.DeclaredArgument(
-            "speed_mps", required=False, minimum=0.02, maximum=0.20, unit="m/s"
+            "speed_mps", required=False, minimum=0.02, maximum=0.20, unit="m/s",
+            default=0.10,
         ),
     ),
     "motion.rotate": (
@@ -855,6 +856,73 @@ ARGUMENTS: Mapping[str, tuple[decl.DeclaredArgument, ...]] = {
     "motion.halt": (),
     cargo_sensor.CAPABILITY_ID: (),
 }
+
+#: The resource's own top linear speed in m/s (0.22 on a TurtleBot3 Burger).
+#: Unset, the contract's bounds stand; set, it only ever tightens them.
+MAX_LINEAR_SPEED_ENV = "FLYTO_ROS2_MAX_LINEAR_SPEED_MPS"
+
+
+def _resource_speed_limit() -> float | None:
+    """The resource's declared top speed, None when it declares none.
+
+    Raises ValueError for a value that is not a finite speed of at least the
+    smallest declared one: a robot whose limit cannot be read does not move.
+    """
+    raw = os.getenv(MAX_LINEAR_SPEED_ENV, "").strip()
+    if not raw:
+        return None
+    try:
+        value = float(raw)
+    except ValueError:
+        raise ValueError(f"{MAX_LINEAR_SPEED_ENV} {raw!r} is not a number") from None
+    if not math.isfinite(value) or value < braking.MIN_SPEED_MPS:
+        raise ValueError(
+            f"{MAX_LINEAR_SPEED_ENV} {raw!r} is not a speed of at least "
+            f"{braking.MIN_SPEED_MPS} m/s"
+        )
+    return value
+
+
+def _speed_limit_problem() -> str | None:
+    """Why motion is refused because of the resource's speed limit, or None."""
+    try:
+        _resource_speed_limit()
+    except ValueError as error:
+        return str(error)
+    return None
+
+
+def declared_arguments(capability_id: str) -> tuple[decl.DeclaredArgument, ...]:
+    """A capability's arguments as this resource declares them.
+
+    The contract's ``speed_mps`` maximum and default are lowered to the
+    resource's top speed when it declares a lower one; never raised. An
+    unreadable limit leaves the contract as it is (motion is refused by the
+    preflight instead).
+    """
+    arguments = ARGUMENTS[capability_id]
+    try:
+        limit = _resource_speed_limit()
+    except ValueError:
+        limit = None
+    if limit is None:
+        return arguments
+    tightened: list[decl.DeclaredArgument] = []
+    for item in arguments:
+        if item.name == "speed_mps" and item.maximum is not None and limit < item.maximum:
+            maximum = max(limit, item.minimum or 0.0)
+            default = None if item.default is None else min(item.default, maximum)
+            item = dataclasses.replace(item, maximum=maximum, default=default)
+        tightened.append(item)
+    return tuple(tightened)
+
+
+def declared_default(capability_id: str, name: str) -> float:
+    """The declared default of one argument; a contract without one is a bug."""
+    for item in declared_arguments(capability_id):
+        if item.name == name and item.default is not None:
+            return float(item.default)
+    raise KeyError(f"{capability_id} declares no default for {name}")
 
 
 @dataclass(frozen=True)
@@ -1862,8 +1930,8 @@ def _navigate_target(arguments: Mapping[str, Any]) -> None:
 
 
 def _numeric_arguments(capability_id: str, arguments: Mapping[str, Any]) -> dict[str, Any]:
-    """The call's arguments validated against ``ARGUMENTS``; text is a place name."""
-    schemas = {item.name: item for item in ARGUMENTS[capability_id]}
+    """The call's arguments validated against ``declared_arguments``; text is a place name."""
+    schemas = {item.name: item for item in declared_arguments(capability_id)}
     unknown = set(arguments) - set(schemas)
     if unknown:
         raise ValueError(f"unsupported arguments: {sorted(unknown)}")
@@ -2148,7 +2216,7 @@ class GenericROS2Adapter:
                     resource_id=self.resource_id,
                     executor_kind=decl.EXECUTOR_EXTERNAL_API,
                     source=decl.SOURCE_DEVICE,
-                    arguments=ARGUMENTS[capability_id],
+                    arguments=declared_arguments(capability_id),
                     required_observations=observations,
                     runtime_name=f"{kind}:{name}:{interface_type}",
                     version="1.0.0",
@@ -2175,6 +2243,9 @@ class GenericROS2Adapter:
         basis = _safety_basis()
         if basis not in SAFETY_BASES:
             return f"FLYTO_ROS2_SAFETY_BASIS {basis!r} is not one of {', '.join(SAFETY_BASES)}"
+        speed_limit = _speed_limit_problem()
+        if speed_limit is not None:
+            return speed_limit
         if capability_id in PLANNED_MOTIONS and basis != SAFETY_BASIS_OPERATOR:
             # Wait for the map->odom transform as well, so a navigate on a
             # fresh connection is judged once it arrives instead of refused
@@ -2507,7 +2578,7 @@ class GenericROS2Adapter:
             profile,
             room_m=room.room_m,
             requested_speed_mps=float(
-                arguments.get("speed_mps", DEFAULT_STRAIGHT_SPEED_MPS[capability_id])
+                arguments.get("speed_mps", declared_default(capability_id, "speed_mps"))
             ),
             requested_distance_m=float(arguments["distance_m"]),
             mode=governance.mode,
@@ -3877,10 +3948,7 @@ class RclpyROS2Backend(_ObservationState):
         else:
             goal.target.x = float(arguments["distance_m"])
             goal.speed = float(
-                arguments.get(
-                    "speed_mps",
-                    0.10 if capability_id == "motion.retreat" else 0.12,
-                )
+                arguments.get("speed_mps", declared_default(capability_id, "speed_mps"))
             )
         return goal
 
@@ -4857,10 +4925,7 @@ class RosbridgeROS2Backend(_ObservationState):
             }
         distance = float(arguments["distance_m"])
         speed = float(
-            arguments.get(
-                "speed_mps",
-                0.10 if capability_id == "motion.retreat" else 0.12,
-            )
+            arguments.get("speed_mps", declared_default(capability_id, "speed_mps"))
         )
         return {
             "target": {"x": distance, "y": 0.0, "z": 0.0},

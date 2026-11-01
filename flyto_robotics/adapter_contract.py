@@ -219,6 +219,8 @@ class DeclaredArgument:
     unit: str = ""
     # Text arguments only: the most characters the value may have.
     max_length: int | None = None
+    # Number arguments only: the value a call that names none is run with.
+    default: float | None = None
 
     @property
     def narrows(self) -> bool:
@@ -240,6 +242,8 @@ class DeclaredArgument:
         # the schema hash it had before text arguments existed.
         if self.max_length is not None:
             result["max_length"] = self.max_length
+        if self.default is not None:
+            result["default"] = self.default
         return result
 
 
@@ -357,6 +361,8 @@ def arguments_to_json_schema(arguments: Sequence[DeclaredArgument]) -> dict[str,
             schema["minimum"] = item.minimum
         if item.maximum is not None:
             schema["maximum"] = item.maximum
+        if item.default is not None:
+            schema["default"] = item.default
         if item.description:
             schema["description"] = item.description
         if item.unit:
