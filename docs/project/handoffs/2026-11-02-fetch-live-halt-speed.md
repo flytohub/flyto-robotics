@@ -21,7 +21,10 @@ Base `main` 0f283a0. Commits, oldest first:
   third round". This file and the registry row were updated after them
   (ab69ad9).
 - a279e61: fourth round (repair round 2), see "What changed in the fourth
-  round". This file and the registry row were updated after it.
+  round". This file and the registry row were updated after it (b2da84e).
+- 7babfd7: fifth round (repair round 3, the review of b2da84e), see "What
+  changed in the fifth round". This file and the registry row were updated
+  in the commit after it.
 
 `claude/fetch-live-sim-bridge` (the rejected second bridge, 7c5947e and
 386f565, never pushed) and its worktree `.claude/worktrees/flyto-robotics-cargo-bridge`
@@ -66,7 +69,9 @@ the `run.py` report hooks, and the `_advertise_once` extraction. Its
   `max_linear_speed` (`CONSTRAINABLE`, `at_most`), read through the new
   `safety_profile.configured_profile()` (`$FLYTO_SAFETY_PROFILE`, default
   `/etc/flyto/safety-profile.json`), which `contracts._constrained_by_site`
-  and the mission gateway now also use. `declared_arguments` folds the
+  also uses. Correction (round 5): the mission gateway did not; it resolved
+  the path itself. Since round 5 both go through
+  `safety_profile.configured_profile_path()`. `declared_arguments` folds the
   `speed_mps` maximum through `apply_profile` and caps the default; the
   contract keeps the declared bounds and defaults.
 - Preflight refuses motion when the profile exists but cannot be read, or
@@ -226,9 +231,166 @@ the `run.py` report hooks, and the `_advertise_once` extraction. Its
 - `arm_reports.settled_run`'s `SETTLE_S` simulated-time span had no test;
   one is added (no code change).
 
+## What changed in the fifth round
+
+### Stillness is the full twist AND the pose, over a minimum duration
+
+- `wait_until_stationary` (one implementation, used by the halt and the
+  settle waits) counts a run of odometry messages received after the call as
+  still only when every one has (a) all six twist axes present, finite and
+  within `STILL_LINEAR_MPS` / `STILL_ANGULAR_RADPS`, and (b) a pose within
+  `STILL_POSE_DELTA_M` / `STILL_YAW_DELTA_RAD` of the run's first message.
+  The run must have `STILL_SAMPLES` (3) messages AND span
+  `STILL_MIN_SECONDS` (0.5 s) of their receive times. A message that fails
+  either check restarts the run.
+- `odometry_twist_axes()` parses both transports' twist axis by axis. A
+  missing or non-numeric axis is `None` (unknown), never 0. A message with no
+  twist at all is never still. That is a liveness change: a driver that
+  publishes no twist (the old pose-only fallback) can no longer complete a
+  halt, so it stays held. `_velocity` (linear x, angular z, for the braking
+  guard and stall tracks) is now `None` unless both of those axes are present.
+  It used to default a missing axis to 0.
+- Evidence: `stillness` adds `still_seconds`, `min_still_seconds` and
+  `unknown_twist_messages`.
+- The duration does not cover a long pause such as Nav2's Wait recovery
+  (5 s default). That case is covered by the goal cancels and the held-goal
+  end check, not by stillness.
+
+### A reconnect carries every running goal into the hold
+
+- `RosbridgeROS2Backend.reconnect` and `RclpyROS2Backend.reconnect` call
+  `_hold_running_goals()` before they forget the goal tables. Every goal
+  still running is armed into `HALT_HOLD` with its cancel token. For
+  rosbridge that is a goal in `_active_actions` with no terminal status, as
+  (goal id, action). For rclpy it is a pending goal or an accepted one whose
+  result has not arrived, as the handle or the pending future. The resume
+  then re-sends its cancel. A later halt completes only when it sees the
+  robot still and `_held_goal_end` confirms the goal ended. Motion is refused
+  in the meantime. Operational cost: any reconnect while a goal runs now
+  needs a confirmed halt before motion is allowed again.
+
+### Every halt that cannot run holds
+
+- `GenericROS2Adapter.invoke("motion.halt")` goes to `_invoke_halt` and never
+  through `_invoke`. A presence connection, a link or forward that is down,
+  an operator refresh in progress, `motion.halt` missing from the graph
+  (after one re-read) and `deadline_seconds <= 0` each end in
+  `_halt_not_run`. The same holds for `adapter.safe_stop()` with the
+  transport down. `_halt_not_run` starts a new halt epoch
+  (`HALT_HOLD.halting()`), arms the hold with the running goals' tokens,
+  publishes zero once and keeps holding it where the connection can
+  (`_ObservationState.hold_unrun_halt`, which `_halt_raised` now uses too; a
+  presence connection never publishes), and returns `failed`,
+  `reason_code: effect_unknown`. A link-down halt also carries
+  `transport_unavailable: true` and the transport status.
+- A halt's arguments are no longer validated. A stop with arguments it does
+  not take still runs, where it used to be refused.
+
+### Hold, resume, deployment label: guards pinned
+
+- Tests now pin the kept-hold `OSError` arm (a directory, and a
+  `PermissionError` on read), the zero-hold restart in `_resume_hold` on a
+  reconnect while held, and `_served_deployment_mode()` returning
+  `unconfirmed` (the backend's own cargo read).
+- `RclpyROS2Backend.__init__` calls `_resume_hold()`, so an rclpy host that
+  starts held sends zero and holds it at once. Before this, that happened
+  only on its first reconnect.
+- `served_identity` answers `_served_deployment_mode()` (one owner) instead of
+  re-deriving it.
+
+### Cargo
+
+- `CargoBridge` samples odometry through the backend's new `latest_odometry()`
+  (`pose`, `sequence`, `age_s`). It records each message once, at
+  `now - age_s` (its receive time on the bridge's wall clock), so odometry
+  silence is a gap however often the bridge ticks. A read that fails or
+  finds no odometry records an unknown pose at `now`. `PoseHistory` keeps
+  its samples in time order. A place's decision time is fixed when the place
+  is first ready to decide, and the decision waits for a message received at
+  or after it. The bridge no longer narrows
+  `FLYTO_ROS2_OBSERVATION_MAX_AGE_SECONDS` (it no longer reads
+  `held_observation`).
+- `cargo_sensor.served_topic` serves `/flyto/cargo_present` only on a marked
+  simulation, also when `FLYTO_ROS2_CARGO_TOPIC` names it explicitly. A
+  hardware deployment configured on it declares nothing, subscribes to
+  nothing, and a read is refused with `cargo_topic_not_configured`.
+- One resolver: `cargo_sensor.simulated_tray_topic()` (the `served_topic` of a
+  marked simulation) is used by `cargo_bridge.bridge_topic()` and by
+  `publish_simulated_state`. That publisher now refuses any topic but the tray
+  topic (it is no longer a general Bool publisher), and still refuses command
+  topics first. The rosbridge cargo subscription goes through `served_topic`
+  as well.
+- Pinned: a retract to any pose but `ready` never loads;
+  `SETTLE_MIN_READINGS`; a failed odometry read never becomes a pose;
+  the backend's `latest_odometry()` (sequence only grows with a message,
+  `age_s` grows while silent, None after a drop).
+- `run.py`'s report trail and the unload at home are tested under
+  `make verify` with a stubbed arm (`tests/test_fetch_return_report_trail.py`):
+  the `unload` evidence step, and the `unload` / `loss` / `mission_end`
+  report order.
+- `sim/fetch_return/README.md`: step 3 of the live sequence now runs
+  `run.py --navigation gazebo --station-distance-m 0.4`, and the README says
+  how the bridge's odometry-frame station relates to the parked pose. It also
+  says the sequence has not been run.
+
+### Site profile path
+
+- `safety_profile.configured_profile_path()` is the one resolver.
+  `configured_profile()` and `MissionGateway.safety_profile_path` both use it.
+  The function-local `os` / `Path` imports in `safety_profile.py` moved to
+  the module imports.
+
 ## Verified
 
 All in `.claude/worktrees/flyto-robotics-fetch-live`, nothing pushed.
+
+Fifth round (7babfd7):
+
+- Tests first: `tests/test_halt_fail_closed.py` run against the code at
+  b2da84e (a scratch `git archive` copy) fails 31 tests on behaviour: the
+  three moving-pose halts (zero twist, `linear.y`, empty vectors) and the
+  per-axis twist cases `completed`; the duration and creep cases reported
+  still; reconnect goals not held; the no-time halt `timeout`, the
+  link-down, presence and refresh halts `refused` and the link-down
+  `safe_stop` `transport_unavailable`; the rclpy backend that starts held
+  sent no zero. The kept-hold `OSError` tests, the `_resume_hold` zero
+  restart and `tests/test_fetch_return_report_trail.py` passed before:
+  they pin existing guards the reviewers found unpinned.
+- The reviewers' probes (`scratchpad/probes/test_probe_still.py`,
+  `test_probe_orphan.py`, `test_probe_halt_refused.py`) pass against
+  7babfd7: the three moving-pose halts end `failed` (their twists lack
+  axes, so `unknown_twist_messages` equals `odometry_messages`; the
+  full-twist zero case with the pose moving is in the new tests); the
+  orphaned goal is held at the reconnect, its cancel re-sent and a
+  cancel-all sent before the halt completes; the three early-return halts
+  end `failed` `effect_unknown` with the hold armed.
+- Mutation checks, 41 mutants of this round's guards (runner and logs in
+  the session scratchpad `fetchlive_r5_mut_k3v9/`, a unique directory;
+  each in a fresh copy, targeted suites of 3-5 test files, harness checked
+  first with the unmutated copy passing). First run: 37 killed, 4
+  survived: angular x/y ignored, `stationary` not requiring the duration
+  when the cap ends the wait, a twist with neither vector read as zeros,
+  and a read error turned into a made-up pose (that mutant's pose was off
+  the station, so it could never load; redone with a pose at the station).
+  Tests were added for the first three. Rerun of the four: all killed.
+  Final: 41/41 killed, including every survivor in the review (hold-file
+  `OSError`, `_resume_hold`'s `_hold_zero`, `unconfirmed` label, retract
+  pose, `SETTLE_MIN_READINGS`, read error as unknown, `run.py`'s unload
+  evidence and its unload / mission_end report appends) and the gateway's
+  profile path, `bridge_topic`, `served_identity`, `served_topic`'s
+  explicit-topic check and `publish_simulated_state`'s topic restriction.
+  Earlier rounds' guards were not re-mutated.
+- `PYTHONPATH=$PWD make verify PYTHON=<repo>/.venv/bin/python`: rc 0, ruff
+  clean, 2170 passed, 20 skipped (one run).
+- `flyto-index verify --strict` in the worktree: rc 0, Status PASS, 20
+  pass, 0 warn, 0 fail.
+- Indexer: CLI `impact` on `_served_deployment_mode` and `context` on the
+  stillness/hold/reconnect path before the last edits. MCP `task(plan)` /
+  `task(validate)` were not used (the MCP server is pinned to another root).
+- Not run this round: the MuJoCo-backed `tests/test_fetch_return_sim.py`
+  and the skipped MuJoCo test in `tests/test_sim_cargo_bridge.py`. The
+  `run.py` report trail is now pinned under `make verify` by the stubbed
+  arm instead.
 
 Fourth round (a279e61):
 
@@ -260,6 +422,11 @@ Fourth round (a279e61):
   simulation; unmarked simulation labelled `real`; the mismatch and
   disconnected cargo refusals without evidence; the `SETTLE_S` span check.
   The round-3 guards were not re-mutated this round.
+  Correction (review round 5): "all 17 killed" was true of that set only.
+  The reviewers found 6 more survivors among this change's guards (the
+  kept-hold `OSError` arm, `_resume_hold`'s zero hold, the `unconfirmed`
+  label, and three cargo-bridge guards). They are pinned in round 5
+  (above).
 - `PYTHONPATH=$PWD make verify PYTHON=<repo>/.venv/bin/python`: run twice,
   rc 0 both times, ruff clean, 2109 passed, 20 skipped.
 - `flyto-index verify --strict` in the worktree: rc 0, 20 pass, 0 warn,
@@ -310,6 +477,9 @@ Third round (tip after 9015cd3):
   this change outside it survived the reviewers' mutation: the rosbridge
   `_cancel_for_halt` except, `_halt_in_epoch`'s `if not stopped`, and
   `settled_run`'s `SETTLE_S` span. They are pinned in round 4 (above).
+  Round 5's review found more of this set's guards unpinned (the kept-hold
+  `OSError` arm among them), so "all 37 killed" held only for the 37
+  mutated; see round 5.
 - `PYTHONPATH=$PWD make verify PYTHON=<repo>/.venv/bin/python`: rc 0, ruff
   clean, 2094 passed, 20 skipped (one run; see the flake below).
 - MuJoCo-backed: `tests/test_sim_cargo_bridge.py tests/test_fetch_return_sim.py`
@@ -329,6 +499,18 @@ counts) are superseded by the above; the round-2 counts were incomplete
 (the reviewers found four survivors), which this round closed.
 
 ## Not verified
+
+- Round 5 liveness costs, not tried on a robot: a driver whose odometry
+  carries no twist (or omits an axis) can never complete a halt and stays
+  held; every completed halt now takes at least 0.5 s
+  (`STILL_MIN_SECONDS`) of still odometry; any reconnect while a goal runs
+  now needs a confirmed halt (cancel-all answered) before motion again.
+  `STILL_MIN_SECONDS` does not cover a pause longer than 0.5 s such as
+  Nav2's Wait recovery; that case relies on the cancels and the held-goal
+  end check.
+- The cargo bridge's receive-time sampling assumes the bridge and the
+  backend share one host clock (`time.monotonic` age converted at the
+  bridge's wall clock); tested with fakes only.
 
 - Nothing ran against the live twin, Gazebo, rosbridge on 19090 or the
   robot. The halt's stillness wait, the zero hold, re-sent cancels and the
