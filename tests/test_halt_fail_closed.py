@@ -22,16 +22,19 @@ Review round 5. What is pinned here:
 
 from __future__ import annotations
 
+import json
 import threading
 import time
 from types import SimpleNamespace
 
 import pytest
-from test_halt_hold import cancels, rosbridge
+from test_halt_admission import rclpy_actions  # noqa: F401 - pytest fixture
+from test_halt_hold import rosbridge
 from test_motion_outcome import odometry_streaming
 from test_observation_on_state import (  # noqa: F401 - pytest fixtures
     ODOM_PERIOD,
     FeedingCondition,
+    action_servers,
     clock,
     fake_rclpy,
     odometry,
@@ -155,6 +158,9 @@ def test_a_halt_on_a_robot_whose_pose_advances_is_never_completed(twist, axis):
         {"linear": {"x": 0.0, "y": 0.0, "z": 0.0}, "angular": {"x": 0.0, "y": 0.3, "z": 0.0}},
         # A twist with neither vector: nothing is known, not "all zero".
         {},
+        # JSON booleans are not numbers: false is unknown, never a known 0.
+        {"linear": {"x": False, "y": 0.0, "z": 0.0}, "angular": {"x": 0.0, "y": 0.0, "z": 0.0}},
+        {"linear": {"x": 0.0, "y": 0.0, "z": 0.0}, "angular": {"x": 0.0, "y": 0.0, "z": False}},
     ],
     ids=[
         "linear_y",
@@ -166,6 +172,8 @@ def test_a_halt_on_a_robot_whose_pose_advances_is_never_completed(twist, axis):
         "angular_x",
         "angular_y",
         "no_vectors",
+        "bool_linear_x",
+        "bool_angular_z",
     ],
 )
 def test_a_twist_with_any_axis_moving_or_unknown_is_not_still(twist):
@@ -323,16 +331,22 @@ def test_a_goal_running_at_a_rosbridge_reconnect_is_held_and_must_end_before_a_h
         assert hold is not None and hold["goals"] == ["nav-1"]
         assert adapter_module.HALT_HOLD.tokens()["nav-1"] == ("nav-1", "/navigate_to_pose")
         fresh = sockets[-1]
-        # The goal's cancel is re-sent on the new connection at once.
-        assert cancels(fresh) == ["nav-1"]
-        # The action server still runs a goal: the halt stays effect_unknown.
-        fresh.still_canceling = [{"goal_id": {"uuid": [1] * 16}}]
+        # The goal's cancel is re-sent on the new connection at once, to its
+        # action server (the old goal id was the old socket's).
+        assert any(
+            m.get("op") == "call_service"
+            and m["service"] == "/navigate_to_pose/_action/cancel_goal"
+            for m in fresh.sent
+        )
+        # The action server still runs the goal: the halt stays effect_unknown.
+        fresh.server_goals = {"nav-1": 2}
+        fresh.finishes_cancel = False
         with odometry_streaming(backend):
             held = backend.safe_stop("halt-1")
         assert held.outcome == OUTCOME_FAILED
         assert "nav-1" in held.evidence["halt_confirmation"]["held_goals_unconfirmed"]
-        # Once its server confirms nothing runs, a halt seen still completes.
-        fresh.still_canceling = []
+        # Once its status shows the goal ended, a halt seen still completes.
+        fresh.finishes_cancel = True
         with odometry_streaming(backend):
             released = backend.safe_stop("halt-2")
         assert released.outcome == OUTCOME_COMPLETED
@@ -359,37 +373,32 @@ def test_a_goal_that_ended_before_the_reconnect_is_not_held():
         backend.disconnect()
 
 
-class _Handle:
-    def __init__(self, code=3):
-        self.code = code
-        self.cancels = 0
-
-    def cancel_goal_async(self):
-        self.cancels += 1
-        return SimpleNamespace(
-            done=lambda: True,
-            result=lambda: SimpleNamespace(return_code=self.code, goals_canceling=()),
-        )
-
-
-def test_a_goal_running_at_an_rclpy_reconnect_is_held(fake_rclpy, clock):  # noqa: F811
+def test_a_goal_running_at_an_rclpy_reconnect_is_held(
+    fake_rclpy, clock, action_servers  # noqa: F811
+):
     backend, _condition = rclpy_backend(clock)
     backend._publish_zero = lambda: True
-    running = _Handle()
-    backend._goal_handles["nav-1"] = running
+    backend._goal_handles["nav-1"] = SimpleNamespace()
     backend._result_futures["nav-1"] = SimpleNamespace(done=lambda: False)
-    pending = SimpleNamespace(done=lambda: False)
-    backend._pending_goals["nav-2"] = pending
-    ended = _Handle()
-    backend._goal_handles["nav-3"] = ended
+    backend._goal_actions["nav-1"] = "/navigate_to_pose"
+    backend._pending_goals["nav-2"] = SimpleNamespace(done=lambda: False)
+    backend._goal_actions["nav-2"] = "/drive_on_heading"
+    backend._goal_handles["nav-3"] = SimpleNamespace()
     backend._result_futures["nav-3"] = SimpleNamespace(done=lambda: True)
+    backend._goal_actions["nav-3"] = "/spin"
     try:
         backend.reconnect()
         assert adapter_module.HALT_HOLD.snapshot()["goals"] == ["nav-1", "nav-2"]
-        tokens = adapter_module.HALT_HOLD.tokens()
-        assert tokens["nav-1"] is running and tokens["nav-2"] is pending
-        # The running goal's cancel is re-sent at once.
-        assert running.cancels >= 1
+        # Held by action name: a handle dies with the node that sent it.
+        assert adapter_module.HALT_HOLD.tokens() == {
+            "nav-1": ("nav-1", "/navigate_to_pose"),
+            "nav-2": ("nav-2", "/drive_on_heading"),
+        }
+        # Each running goal's cancel is re-sent at once, to its action server.
+        assert sorted(action_servers.cancel_alls) == [
+            "/drive_on_heading/_action/cancel_goal",
+            "/navigate_to_pose/_action/cancel_goal",
+        ]
     finally:
         backend.disconnect()
 
@@ -577,4 +586,222 @@ def test_an_rclpy_backend_that_starts_held_sends_zero_at_once(fake_rclpy, monkey
         assert len(zeros) >= 3
         assert backend._zero_holder is not None and backend._zero_holder.is_alive()
     finally:
+        backend.disconnect()
+
+
+# --- 7. a halt that cannot run cancels the running goals and keeps them -------------
+
+
+def test_a_halt_that_cannot_run_holds_the_running_goals_and_resends_their_cancels(tmp_path):
+    # Zero alone is no stop while a Nav2 controller keeps publishing at 20 Hz
+    # over a 10 Hz zero: the goals' cancels go out too, and the hold keeps
+    # their tokens so a host restart can still cancel and confirm them.
+    adapter, backend, sockets = _adapter()
+    backend._active_actions["nav-1"] = "/navigate_to_pose"
+    backend._goal_ids["nav-1"] = "nav-1"
+    adapter_module.HALT_HOLD.arm("an earlier halt", {"old": ("old", "/spin")})
+    try:
+        result = adapter.invoke(CallRequest("h", "motion.halt", {}, deadline_seconds=0))
+        _assert_held_halt(result)
+        assert adapter_module.HALT_HOLD.tokens() == {
+            "nav-1": ("nav-1", "/navigate_to_pose"),
+            "old": ("old", "/spin"),
+        }
+        kept = json.loads(adapter_module.halt_hold_path().read_text())
+        assert kept["goals"]["nav-1"] == ["nav-1", "/navigate_to_pose"]
+        assert result.evidence["halt_confirmation"]["reissued_cancels"] == ["nav-1", "old"]
+        services = [
+            m["service"] for m in sockets[-1].sent
+            if m.get("op") == "call_service" and m["service"].endswith("/_action/cancel_goal")
+        ]
+        assert sorted(services) == [
+            "/navigate_to_pose/_action/cancel_goal",
+            "/spin/_action/cancel_goal",
+        ]
+    finally:
+        adapter.disconnect()
+
+
+def test_a_halt_that_raised_holds_the_running_goals():
+    backend, _sockets = rosbridge(answers=True)
+    backend._active_actions["nav-1"] = "/navigate_to_pose"
+    backend._goal_ids["nav-1"] = "nav-1"
+
+    def broken(_call_id):
+        raise RuntimeError("cancel path broke")
+
+    backend._cancel_for_halt = broken
+    try:
+        result = backend.safe_stop("halt-1")
+        _assert_held_halt(result)
+        assert adapter_module.HALT_HOLD.tokens() == {"nav-1": ("nav-1", "/navigate_to_pose")}
+    finally:
+        backend.disconnect()
+
+
+def test_a_halt_with_the_link_gone_still_keeps_the_running_goals():
+    adapter, backend, _sockets = _adapter()
+    backend._active_actions["nav-1"] = "/navigate_to_pose"
+    backend._goal_ids["nav-1"] = "nav-1"
+    backend.disconnect()  # nothing can be sent: no cancel, no zero
+    try:
+        result = adapter.invoke(CallRequest("h", "motion.halt", {}, deadline_seconds=0))
+        _assert_held_halt(result)
+        assert adapter_module.HALT_HOLD.tokens() == {"nav-1": ("nav-1", "/navigate_to_pose")}
+        assert "reissued_cancels" not in result.evidence["halt_confirmation"]
+    finally:
+        adapter.disconnect()
+
+
+# --- 8. a CANCELING goal has not ended ------------------------------------------------
+
+
+def test_a_held_goal_its_server_is_still_canceling_keeps_the_hold():
+    # rcl_action: a CANCELING goal is not cancelable, so a cancel-all over it
+    # answers return_code 0 with nothing canceling while its server still
+    # drives it. Was: that answer released the hold on a robot paused 0.5 s.
+    backend, sockets = rosbridge(answers=True)
+    server = sockets[-1]
+    server.server_goals = {"nav-1": 3}
+    server.finishes_cancel = False
+    adapter_module.HALT_HOLD.arm(
+        "a reconnect dropped goals still running: nav-1",
+        {"nav-1": ("nav-1", "/navigate_to_pose")},
+    )
+    try:
+        with odometry_streaming(backend):
+            result = backend.safe_stop("halt-1")
+        assert result.outcome == OUTCOME_FAILED
+        assert result.evidence["halt_confirmation"]["stillness"]["stationary"] is True
+        assert "nav-1" in result.evidence["halt_confirmation"]["held_goals_unconfirmed"]
+        assert adapter_module.HALT_HOLD.tokens() == {"nav-1": ("nav-1", "/navigate_to_pose")}
+        assert server.server_goals == {"nav-1": 3}
+    finally:
+        backend.disconnect()
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        {},
+        {"status_list": None},
+        {"status_list": [{}]},
+        {"status_list": [{"status": "5"}]},
+        {"status_list": [{"status": True}]},
+        {"status_list": [{"status": 5}, {"status": 3}]},
+    ],
+    ids=["no_list", "null_list", "no_status", "text_status", "bool_status", "one_canceling"],
+)
+def test_a_goal_status_that_does_not_show_every_goal_ended_is_live(message):
+    statuses = adapter_module.goal_statuses(message)
+    assert adapter_module.live_goal_statuses(statuses)
+
+
+@pytest.mark.parametrize(
+    "message",
+    [{"status_list": []}, {"status_list": [{"status": 4}, {"status": 5}, {"status": 6}]}],
+    ids=["no_goals", "all_terminal"],
+)
+def test_a_goal_status_with_every_goal_terminal_shows_none_live(message):
+    assert adapter_module.live_goal_statuses(adapter_module.goal_statuses(message)) == []
+
+
+# --- 9. a goal sent while a reconnect forgets goals is held, never lost ----------------
+
+
+def test_a_goal_recorded_while_a_rosbridge_reconnect_forgets_goals_is_held():
+    backend, sockets = rosbridge(answers=True)
+    old = sockets[-1]
+    on_the_wire, recorded = threading.Event(), threading.Event()
+    real_send = old.send
+
+    def slow_send(raw):
+        real_send(raw)
+        if json.loads(raw).get("op") == "send_action_goal":
+            # The bytes are out; recording the goal as running follows.
+            on_the_wire.set()
+            recorded.wait(2.0)
+
+    old.send = slow_send
+    sender = threading.Thread(
+        target=lambda: backend.invoke(
+            call_id="adv-1",
+            capability_id="motion.advance",
+            arguments={"distance_m": 0.3},
+            deadline_seconds=0.2,
+        ),
+        daemon=True,
+    )
+    sender.start()
+    assert on_the_wire.wait(2.0)
+    real_disconnect = backend.disconnect
+
+    def disconnect_once_the_goal_is_recorded():
+        # Without the gate the reconnect has read the running goals already:
+        # the goal is recorded now, and then cleared with nobody holding it.
+        recorded.set()
+        deadline = time.monotonic() + 1.0
+        while "adv-1" not in backend._active_actions and time.monotonic() < deadline:
+            time.sleep(0.01)
+        real_disconnect()
+
+    backend.disconnect = disconnect_once_the_goal_is_recorded
+    # With the gate the reconnect waits for the send; this lets it finish.
+    threading.Timer(0.3, recorded.set).start()
+    try:
+        backend.reconnect()
+        backend.disconnect = real_disconnect
+        sender.join(3.0)
+        assert adapter_module.HALT_HOLD.tokens().get("adv-1") == ("adv-1", "/drive_on_heading")
+    finally:
+        backend.disconnect = real_disconnect
+        backend.disconnect()
+
+
+def test_a_goal_recorded_while_an_rclpy_reconnect_forgets_goals_is_held(
+    rclpy_actions, clock, monkeypatch  # noqa: F811
+):
+    from test_halt_admission import _Future
+
+    backend, _condition = rclpy_backend(clock)
+    backend._publish_zero = lambda: True
+    monkeypatch.setattr(backend, "_goal", lambda _capability, _arguments: object())
+    on_the_wire, recorded = threading.Event(), threading.Event()
+
+    def send_goal_async(_goal, feedback_callback=None):
+        on_the_wire.set()
+        recorded.wait(2.0)
+        return _Future()
+
+    backend._action_clients["motion.advance"] = SimpleNamespace(
+        server_is_ready=lambda: True, send_goal_async=send_goal_async
+    )
+    sender = threading.Thread(
+        target=lambda: backend.invoke(
+            call_id="adv",
+            capability_id="motion.advance",
+            arguments={"distance_m": 0.3},
+            deadline_seconds=0.2,
+        ),
+        daemon=True,
+    )
+    sender.start()
+    assert on_the_wire.wait(2.0)
+    real_stop = backend._stop_executor
+
+    def stop_once_the_goal_is_recorded():
+        recorded.set()
+        deadline = time.monotonic() + 1.0
+        while "adv" not in backend._pending_goals and time.monotonic() < deadline:
+            time.sleep(0.01)
+        real_stop()
+
+    backend._stop_executor = stop_once_the_goal_is_recorded
+    threading.Timer(0.3, recorded.set).start()
+    try:
+        backend.reconnect()
+        sender.join(3.0)
+        assert adapter_module.HALT_HOLD.tokens().get("adv") == ("adv", "/drive_on_heading")
+    finally:
+        backend._stop_executor = real_stop
         backend.disconnect()

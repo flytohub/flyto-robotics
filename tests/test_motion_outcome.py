@@ -461,12 +461,31 @@ def test_cancel_with_nobody_waiting_keeps_no_result_behind(monkeypatch):
 
 
 class CancelRosbridge(ScriptedRosbridge):
-    """A rosbridge whose action server answers a cancel only while ``answers``."""
+    """A rosbridge whose action servers answer only while ``answers``, with rcl semantics.
+
+    ``server_goals`` is every goal the action servers hold (any client's), by
+    name, with its action_msgs/GoalStatus: 2 EXECUTING, 3 CANCELING, 5
+    CANCELED. As in rcl_action, the cancel service with the zero goal id
+    cancels only ACCEPTED/EXECUTING goals (they become CANCELING and are
+    named); a CANCELING goal is not cancelable, so a cancel-all over it
+    answers return_code 0 with nothing canceling while the goal still runs.
+    A server ends a CANCELING goal (CANCELED) only while ``finishes_cancel``.
+    A subscription to ``<action>/_action/status`` is answered with the status
+    array as it stands (transient-local), unless ``status_published`` is off.
+    """
 
     def __init__(self):
         super().__init__(lambda _id: [])
         self.answers = False
-        self.still_canceling: list[dict] = []
+        self.server_goals: dict[str, int] = {}
+        self.finishes_cancel = True
+        self.status_published = True
+
+    def _settle(self):
+        if self.finishes_cancel:
+            for goal, status in self.server_goals.items():
+                if status == 3:
+                    self.server_goals[goal] = 5
 
     def send(self, raw):
         message = json.loads(raw)
@@ -476,15 +495,32 @@ class CancelRosbridge(ScriptedRosbridge):
         if message.get("op") == "call_service" and message["service"].endswith(
             "/_action/cancel_goal"
         ):
-            # The action server's own cancel service (cancel all goals):
-            # answered only while ``answers``, naming the goals still canceling.
             self.sent.append(message)
             if self.answers:
-                values = {"return_code": 0, "goals_canceling": list(self.still_canceling)}
+                canceling = [goal for goal, status in self.server_goals.items() if status in (1, 2)]
+                for goal in canceling:
+                    self.server_goals[goal] = 3
+                self._settle()
+                values = {
+                    "return_code": 0,
+                    "goals_canceling": [{"goal_id": {"uuid": [1] * 16}} for _ in canceling],
+                }
                 self.inbox.put(json.dumps(
                     {"op": "service_response", "id": message["id"], "result": True,
                      "values": values}
                 ))
+            return
+        if message.get("op") == "subscribe" and message["topic"].endswith("/_action/status"):
+            self.sent.append(message)
+            if self.answers and self.status_published:
+                self.inbox.put(json.dumps({
+                    "op": "publish",
+                    "topic": message["topic"],
+                    "msg": {"status_list": [
+                        {"goal_info": {"goal_id": {"uuid": [1] * 16}}, "status": status}
+                        for status in self.server_goals.values()
+                    ]},
+                }))
             return
         if message.get("op") == "call_service":
             # rosapi: a reconnect reads the robot's graph afresh.

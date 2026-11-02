@@ -76,7 +76,9 @@ def configured_topic() -> str | None:
     return os.getenv(TOPIC_ENV, "").strip() or None
 
 
-def served_topic(*, deployment_mode: str, sim_marker_on_graph: bool) -> str | None:
+def served_topic(
+    *, deployment_mode: str, sim_marker_on_graph: bool, marker_check: bool = True
+) -> str | None:
     """The topic to read: the configured one, else the shared one on a simulation.
 
     ``deployment_mode`` is the served one (``simulation`` / ``real`` /
@@ -85,7 +87,15 @@ def served_topic(*, deployment_mode: str, sim_marker_on_graph: bool) -> str | No
     it is served only on a marked simulation, also when configured
     explicitly: a hardware adapter pointed at the twin's shared endpoint
     would otherwise read simulated state as real. Anything else has none.
+
+    ``marker_check`` is False when the simulator marker check is disabled
+    (``FLYTO_ROS2_SIM_MARKER_TOPIC`` empty). Then no deployment has a cargo
+    topic: the twin may publish its simulated tray on any topic a
+    simulation configures, and with no marker check nothing on the graph
+    shows a hardware reader that it is not reading the twin.
     """
+    if not marker_check:
+        return None
     explicit = configured_topic()
     if explicit is not None and explicit != CONVENTIONAL_TOPIC:
         return explicit
@@ -133,7 +143,8 @@ def no_topic_result(call_id: str, *, deployment_mode: str) -> CallResult:
             f"{REASON_NO_TOPIC}: no cargo topic for this {deployment_mode} deployment; "
             f"a robot reads one only when {TOPIC_ENV} names it, and "
             f"{CONVENTIONAL_TOPIC} (the simulated tray) only on a simulation whose "
-            "graph carries the simulator marker"
+            "graph carries the simulator marker; with the marker check disabled "
+            "(FLYTO_ROS2_SIM_MARKER_TOPIC empty) no deployment reads one"
         ),
     )
 

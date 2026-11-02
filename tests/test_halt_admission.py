@@ -329,17 +329,21 @@ class _Future:
 
 
 class _AcceptedHandle:
+    """An accepted goal whose server ends it (CANCELED) once its cancel arrives."""
+
     accepted = True
 
     def __init__(self):
         self.cancels = 0
+        self.result = _Future()
 
     def cancel_goal_async(self):
         self.cancels += 1
+        self.result.finish(SimpleNamespace(status=5))
         return _Future(SimpleNamespace(goals_canceling=("adv",)), done=True)
 
     def get_result_async(self):
-        return _Future()
+        return self.result
 
 
 @pytest.fixture
@@ -428,7 +432,7 @@ def test_an_unanswered_rclpy_goal_holds_with_its_pending_send(
         backend.disconnect()
     assert halted.outcome == OUTCOME_FAILED
     assert "adv" in halted.evidence["halt_confirmation"]["unconfirmed"]
-    assert adapter_module.HALT_HOLD.tokens() == {"adv": pending}
+    assert adapter_module.HALT_HOLD.tokens() == {"adv": ("adv", "/drive_on_heading")}
 
 
 # --- 7. every entry point of a halt, and every goal send -----------------------

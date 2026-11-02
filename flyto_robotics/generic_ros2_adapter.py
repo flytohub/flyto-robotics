@@ -40,6 +40,7 @@ import threading
 import time
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Protocol
 
@@ -116,8 +117,13 @@ REQUIRE_MAP_TF = "map_tf"
 #   (or a slow creep) is not still.
 # The duration keeps a momentary pause (a speed reversal, the start of a
 # rotate) from passing as a stop: at 30-50 Hz three messages are under
-# 0.1 s. It does not cover a long pause such as Nav2's Wait recovery; a halt
-# therefore also cancels every goal and confirms held goals ended.
+# 0.1 s. It does not cover a long pause such as Nav2's Wait recovery (5 s).
+# A halt cancels the goals this host process knows (the ones it runs, and the
+# ones in the hold) and confirms from their action servers' status that held
+# ones ended. It does NOT cover a goal this process never knew: one sent by
+# another client, or by a host process that crashed before anything armed the
+# hold. Such a goal paused for STILL_MIN_SECONDS or longer survives a
+# ``completed`` halt.
 STILL_SAMPLES = 3
 STILL_MIN_SECONDS = 0.5
 STILL_LINEAR_MPS = 0.01
@@ -128,13 +134,61 @@ HALT_STILL_WAIT_S = 2.0
 # While a halted goal's cancel is unconfirmed, zero velocity is re-sent this
 # often, so the action server's last command never stands.
 ZERO_HOLD_PERIOD_S = 0.1
+# A running goal's cancel is confirmed only by the goal ending (its result, a
+# terminal status) within this long; a cancel's answer alone never confirms it.
+CANCEL_CONFIRM_WAIT_S = 3.0
 # A goal held from an earlier connection is released only once its action
-# server answers that it has ended; each answer is awaited this long.
+# server's goal status shows no goal still live; that is awaited this long.
 HELD_GOAL_END_WAIT_S = 2.0
-# action_msgs/srv/CancelGoal return codes that mean the goal is no longer
-# running (unknown to the server, or already terminated).
-CANCEL_ERROR_NONE = 0
-CANCEL_GOAL_ENDED_CODES = frozenset({2, 3})
+# action_msgs/msg/GoalStatus values of a goal that has ended. Every other
+# value (ACCEPTED 1, EXECUTING 2, CANCELING 3, UNKNOWN 0, or anything that is
+# not a status) is live: a CANCELING goal's server is still driving it.
+GOAL_ENDED_STATUSES = frozenset({4, 5, 6})
+GOAL_STATUS_ARRAY_TYPE = "action_msgs/msg/GoalStatusArray"
+CANCEL_GOAL_TYPE = "action_msgs/srv/CancelGoal"
+# A rosbridge service call sent without waiting: its answer is dropped.
+UNAWAITED_SERVICE_PREFIX = "unawaited-"
+
+
+def action_status_topic(action_name: str) -> str:
+    """The action server's goal status topic (``<action>/_action/status``)."""
+    return f"{action_name.rstrip('/')}/_action/status"
+
+
+def action_cancel_service(action_name: str) -> str:
+    """The action server's own cancel service (``<action>/_action/cancel_goal``)."""
+    return f"{action_name.rstrip('/')}/_action/cancel_goal"
+
+
+def goal_statuses(message: Any) -> list[int]:
+    """Every goal's status in a GoalStatusArray (rosbridge dict or rclpy message).
+
+    A malformed array or entry reads as UNKNOWN (0), which counts as live.
+    """
+    entries = (
+        message.get("status_list")
+        if isinstance(message, Mapping)
+        else getattr(message, "status_list", None)
+    )
+    if not isinstance(entries, (list, tuple)):
+        return [0]
+    statuses: list[int] = []
+    for entry in entries:
+        raw = entry.get("status") if isinstance(entry, Mapping) else getattr(entry, "status", None)
+        statuses.append(int(raw) if isinstance(raw, int) and not isinstance(raw, bool) else 0)
+    return statuses
+
+
+def live_goal_statuses(statuses: Iterable[int]) -> list[int]:
+    """The statuses of goals that have not ended (see ``GOAL_ENDED_STATUSES``)."""
+    return [status for status in statuses if status not in GOAL_ENDED_STATUSES]
+
+
+def token_action(token: Any) -> str | None:
+    """The action name a hold's cancel token carries: ``(goal id, action)``."""
+    if isinstance(token, tuple) and len(token) == 2 and isinstance(token[1], str):
+        return token[1] or None
+    return None
 # The typed reason of a halt that could not confirm the robot stopped. It is
 # Flyto2 Cloud's own code (services/space_tasks/uncertain_task_effect.py), so
 # the task is held for inspection rather than taken as stopped.
@@ -1938,21 +1992,73 @@ class _ObservationState:
         raise NotImplementedError
 
     def _cancel_token(self, call_id: str) -> Any:
-        """What re-sends this goal's cancel from a later connection."""
+        """``(goal id, action name)``: what cancels this goal, and confirms its end,
+        from a later connection or a restarted host process."""
+        raise NotImplementedError
+
+    def _cancel_all_goals(self, action_name: str) -> None:
+        """Ask ``action_name``'s own cancel service to cancel every goal it runs.
+
+        The zero goal id with a zero stamp: every goal the server has accepted
+        or is executing. Sent, not awaited (the answer proves nothing; see
+        ``_held_goal_end``). May raise when nothing can be sent.
+        """
+        raise NotImplementedError
+
+    def _goal_statuses_until(
+        self,
+        action_name: str,
+        settled: Callable[[list[int]], bool],
+        timeout: float,
+    ) -> list[int] | None:
+        """Read ``action_name``'s goal status array until ``settled`` holds or time runs out.
+
+        The newest statuses seen (``goal_statuses``), or None when no status
+        message arrived. The status topic is transient-local, so a server
+        that has run a goal answers a late reader at once.
+        """
         raise NotImplementedError
 
     def _recancel(self, call_id: str, token: Any) -> None:
-        """Re-send a held goal's cancel without waiting for an answer (may raise)."""
-        raise NotImplementedError
+        """Re-send a held or running goal's cancel without waiting (may raise).
+
+        Through the action server's own cancel service by action name: a
+        rosbridge goal id belongs to the socket that sent it and an rclpy
+        handle to the node that sent it, and neither outlives a reconnect.
+        """
+        action_name = token_action(token)
+        if action_name is None:
+            raise LookupError(f"no action name is kept for {call_id}")
+        self._cancel_all_goals(action_name)
 
     def _held_goal_end(self, call_id: str, token: Any) -> str | None:
-        """None once the action server confirms a held goal has ended; else why not.
+        """None once the action server's status shows the held goal has ended; else why not.
 
         Asked of goals held from an earlier connection (or host process),
         whose cancel this connection cannot follow: a robot seen still does
-        not show the goal is over, and its server could resume it.
+        not show the goal is over, and its server could resume it. Only the
+        goal status confirms it: no goal on that action server may be
+        ACCEPTED, EXECUTING or CANCELING. A cancel response never does: a
+        server answers a cancel of a CANCELING goal with no error and no
+        goal canceling, while it still drives that goal.
         """
-        raise NotImplementedError
+        action_name = token_action(token)
+        if action_name is None:
+            return "no action name is kept for it, so nothing can confirm its end"
+        statuses = self._goal_statuses_until(
+            action_name,
+            lambda seen: not live_goal_statuses(seen),
+            HELD_GOAL_END_WAIT_S,
+        )
+        if statuses is None:
+            return f"no goal status from {action_name} within {HELD_GOAL_END_WAIT_S:g} s"
+        live = live_goal_statuses(statuses)
+        if live:
+            return (
+                f"{action_name} still has {len(live)} goal(s) not ended "
+                f"(status {sorted(set(live))})"
+            )
+        return None
 
     def _publish_zero(self) -> bool:
         raise NotImplementedError
@@ -1976,12 +2082,12 @@ class _ObservationState:
         ended), zero velocity was published, fresh odometry then shows the
         robot still (full twist and pose, for ``STILL_MIN_SECONDS``), and
         every goal in the hold (from an earlier connection: a reconnect
-        carries running goals into it) is confirmed ended by its server. No
-        goal being tracked is not enough: something else may drive the base.
-        Anything less is ``failed`` with the typed reason ``effect_unknown``
-        and arms ``HALT_HOLD``: a goal whose cancel was refused or went
-        unanswered keeps its handle, zero velocity is re-sent, and motion is
-        refused until a halt sees the robot still.
+        carries running goals into it) is confirmed ended by its action
+        server's goal status. No goal being tracked is not enough: something
+        else may drive the base. Anything less is ``failed`` with the typed
+        reason ``effect_unknown`` and arms ``HALT_HOLD``: a goal whose cancel
+        was refused or went unanswered keeps its handle, zero velocity is
+        re-sent, and motion is refused until a halt sees the robot still.
 
         The whole halt runs in ``HALT_HOLD.halting()``: no goal is sent while
         it runs, and nothing admitted before it is sent after it.
@@ -1997,48 +2103,7 @@ class _ObservationState:
     ) -> CallResult:
         """A halt that raised: ``effect_unknown``, the hold armed, zero held."""
         why = f"the halt raised {type(error).__name__}: {error}"[:200]
-        return self.hold_unrun_halt(call_id, why, evidence, confirmation={"error": why})
-
-    def hold_unrun_halt(
-        self,
-        call_id: str,
-        why: str,
-        evidence: Mapping[str, Any] | None = None,
-        *,
-        confirmation: Mapping[str, Any] | None = None,
-    ) -> CallResult:
-        """A halt that could not run (or raised): hold, keep zero going, ``effect_unknown``.
-
-        The hold is armed with every running goal's cancel token, zero is
-        published once and then held where this connection can publish (a
-        presence connection never does, a dropped one resumes it on
-        reconnect). The caller runs it inside ``HALT_HOLD.halting()``, so a
-        new halt epoch starts too. Never raises.
-        """
-        goals: dict[str, Any] = {}
-        with contextlib.suppress(Exception):
-            goals = {goal: self._cancel_token(goal) for goal in self._active_goal_ids()}
-        HALT_HOLD.arm(why, goals)
-        published = False
-        if not getattr(self, "_presence_only", False):
-            published = self._zero_published()
-            with contextlib.suppress(Exception):
-                self._hold_zero()
-        held = {
-            **dict(confirmation or {}),
-            "zero_velocity_held": published,
-            "hold": HALT_HOLD.snapshot(),
-        }
-        return self._halt_unconfirmed(
-            call_id,
-            {
-                "adapter": "generic_ros2",
-                **dict(evidence or {}),
-                "zero_velocity_published": published,
-            },
-            held,
-            why,
-        )
+        return hold_unrun_halt(self, call_id, why, evidence, confirmation={"error": why})
 
     def _running_goal_ids(self) -> list[str]:
         """Goals this connection sent that may still run (sent, accepted, not ended)."""
@@ -2051,7 +2116,9 @@ class _ObservationState:
         a later halt would not see the goal at all. The hold keeps each one
         with its cancel token: the reconnect re-sends the cancel, motion is
         refused, and only a halt that sees the robot still AND confirms the
-        goal ended (``_held_goal_end``) releases it. Never raises.
+        goal ended (``_held_goal_end``) releases it. The caller holds
+        ``HALT_HOLD.forgetting()`` from before this until the goals are
+        forgotten, so no goal is sent and recorded in between. Never raises.
         """
         tokens: dict[str, Any] = {}
         with contextlib.suppress(Exception):
@@ -2121,15 +2188,23 @@ class _ObservationState:
                 f"odometry did not show the robot still within {HALT_STILL_WAIT_S:g} s"
             )
         # Goals held from an earlier connection were never cancelled here:
-        # the hold is released only once their action server confirms they
-        # ended, or Nav2 could resume one after the release.
+        # the hold is released only once their action server's goal status
+        # shows they ended, or Nav2 could resume one after the release.
         held = {goal: token for goal, token in HALT_HOLD.tokens().items() if goal not in cancelled}
         unended: dict[str, str] = {}
+        # One status read per action server answers for every goal held on it.
+        ends: dict[str, str | None] = {}
         for goal, token in held.items():
-            try:
-                why = self._held_goal_end(goal, token)
-            except Exception as error:  # noqa: BLE001 - an unanswered end is unconfirmed
-                why = f"end not confirmed: {type(error).__name__}: {error}"
+            action_name = token_action(token)
+            if action_name is not None and action_name in ends:
+                why = ends[action_name]
+            else:
+                try:
+                    why = self._held_goal_end(goal, token)
+                except Exception as error:  # noqa: BLE001 - an unanswered end is unconfirmed
+                    why = f"end not confirmed: {type(error).__name__}: {error}"
+                if action_name is not None:
+                    ends[action_name] = why
             if why is not None:
                 unended[goal] = why[:200]
         if held:
@@ -2172,16 +2247,69 @@ class _ObservationState:
         )
 
     def _recancel_held(self, *, skip: Iterable[str] = ()) -> list[str]:
-        """Re-send the cancel of every held goal not in ``skip``; their ids."""
+        """Re-send the cancel of every held goal not in ``skip``; the ids it went out for."""
         skipped = set(skip)
         sent: list[str] = []
         for goal, token in HALT_HOLD.tokens().items():
             if goal in skipped:
                 continue
-            with contextlib.suppress(Exception):
+            try:
                 self._recancel(goal, token)
+            except Exception:  # noqa: BLE001 - an unsent cancel is reported by omission
+                continue
             sent.append(goal)
         return sorted(sent)
+
+    def release_hold(self, *, operator: str, reason: str) -> dict[str, Any]:
+        """An operator's release of the hold, for a held goal no halt can confirm ended.
+
+        The way out when ``_held_goal_end`` cannot answer (an action server
+        that is gone, a hold with no action name kept, a status topic that
+        never answers) while the operator has checked the robot. It still
+        needs the robot seen still: zero velocity is published, the held
+        goals' cancels re-sent, and fresh odometry must show the robot still
+        (``wait_until_stationary``) or nothing is released. A release is
+        recorded with who released it and why (``_HaltHold.operator_release``)
+        before the hold is cleared; a record that cannot be written releases
+        nothing. Never raises.
+        """
+        operator = str(operator or "").strip()[:200]
+        reason = str(reason or "").strip()[:200]
+        if not operator or not reason:
+            return {"released": False, "detail": "an operator and a reason are required"}
+        if getattr(self, "_presence_only", False):
+            return {
+                "released": False,
+                "detail": "a presence connection never commands the robot",
+            }
+        with HALT_HOLD.halting():
+            if HALT_HOLD.snapshot() is None:
+                return {"released": False, "detail": "no halt hold is armed"}
+            try:
+                if not self._zero_published():
+                    return {"released": False, "detail": "standard cmd_vel stop unavailable"}
+                reissued = self._recancel_held()
+                self._zero_published()
+                stillness = self.wait_until_stationary(HALT_STILL_WAIT_S)
+                if not stillness.get("stationary"):
+                    return {
+                        "released": False,
+                        "detail": "odometry did not show the robot still; the hold stays",
+                        "stillness": stillness,
+                    }
+                record = HALT_HOLD.operator_release(
+                    operator=operator,
+                    reason=reason,
+                    evidence={"stillness": stillness, "reissued_cancels": reissued},
+                )
+            except Exception as error:  # noqa: BLE001 - a failed release keeps the hold
+                return {
+                    "released": False,
+                    "detail": f"release raised {type(error).__name__}: {error}"[:200],
+                }
+        if record is None:
+            return {"released": False, "detail": "no halt hold is armed"}
+        return {"released": True, "record": record}
 
     def _resume_hold(self) -> None:
         """On a (re)connection while the robot is held: zero, the held cancels, the hold.
@@ -2220,9 +2348,73 @@ class _ObservationState:
             self._zero_published()
 
 
+def hold_unrun_halt(
+    backend: Any,
+    call_id: str,
+    why: str,
+    evidence: Mapping[str, Any] | None = None,
+    *,
+    confirmation: Mapping[str, Any] | None = None,
+) -> CallResult:
+    """A halt that could not run (or raised): hold, cancel, keep zero going, ``effect_unknown``.
+
+    The one implementation for every halt that does not run to the end: no
+    time, the link down, ``motion.halt`` missing, an operator refresh, a
+    presence connection, a halt that raised. The hold is armed with every
+    running goal's cancel token, so a host restart keeps them. Where the
+    connection commands, every running and held goal's cancel is re-sent at
+    once: zero alone is not a stop while a goal's controller keeps publishing
+    faster than the hold re-sends zero. Zero is published once and then held
+    (a presence connection never commands, a dropped one resumes on
+    reconnect). The caller runs it inside ``HALT_HOLD.halting()``, so a new
+    halt epoch starts too. Never raises, on any backend.
+    """
+    goals: dict[str, Any] = {}
+    with contextlib.suppress(Exception):
+        goals = {goal: backend._cancel_token(goal) for goal in backend._active_goal_ids()}
+    HALT_HOLD.arm(why, goals)
+    published = False
+    reissued: list[str] = []
+    if not getattr(backend, "_presence_only", False):
+        with contextlib.suppress(Exception):
+            published = bool(backend._publish_zero())
+        for goal, token in goals.items():
+            try:
+                backend._recancel(goal, token)
+            except Exception:  # noqa: BLE001 - an unsent cancel is reported by omission
+                continue
+            reissued.append(goal)
+        with contextlib.suppress(Exception):
+            reissued.extend(backend._recancel_held(skip=goals))
+        if reissued:
+            # The last command on cmd_vel is this stop's, not a goal's.
+            with contextlib.suppress(Exception):
+                published = bool(backend._publish_zero()) or published
+        with contextlib.suppress(Exception):
+            backend._hold_zero()
+    held = {
+        **dict(confirmation or {}),
+        "zero_velocity_held": published,
+        "hold": HALT_HOLD.snapshot(),
+    }
+    if reissued:
+        held["reissued_cancels"] = sorted(set(reissued))
+    return _ObservationState._halt_unconfirmed(
+        call_id,
+        {
+            "adapter": "generic_ros2",
+            **dict(evidence or {}),
+            "zero_velocity_published": published,
+        },
+        held,
+        why,
+    )
+
+
 #: Names the file that keeps the halt hold across a restart of the host process.
 HALT_HOLD_FILE_ENV = "FLYTO_ROS2_HALT_HOLD_FILE"
 HALT_HOLD_SCHEMA = "flyto.ros2-halt-hold.v1"
+HALT_HOLD_RELEASE_SCHEMA = "flyto.ros2-halt-hold-release.v1"
 _MAX_ADMITTED = 512
 
 
@@ -2258,7 +2450,11 @@ class _HaltHold:
     and every connection to it (a reconnect, a per-job adapter, a presence
     watch) reads the same hold, so dropping a connection never re-allows
     motion. Armed by every ``motion.halt`` that ends ``effect_unknown``;
-    released only by a halt that then sees the robot still. While armed,
+    released only by a halt that then sees the robot still and confirms every
+    held goal ended, or by an operator's recorded release
+    (``operator_release``) on a robot seen still. Deleting the file while
+    the host runs releases nothing: the hold is read once and kept in memory,
+    and the next arm writes it again. While armed,
     motion is refused and each commanding connection re-sends zero velocity
     and the held goals' cancels.
 
@@ -2422,6 +2618,61 @@ class _HaltHold:
         """
         with self._gate:
             yield self.motion_refusal(call_id)
+
+    @contextlib.contextmanager
+    def forgetting(self) -> Iterator[None]:
+        """A connection forgetting its goals: no goal is sent and recorded meanwhile.
+
+        Holds the same gate as ``sending``. A reconnect holds the running
+        goals and forgets them inside it, so a goal is either recorded before
+        the hold reads them (and is held) or sent after (on the new
+        connection, where a halt sees it).
+        """
+        with self._gate:
+            yield
+
+    def operator_release(
+        self, *, operator: str, reason: str, evidence: Mapping[str, Any]
+    ) -> dict[str, Any] | None:
+        """Clear the hold on an operator's word; the release record, or None.
+
+        Only ``_ObservationState.release_hold`` calls it, after the robot was
+        seen still. The record (who, why, what was held, the evidence) is
+        appended to ``<hold file stem>.releases.jsonl`` beside the hold file
+        and logged before the hold is cleared; if it cannot be written, this
+        raises and nothing is released.
+        """
+        with self._lock:
+            self._load_locked()
+            if self._reason is None:
+                return None
+            record = {
+                "schema": HALT_HOLD_RELEASE_SCHEMA,
+                "released_at": datetime.now(timezone.utc).isoformat(),
+                "operator": operator,
+                "reason": reason,
+                "held": {"reason": self._reason, "goals": sorted(self._goals)},
+                "evidence": dict(evidence),
+            }
+            path = self._loaded_from or halt_hold_path()
+            audit = path.with_name(f"{path.stem}.releases.jsonl")
+            audit.parent.mkdir(parents=True, exist_ok=True)
+            with audit.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(record, separators=(",", ":"), default=str) + "\n")
+            logger.warning(
+                "halt hold released by operator %s: %s (held: %s)",
+                operator,
+                reason,
+                record["held"],
+            )
+            try:
+                path.unlink(missing_ok=True)
+            except OSError as error:
+                logger.error("kept halt hold %s could not be removed: %s", path, error)
+            self._reason = None
+            self._goals = {}
+            self._persist_error = None
+            return record
 
     @contextlib.contextmanager
     def halting(self) -> Iterator[None]:
@@ -3010,27 +3261,22 @@ class GenericROS2Adapter:
     def _halt_not_run(
         self, call_id: str, why: str, evidence: Mapping[str, Any] | None = None
     ) -> CallResult:
-        """A halt that could not run: a new epoch, the hold armed, zero where it can go.
+        """A halt that could not run: a new epoch, then ``hold_unrun_halt``.
 
         Nothing admitted before it is ever sent; motion is refused until a
-        halt sees the robot still. The backend publishes and holds zero when
-        its connection can (``hold_unrun_halt``); a backend without that
-        still arms the hold here.
+        halt sees the robot still. The hold carries every running goal's
+        cancel token, and the cancels and zero go out where the connection
+        can send them.
         """
         with HALT_HOLD.halting():
-            hold = getattr(self.backend, "hold_unrun_halt", None)
-            if callable(hold):
-                try:
-                    return hold(call_id, why, evidence)
-                except Exception as error:  # noqa: BLE001 - the hold below still applies
-                    why = f"{why}; holding raised {type(error).__name__}: {error}"
-            HALT_HOLD.arm(why, {})
-            return _ObservationState._halt_unconfirmed(
-                call_id,
-                {"adapter": "generic_ros2", **dict(evidence or {})},
-                {"hold": HALT_HOLD.snapshot()},
-                why,
-            )
+            return hold_unrun_halt(self.backend, call_id, why, evidence)
+
+    def release_hold(self, *, operator: str, reason: str) -> dict[str, Any]:
+        """An operator's audited release of the halt hold (``_ObservationState.release_hold``)."""
+        release = getattr(self.backend, "release_hold", None)
+        if not callable(release):
+            return {"released": False, "detail": "this backend cannot release a halt hold"}
+        return release(operator=operator, reason=reason)
 
     def _invoke(self, request: CallRequest) -> CallResult:
         if request.capability_id not in self._declared:
@@ -4084,6 +4330,11 @@ class RclpyROS2Backend(_ObservationState):
         # Goals sent and not yet accepted (their send_goal_async futures): a
         # halt sees and cancels them too.
         self._pending_goals: dict[str, Any] = {}
+        # Each goal's action name: what cancels it and confirms its end from
+        # another node or a restarted host (``_cancel_token``).
+        self._goal_actions: dict[str, str] = {}
+        # The action servers' own cancel services, per action name.
+        self._cancel_clients: dict[str, Any] = {}
         self._results: dict[str, CallResult] = {}
         self._counts: dict[str, int] = {}
         self._publishers: dict[str, Any] = {}
@@ -4236,6 +4487,7 @@ class RclpyROS2Backend(_ObservationState):
         node, self._node = self._node, None
         self._publishers.clear()
         self._action_clients.clear()
+        self._cancel_clients.clear()
         if node is not None:
             with contextlib.suppress(Exception):
                 node.destroy_node()
@@ -4668,6 +4920,7 @@ class RclpyROS2Backend(_ObservationState):
                     ),
                 )
                 self._pending_goals[call_id] = started
+                self._goal_actions[call_id] = action_name
             accept_deadline = time.monotonic() + min(2.0, deadline_seconds)
             if not self._wait_future(started, accept_deadline):
                 # Still pending: a halt keeps seeing it until it is answered.
@@ -4762,6 +5015,7 @@ class RclpyROS2Backend(_ObservationState):
         self._goal_handles.pop(call_id, None)
         self._result_futures.pop(call_id, None)
         self._pending_goals.pop(call_id, None)
+        self._goal_actions.pop(call_id, None)
         self._forget_track(call_id)
 
     def _publish_zero(self) -> bool:
@@ -4805,17 +5059,25 @@ class RclpyROS2Backend(_ObservationState):
             return CallResult(
                 call_id, OUTCOME_REFUSED, detail="no active ROS 2 goal"
             )
+        deadline = time.monotonic() + CANCEL_CONFIRM_WAIT_S
         future = handle.cancel_goal_async()
-        if not self._wait_future(future, time.monotonic() + 2.0):
+        if not self._wait_future(future, min(deadline, time.monotonic() + 2.0)):
             return CallResult(
                 call_id, OUTCOME_FAILED, detail="ROS 2 cancel timed out"
             )
-        response = future.result()
-        accepted = bool(getattr(response, "goals_canceling", ()))
+        # The cancel's answer is not the goal's end: a CANCELING goal is
+        # still driven by its server. Only its result (a terminal status) is.
+        result_future = self._result_futures.get(call_id)
+        ended = result_future is not None and self._wait_future(result_future, deadline)
         stopped = self._publish_zero()
-        if not accepted or not stopped:
+        if not ended or not stopped:
             return CallResult(
-                call_id, OUTCOME_FAILED, detail="ROS 2 cancel/stop was not confirmed"
+                call_id,
+                OUTCOME_FAILED,
+                detail=(
+                    "ROS 2 cancel/stop was not confirmed"
+                    + ("" if ended else ": the goal has not ended")
+                ),
             )
         self._forget_goal(call_id)
         return self._keep_result(
@@ -4866,40 +5128,69 @@ class RclpyROS2Backend(_ObservationState):
         self._forget_goal(call_id)
 
     def _cancel_token(self, call_id: str) -> Any:
-        return self._goal_handles.get(call_id) or self._pending_goals.get(call_id)
+        # By action name, never the goal handle: a handle belongs to the node
+        # (and process) that sent it, and a reconnect or restart outlives it.
+        return (call_id, self._goal_actions.get(call_id))
 
-    def _recancel(self, call_id: str, token: Any) -> None:
-        if token is None:
-            return
-        if not hasattr(token, "cancel_goal_async"):
-            # A goal whose acceptance was pending: cancel it once it is answered.
-            if not token.done():
-                return
-            token = token.result()
-            if token is None or not getattr(token, "accepted", False):
-                return
-        token.cancel_goal_async()
+    def _cancel_all_goals(self, action_name: str) -> None:
+        node = self._node
+        if node is None:
+            raise RuntimeError("ROS 2 adapter node is gone")
+        from action_msgs.srv import CancelGoal
 
-    def _held_goal_end(self, call_id: str, token: Any) -> str | None:
-        if token is None:
-            return (
-                "no goal handle is kept for it (the host restarted), "
-                "so nothing can confirm its end"
-            )
-        if not hasattr(token, "cancel_goal_async"):
-            # A goal whose acceptance was pending when it was held.
-            if not token.done():
-                return "its acceptance was never answered"
-            token = token.result()
-            if token is None or not getattr(token, "accepted", False):
-                return None  # refused: it never ran
-        future = token.cancel_goal_async()
-        if not self._wait_future(future, time.monotonic() + HELD_GOAL_END_WAIT_S):
-            return "its action server did not answer the cancel"
-        code = getattr(future.result(), "return_code", None)
-        if code in CANCEL_GOAL_ENDED_CODES:
+        client = self._cancel_clients.get(action_name)
+        if client is None:
+            client = node.create_client(CancelGoal, action_cancel_service(action_name))
+            self._cancel_clients[action_name] = client
+        # A default request carries the zero goal id and stamp: cancel all.
+        client.call_async(CancelGoal.Request())
+
+    def _goal_statuses_until(
+        self,
+        action_name: str,
+        settled: Callable[[list[int]], bool],
+        timeout: float,
+    ) -> list[int] | None:
+        node = self._node
+        if node is None:
             return None
-        return f"its action server answered the cancel with return_code {code}; it has not ended"
+        try:
+            from action_msgs.msg import GoalStatusArray
+            from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
+        except ImportError:
+            return None
+        seen: dict[str, list[int]] = {}
+
+        def on_status(message: Any) -> None:
+            with self._condition:
+                seen["statuses"] = goal_statuses(message)
+                self._condition.notify_all()
+
+        # The status publisher is reliable and transient-local: a late reader
+        # gets the newest array at once.
+        qos = QoSProfile(
+            depth=1,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+        )
+        subscription = node.create_subscription(
+            GoalStatusArray, action_status_topic(action_name), self._guarded(on_status), qos
+        )
+        try:
+            deadline = time.monotonic() + timeout
+            with self._condition:
+                while self._connected:
+                    statuses = seen.get("statuses")
+                    if statuses is not None and settled(statuses):
+                        break
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    self._condition.wait(timeout=remaining)
+                return seen.get("statuses")
+        finally:
+            with contextlib.suppress(Exception):
+                node.destroy_subscription(subscription)
 
     def execution_count(self, call_id: str) -> int:
         return self._counts.get(call_id, 0)
@@ -4915,13 +5206,16 @@ class RclpyROS2Backend(_ObservationState):
 
     def reconnect(self) -> None:
         # Goals sent before the drop are no longer followed by this executor:
-        # every one still running goes into the hold before it is forgotten.
-        self._hold_running_goals()
-        self._stop_executor()
-        self._reset_readings()
-        self._goal_handles.clear()
-        self._result_futures.clear()
-        self._pending_goals.clear()
+        # every one still running goes into the hold before it is forgotten,
+        # with no goal sent and recorded in between.
+        with HALT_HOLD.forgetting():
+            self._hold_running_goals()
+            self._stop_executor()
+            self._reset_readings()
+            self._goal_handles.clear()
+            self._result_futures.clear()
+            self._pending_goals.clear()
+            self._goal_actions.clear()
         with self._condition:
             self._connected = True
             self._condition.notify_all()
@@ -4999,6 +5293,10 @@ class RosbridgeROS2Backend(_ObservationState):
         # One-shot reads for vision.observe and sensing.map: topic -> waiter.
         self._capture_waits: dict[str, str] = {}
         self._captured: dict[str, dict[str, Any]] = {}
+        # Goal status reads (``_goal_statuses_until``): topic -> waiter, and
+        # waiter -> the newest statuses seen.
+        self._status_waits: dict[str, str] = {}
+        self._status_seen: dict[str, list[int]] = {}
         self._active_actions: dict[str, str] = {}
         # Call ids whose invoke() is waiting for the goal's result right now.
         # A cancel or a safe stop on this shared connection reads the result
@@ -5087,6 +5385,8 @@ class RosbridgeROS2Backend(_ObservationState):
                 # nothing about how the call ends.
                 return
             if operation == "service_response":
+                if identifier.startswith(UNAWAITED_SERVICE_PREFIX):
+                    return  # sent without waiting; nobody reads the answer
                 self._responses[identifier] = message
                 self._condition.notify_all()
             elif operation == "action_result":
@@ -5296,6 +5596,12 @@ class RosbridgeROS2Backend(_ObservationState):
         ):
             self._track_clock(raw_message, time.monotonic())
             return
+        status_waiter = self._status_waits.get(topic)
+        if status_waiter is not None:
+            with self._condition:
+                self._status_seen[status_waiter] = goal_statuses(raw_message)
+                self._condition.notify_all()
+            return
         if topic and topic == self._cargo_subscription_topic():
             with self._condition:
                 if self._cargo.record(raw_message, received=time.monotonic()):
@@ -5379,7 +5685,9 @@ class RosbridgeROS2Backend(_ObservationState):
         """The topic this connection listens to for cargo: ``served_topic`` with
         the marker assumed present (the graph decides the read later)."""
         return cargo_sensor.served_topic(
-            deployment_mode=_served_deployment_mode(), sim_marker_on_graph=True
+            deployment_mode=_served_deployment_mode(),
+            sim_marker_on_graph=True,
+            marker_check=bool(_simulation_marker_topic()),
         )
 
     def cargo_topic(self) -> str | None:
@@ -5395,6 +5703,7 @@ class RosbridgeROS2Backend(_ObservationState):
         return cargo_sensor.served_topic(
             deployment_mode=_served_deployment_mode(),
             sim_marker_on_graph=bool(marker) and self._topic_types.get(marker) == CLOCK_TYPE,
+            marker_check=bool(marker),
         )
 
     def _wait_for(
@@ -6140,7 +6449,7 @@ class RosbridgeROS2Backend(_ObservationState):
         status = self._wait_for(
             self._goal_ended,
             call_id,
-            time.monotonic() + 3.0,
+            time.monotonic() + CANCEL_CONFIRM_WAIT_S,
             consume=False,
         )
         confirmed = status == 5
@@ -6194,34 +6503,69 @@ class RosbridgeROS2Backend(_ObservationState):
     def _cancel_token(self, call_id: str) -> Any:
         return (self._goal_ids.get(call_id, call_id), self._active_actions.get(call_id))
 
-    def _recancel(self, call_id: str, token: Any) -> None:
-        goal_id, action_name = token if isinstance(token, tuple) else (call_id, None)
-        if action_name:
-            self._send({"op": "cancel_action_goal", "id": goal_id, "action": action_name})
-
-    def _held_goal_end(self, call_id: str, token: Any) -> str | None:
+    def _cancel_all_goals(self, action_name: str) -> None:
         # A goal id belongs to the rosbridge session that sent it, so the
-        # action server itself is asked: its cancel service with the zero goal
-        # id cancels every goal it runs and names those still canceling. None
-        # left means nothing on that action server runs, the held goal included.
-        action_name = token[1] if isinstance(token, tuple) else None
-        if not action_name:
-            return "no action name is kept for it, so nothing can confirm its end"
-        values = self._service(
-            f"{action_name.rstrip('/')}/_action/cancel_goal",
-            {"goal_info": {"goal_id": {"uuid": [0] * 16}, "stamp": {"sec": 0, "nanosec": 0}}},
-            timeout=HELD_GOAL_END_WAIT_S,
-            service_type="action_msgs/srv/CancelGoal",
+        # action server's own cancel service is called, with the zero goal id.
+        self._send(
+            {
+                "op": "call_service",
+                "service": action_cancel_service(action_name),
+                "type": CANCEL_GOAL_TYPE,
+                "args": {
+                    "goal_info": {
+                        "goal_id": {"uuid": [0] * 16},
+                        "stamp": {"sec": 0, "nanosec": 0},
+                    }
+                },
+                "id": f"{UNAWAITED_SERVICE_PREFIX}cancel-all-{time.monotonic_ns()}",
+            }
         )
-        code = values.get("return_code")
-        canceling = values.get("goals_canceling")
-        if code == CANCEL_ERROR_NONE and isinstance(canceling, list) and not canceling:
-            return None
-        count = len(canceling) if isinstance(canceling, list) else "unknown"
-        return (
-            f"cancel-all on {action_name} answered return_code {code} with "
-            f"{count} goal(s) still canceling"
-        )
+
+    def _goal_statuses_until(
+        self,
+        action_name: str,
+        settled: Callable[[list[int]], bool],
+        timeout: float,
+    ) -> list[int] | None:
+        topic = action_status_topic(action_name)
+        waiter = f"goal-status-{time.monotonic_ns()}"
+        with self._condition:
+            self._status_waits[topic] = waiter
+        try:
+            self._send(
+                {
+                    "op": "subscribe",
+                    "id": waiter,
+                    "topic": topic,
+                    "type": GOAL_STATUS_ARRAY_TYPE,
+                    # The server publishes it reliable and transient-local:
+                    # a late reader gets the newest array at once.
+                    "qos": {
+                        "history": "keep_last",
+                        "depth": 1,
+                        "reliability": "reliable",
+                        "durability": "transient_local",
+                    },
+                }
+            )
+            deadline = time.monotonic() + timeout
+            with self._condition:
+                while self._connected:
+                    statuses = self._status_seen.get(waiter)
+                    if statuses is not None and settled(statuses):
+                        break
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    self._condition.wait(timeout=remaining)
+                return self._status_seen.get(waiter)
+        finally:
+            with self._condition:
+                if self._status_waits.get(topic) == waiter:
+                    self._status_waits.pop(topic, None)
+                self._status_seen.pop(waiter, None)
+            with contextlib.suppress(Exception):
+                self._send({"op": "unsubscribe", "id": waiter, "topic": topic})
 
     def execution_count(self, call_id: str) -> int:
         return self._counts.get(call_id, 0)
@@ -6243,12 +6587,14 @@ class RosbridgeROS2Backend(_ObservationState):
     def reconnect(self) -> None:
         # Goal ids belong to the socket that sent them: every goal still
         # running goes into the hold (with its id and action) before they are
-        # forgotten, so a later halt must cancel it and confirm it ended.
-        self._hold_running_goals()
-        self.disconnect()
-        self._active_actions.clear()
-        self._goal_ids.clear()
-        self._goal_owner.clear()
+        # forgotten, so a later halt must cancel it and confirm it ended. No
+        # goal is sent and recorded in between (``HALT_HOLD.forgetting``).
+        with HALT_HOLD.forgetting():
+            self._hold_running_goals()
+            self.disconnect()
+            self._active_actions.clear()
+            self._goal_ids.clear()
+            self._goal_owner.clear()
         if self._url_source is not None:
             self._url = self._url_source()
         websocket = self._connection_factory(self._url)

@@ -99,8 +99,47 @@ class FeedingCondition(threading.Condition):
 # --- a fake rclpy that refuses to be spun by the caller ---------------------
 
 
+class FakeActionServers:
+    """The action servers a fake rclpy node reaches: cancel services and goal status.
+
+    ``goals`` holds every goal per action name (any client's) with its
+    action_msgs/GoalStatus: 2 EXECUTING, 3 CANCELING, 5 CANCELED. As in
+    rcl_action, a cancel-all (a default CancelGoal request: the zero goal id)
+    moves only ACCEPTED/EXECUTING goals to CANCELING; a CANCELING goal is not
+    cancelable. While ``finishes_cancel`` a server ends its CANCELING goals.
+    A subscription to ``<action>/_action/status`` receives the array at once
+    (the publisher is transient-local) unless ``publishes`` is off.
+    """
+
+    def __init__(self) -> None:
+        self.goals: dict[str, dict[str, int]] = {}
+        self.finishes_cancel = True
+        self.publishes = True
+        self.cancel_alls: list[str] = []
+
+    def cancel_all(self, service: str) -> None:
+        self.cancel_alls.append(service)
+        goals = self.goals.get(service.removesuffix("/_action/cancel_goal"), {})
+        for goal, status in goals.items():
+            if status in (1, 2):
+                goals[goal] = 3
+        if self.finishes_cancel:
+            for goal, status in goals.items():
+                if status == 3:
+                    goals[goal] = 5
+
+    def status(self, action: str):
+        return SimpleNamespace(
+            status_list=[
+                SimpleNamespace(status=status) for status in self.goals.get(action, {}).values()
+            ]
+        )
+
+
 class FakeNode:
     instances: list[FakeNode] = []
+    #: Set by the ``action_servers`` fixture.
+    servers: FakeActionServers | None = None
 
     def __init__(self, _name: str) -> None:
         self.callbacks: dict[str, object] = {}
@@ -119,6 +158,19 @@ class FakeNode:
 
     def create_subscription(self, _type, topic, callback, _qos):
         self.callbacks[topic] = callback
+        servers = FakeNode.servers
+        if servers is not None and servers.publishes and topic.endswith("/_action/status"):
+            callback(servers.status(topic.removesuffix("/_action/status")))
+        return topic
+
+    def destroy_subscription(self, subscription) -> None:
+        self.callbacks.pop(subscription, None)
+
+    def create_client(self, _type, service):
+        servers = FakeNode.servers
+        if servers is None:
+            raise RuntimeError("no action servers in this test")
+        return SimpleNamespace(call_async=lambda _request: servers.cancel_all(service))
 
     def get_topic_names_and_types(self):
         self.graph_reads += 1
@@ -172,6 +224,37 @@ def fake_rclpy(monkeypatch):
     module("tf2_msgs")
     module("tf2_msgs.msg", TFMessage=object)
     return FakeExecutor
+
+
+@pytest.fixture
+def action_servers(fake_rclpy, monkeypatch):
+    """rclpy action servers for halt tests: cancel-all and goal status (see FakeActionServers)."""
+
+    def module(name, **attributes):
+        created = sys.modules.get(name) or types.ModuleType(name)
+        for key, value in attributes.items():
+            setattr(created, key, value)
+        monkeypatch.setitem(sys.modules, name, created)
+
+    class CancelGoal:
+        Request = staticmethod(lambda: SimpleNamespace())
+
+    module("action_msgs")
+    module(
+        "action_msgs.msg",
+        GoalStatusArray=object,
+        GoalStatus=SimpleNamespace(STATUS_SUCCEEDED=4, STATUS_CANCELED=5),
+    )
+    module("action_msgs.srv", CancelGoal=CancelGoal)
+    module(
+        "rclpy.qos",
+        QoSProfile=lambda **kwargs: SimpleNamespace(**kwargs),
+        ReliabilityPolicy=SimpleNamespace(RELIABLE="reliable"),
+        DurabilityPolicy=SimpleNamespace(TRANSIENT_LOCAL="transient_local"),
+    )
+    servers = FakeActionServers()
+    monkeypatch.setattr(FakeNode, "servers", servers)
+    return servers
 
 
 def odometry(x=0.0, *, linear=0.0, angular=0.0):
@@ -842,16 +925,21 @@ class _Handle:
         )
 
 
-def test_a_stop_publishes_first_and_keeps_a_goal_whose_cancel_is_refused(fake_rclpy, clock):
+def test_a_stop_publishes_first_and_keeps_a_goal_whose_cancel_is_refused(
+    fake_rclpy, clock, monkeypatch
+):
     # Was: completed, the goal forgotten after one try. A refused cancel
     # means Nav2 may still drive that goal, so the halt is effect_unknown,
     # the handle is kept, and the next halt cancels it again.
+    monkeypatch.setattr(adapter_module, "CANCEL_CONFIRM_WAIT_S", 0.05)
     backend, _condition = rclpy_backend(clock)
     calls: list[str] = []
     backend._publish_zero = lambda: calls.append("zero") or True
     handle = _Handle(calls)
     backend._goal_handles["old-call"] = handle
-    backend._result_futures["old-call"] = SimpleNamespace(done=lambda: False)
+    backend._result_futures["old-call"] = SimpleNamespace(
+        done=lambda: False, add_done_callback=lambda _callback: None
+    )
 
     result = backend.safe_stop("stop-1")
 

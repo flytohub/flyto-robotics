@@ -550,13 +550,47 @@ def test_a_simulation_with_the_marker_check_disabled_refuses_the_read(
     result = read(adapter)
     assert result.outcome == OUTCOME_REFUSED
     assert cargo_sensor.RESULT_FIELD not in result.evidence
-    reading = result.evidence[cargo_sensor.READING_KEY]
-    assert reading["deployment_mode"] == "unconfirmed"
-    assert reading["reason"] == cargo_sensor.REASON_DEPLOYMENT_UNCONFIRMED
-    assert "FLYTO_ROS2_SIM_MARKER_TOPIC" in result.detail
+    # With the marker check off no deployment has a cargo topic at all.
+    assert cargo_sensor.CAPABILITY_ID not in declared(adapter)
     # Read straight from the backend, the value is never labelled real either.
     direct = adapter.backend.cargo_reading(call_id="cargo-2", deadline_seconds=0.5)
-    assert direct.evidence[cargo_sensor.READING_KEY]["deployment_mode"] == "unconfirmed"
+    assert direct.outcome == OUTCOME_REFUSED
+    assert cargo_sensor.RESULT_FIELD not in direct.evidence
+    reading = direct.evidence[cargo_sensor.READING_KEY]
+    assert reading["deployment_mode"] == "unconfirmed"
+    assert reading["reason"] == cargo_sensor.REASON_NO_TOPIC
+    assert "FLYTO_ROS2_SIM_MARKER_TOPIC" in direct.detail
+
+
+def test_a_hardware_robot_with_the_marker_check_disabled_reads_no_custom_topic(
+    monkeypatch, connect
+):
+    # The twin may publish its simulated tray on any topic a simulation names.
+    # A hardware adapter with the marker check off, pointed at the twin's
+    # endpoint with the same custom topic, would read it labelled real.
+    monkeypatch.setenv("FLYTO_ROS2_DEPLOYMENT_MODE", "hardware")
+    monkeypatch.setenv("FLYTO_ROS2_SIM_MARKER_TOPIC", "")
+    monkeypatch.setenv(cargo_sensor.TOPIC_ENV, SENSOR)
+    monkeypatch.setenv(cargo_sensor.MAX_AGE_ENV, "0.3")
+    adapter, bridge = connect({**ODOM, SENSOR: "std_msgs/msg/Bool"})
+    assert cargo_sensor.CAPABILITY_ID not in declared(adapter)
+    assert SENSOR not in {item["topic"] for item in bridge.subscribed}
+    bridge.publish(SENSOR, {"data": True})
+    result = adapter.backend.cargo_reading(call_id="cargo-1", deadline_seconds=0.1)
+    assert result.outcome == OUTCOME_REFUSED
+    assert cargo_sensor.RESULT_FIELD not in result.evidence
+    assert result.evidence[cargo_sensor.READING_KEY]["reason"] == cargo_sensor.REASON_NO_TOPIC
+
+
+@pytest.mark.parametrize("mode", ["simulation", "real", "unconfirmed"])
+def test_no_deployment_has_a_cargo_topic_with_the_marker_check_disabled(monkeypatch, mode):
+    monkeypatch.setenv(cargo_sensor.TOPIC_ENV, "/tray/loaded")
+    assert cargo_sensor.served_topic(
+        deployment_mode=mode, sim_marker_on_graph=True, marker_check=False
+    ) is None
+    assert cargo_sensor.served_topic(
+        deployment_mode=mode, sim_marker_on_graph=True, marker_check=True
+    ) == "/tray/loaded"
 
 
 def test_a_simulation_with_the_marker_check_disabled_refuses_motion(

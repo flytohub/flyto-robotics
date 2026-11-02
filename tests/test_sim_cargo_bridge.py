@@ -20,6 +20,7 @@ socket. What is pinned:
 from __future__ import annotations
 
 import json
+import math
 import threading
 from pathlib import Path
 
@@ -1011,6 +1012,20 @@ def test_a_sample_is_stamped_when_odometry_received_it_not_when_the_bridge_read_
     link.silent = True
     bridge.tick()
     assert len(handoff.poses._samples) == 1
+
+
+@pytest.mark.parametrize("age", [math.nan, math.inf, -math.inf])
+def test_an_odometry_message_of_unknown_age_is_an_unknown_pose(age):
+    # A NaN age would be recorded at ``now - max(0.0, nan)`` = now: a message
+    # of unknown age counted as a fresh sample at the decision time. An
+    # infinite one would be a sample at -inf. Either is an unknown pose.
+    link = FakeLink()
+    link.age_s = age
+    handoff = CargoHandoff(STATION)
+    bridge = CargoBridge(link=link, handoff=handoff, clock=lambda: 100.0)
+    bridge.tick()
+    assert [xy for _t, xy in handoff.poses._samples] == [None]
+    assert all(math.isfinite(t) for t, _xy in handoff.poses._samples)
 
 
 def test_a_handoff_is_decided_on_odometry_received_after_the_decision_time(tmp_path):
