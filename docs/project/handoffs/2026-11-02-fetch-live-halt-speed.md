@@ -25,6 +25,8 @@ Base `main` 0f283a0. Commits, oldest first:
 - 7babfd7: fifth round (repair round 3, the review of b2da84e), see "What
   changed in the fifth round". This file and the registry row were updated
   in the commit after it.
+- Sixth round (repair of the review of 623a8d6), see "What changed in the
+  sixth round": the code commit and the handoff commit after it.
 
 `claude/fetch-live-sim-bridge` (the rejected second bridge, 7c5947e and
 386f565, never pushed) and its worktree `.claude/worktrees/flyto-robotics-cargo-bridge`
@@ -255,6 +257,8 @@ the `run.py` report hooks, and the `_advertise_once` extraction. Its
 - The duration does not cover a long pause such as Nav2's Wait recovery
   (5 s default). That case is covered by the goal cancels and the held-goal
   end check, not by stillness.
+  Correction (round 6): only for goals this process knows; see "Residual
+  risk, stated plainly" in the sixth round.
 
 ### A reconnect carries every running goal into the hold
 
@@ -340,9 +344,180 @@ the `run.py` report hooks, and the `_advertise_once` extraction. Its
   The function-local `os` / `Path` imports in `safety_profile.py` moved to
   the module imports.
 
+## What changed in the sixth round
+
+The review of 623a8d6 (two reviewers, neither accepted) found a held goal
+reported ended while its server still ran it, a reconnect race that lost a
+goal, a halt that could not run without cancelling the running goals, no
+operator release, and an rclpy reconnect that could wedge the hold. This
+round fixes those.
+
+### A held goal's end is confirmed only from its goal status
+
+- `_ObservationState._held_goal_end` is now one implementation for both
+  backends. It reads `<action>/_action/status` (action_msgs
+  `GoalStatusArray`, reliable, transient-local) until no goal on that
+  action server is ACCEPTED, EXECUTING or CANCELING. Only statuses 4, 5
+  and 6 (`GOAL_ENDED_STATUSES`) count as ended. A malformed array, an
+  entry with no status, a text or bool status reads as UNKNOWN (0), which
+  is live.
+- A cancel response never counts as an end. Per rcl_action a CANCELING
+  goal is not cancelable, so a cancel-all answers "no error, nothing
+  canceling" while the server still drives that goal; round 4's check
+  released the hold on that answer. `CANCEL_GOAL_ENDED_CODES` and
+  `CANCEL_ERROR_NONE` are removed.
+- The backends only supply `_goal_statuses_until`: rosbridge subscribes
+  over its socket, rclpy creates a temporary subscription on its current
+  node.
+- The rclpy `cancel()` confirms a cancel only when the goal's result future
+  completes within `CANCEL_CONFIRM_WAIT_S` (3 s, shared with rosbridge). A
+  non-empty `goals_canceling` is no longer trusted.
+
+### Cancel tokens are (goal id, action name) on both backends
+
+- rclpy records `_goal_actions` when a goal is sent, so its token survives a
+  node rebuild and a host restart (through the kept hold file). A held goal
+  is re-cancelled through its action server's own cancel service with the
+  zero goal id (`_ObservationState._recancel` -> `_cancel_all_goals`:
+  an unawaited `call_service` on rosbridge, a cached `CancelGoal` client on
+  rclpy). `_recancel_held` lists only the cancels actually sent.
+- rclpy reconnect liveness: `disconnect()` destroys the node, and the old
+  code kept goal handles and pending futures that belonged to it, so no
+  later halt could confirm their end. Held goals are now confirmed by
+  action name on the current node, and a test shows a halt releasing the
+  hold after a disconnect followed by a reconnect.
+
+### Reconnect race closed
+
+- Both reconnects hold the running goals and clear their goal tables
+  inside `HALT_HOLD.forgetting()`, which takes the same lock as
+  `sending()`. A goal is either sent and recorded before the hold reads
+  the goals (and is held) or sent afterwards on the new connection.
+
+### A halt that cannot run cancels the running goals
+
+- `hold_unrun_halt` is one module-level function, used by `_halt_not_run`
+  and `_halt_raised`. It arms the hold with the running goals' tokens.
+  Where the connection commands, it also sends the cancel of every running
+  and held goal, then publishes zero and keeps it held: zero alone is not
+  a stop while a goal's controller publishes faster than the hold re-sends
+  zero. The weaker fallback that armed the hold with no goals is removed.
+  It never raises.
+
+### Operator release
+
+- `GenericROS2Adapter.release_hold(operator=..., reason=...)`
+  (`_ObservationState.release_hold`). It needs a non-empty operator and
+  reason, is refused on a presence connection, publishes zero, re-sends the
+  held goals' cancels, and needs fresh odometry showing the robot still.
+  `_HaltHold.operator_release` then appends a JSON line (who, why, what was
+  held, the stillness evidence) to `<hold file stem>.releases.jsonl` and
+  logs it before it clears the hold. If that record cannot be written,
+  nothing is released.
+- It is a Python entry point only. No capability, Cloud route or console
+  button calls it yet.
+- Deleting the kept hold file while the host runs releases nothing: the
+  hold is kept in memory and the file is written again on the next arm.
+  The `_HaltHold` docstring and `.env.example` say so. Without the operator
+  release, the only way out is: stop the host, delete the file, start the
+  host.
+
+### Residual risk, stated plainly
+
+- A halt cancels only goals this process knows: the ones it sent, and the
+  ones in the hold. It does not cancel a goal it never knew: one sent to
+  the same action server by another client, or by a host process that
+  crashed before the hold was armed (running goals reach the kept file
+  only when something arms the hold). If such a goal pauses the robot for
+  at least `STILL_MIN_SECONDS` (0.5 s), as Nav2's Wait recovery does
+  (5 s), a halt completes and releases nothing it does not know about; the
+  goal can then drive again. The fifth round's "a long pause is covered by
+  the goal cancels" was true only for goals this connection knows. The
+  comment at `STILL_MIN_SECONDS` now says so. Not done: a cancel-all plus a
+  status check on every known navigation action server in every halt.
+
+### Design choices the owner should know
+
+- A held goal is confirmed ended by "no live goal on that action server".
+  Another client's goal on the same server therefore also keeps the hold.
+- A held goal is re-cancelled through cancel-all on its action server,
+  which also cancels other clients' goals there.
+- An action server that has never published a status (restarted, no goal
+  since) keeps the hold until an operator releases it.
+
+### Cargo marker rule
+
+- `cargo_sensor.served_topic(..., marker_check=False)` returns None for
+  every deployment. The adapter passes
+  `bool(FLYTO_ROS2_SIM_MARKER_TOPIC)`, so with the simulator marker check
+  disabled no deployment reads any cargo topic, a custom one included.
+  Before, a hardware adapter with the marker check off, pointed at the
+  twin's endpoint with the same custom topic, would read the simulated
+  tray labelled `real`. The refusal detail and `.env.example` say so.
+
+### Naming
+
+- `motion_outcome`'s stall thresholds are renamed `STALL_LINEAR_MPS` /
+  `STALL_ANGULAR_RADPS`, with a comment on why stall evidence (linear x,
+  angular z, looser) differs from halt stillness (every axis and the pose).
+
 ## Verified
 
 All in `.claude/worktrees/flyto-robotics-fetch-live`, nothing pushed.
+
+Sixth round:
+
+- Tests first. The changed test files run against 623a8d6 (a scratch copy
+  of that tip with the new test files) give 21 failed and 28 errors of
+  299. Every `tests/test_halt_hold.py` error is its fixture patching the
+  new `CANCEL_CONFIRM_WAIT_S`; with only that patch made tolerant (in the
+  scratch copy), 14 of its then 28 tests failed. On behaviour: a held goal
+  its server is still CANCELING released (`completed`); held goals
+  released on a cancel answer, or never re-cancelled through
+  `<action>/_action/cancel_goal` (rosbridge reconnect, rclpy statuses
+  1-5); a goal recorded during a rosbridge or an rclpy reconnect not held;
+  an rclpy pending send held as a future, not a token; a restarted rclpy
+  host unable to confirm a kept goal (`failed`); a simulation and a
+  hardware robot with the marker check off read cargo. Only on a missing
+  API: `goal_statuses` / `live_goal_statuses`, `served_topic(marker_check=)`,
+  `_goal_actions`, `release_hold`, and the unrun halt's `reissued_cancels`
+  key (that test fails on the key before it reaches its cancel checks).
+  The two tests added after the mutation run: a held goal with no action
+  name reported among the re-sent cancels fails on behaviour; the release
+  whose zero cannot be published fails on the missing `release_hold`.
+  Passed before (they
+  pin existing guards the reviewers found unpinned): deleting the kept
+  file releases nothing, a halt that raised and a halt with the link gone
+  keep the running goals, a bool twist axis is not still, a NaN or inf
+  odometry age is an unknown pose.
+- Mutation checks: 22 mutants of this round's guards (runner
+  `scratchpad/r6/mutate6.py`, each in a fresh copy of the worktree,
+  targeted suites of 7 test files). 19 killed, 3 survived: the operator
+  and reason check (the test asked without odometry, so stillness refused
+  first), the release's zero-publish check, and `_recancel` treating a
+  token with no action name as sent. Tests were added for each; all three
+  re-run with the full suite: killed. Final: 22/22 killed. The round-5
+  review's survivors (CANCELING counted as ended, the unrun halt's goal
+  tokens, the bool axis, the NaN cargo age) are among the 22.
+- `PYTHONPATH=$PWD make verify PYTHON=<repo>/.venv/bin/python` on the final
+  tree, twice in a row: rc 0 both times, ruff clean, 2204 passed, 20
+  skipped each. (A run before the last three tests were added: rc 0,
+  2202 passed, 20 skipped.)
+- `flyto-index verify --strict` in the worktree: rc 0, Status PASS, 20
+  pass, 0 warn, 0 fail.
+- Indexer: CLI `context` on the held-goal end / unrun-halt path before
+  this round's last edits (the index answers from committed code; the
+  worktree changes were uncommitted). MCP `task(plan)` / `task(validate)`
+  not used (the MCP server is pinned to another root).
+- This repo has no project-memory lint target; none was run.
+- Not run: anything against Gazebo, the live twin, rosbridge on 19090 or
+  the robot; the MuJoCo-backed suites. The rcl semantics (a CANCELING goal
+  is not cancelable, cancel-all answers) come from the ros2/rcl humble
+  sources via the reviewers, not from a live server. The rosbridge status
+  subscription sends a `qos` field; whether rosbridge honours it, or picks
+  transient-local itself from the publisher, is not checked live. Whether
+  Nav2 publishes an empty or all-terminal status array once its goals end
+  or expire is likewise taken from the sources, not observed.
 
 Fifth round (7babfd7):
 
@@ -381,7 +556,10 @@ Fifth round (7babfd7):
   explicit-topic check and `publish_simulated_state`'s topic restriction.
   Earlier rounds' guards were not re-mutated.
 - `PYTHONPATH=$PWD make verify PYTHON=<repo>/.venv/bin/python`: rc 0, ruff
-  clean, 2170 passed, 20 skipped (one run).
+  clean, 2170 passed, 20 skipped (one run). Note (round 6): the round-5
+  reviewers ran it twice more at 623a8d6 with a clean worktree, rc 0 both
+  times, ruff clean, 2170 passed, 20 skipped; the two green runs the
+  verification rule asks for are theirs, not this lane's.
 - `flyto-index verify --strict` in the worktree: rc 0, Status PASS, 20
   pass, 0 warn, 0 fail.
 - Indexer: CLI `impact` on `_served_deployment_mode` and `context` on the
@@ -508,6 +686,7 @@ counts) are superseded by the above; the round-2 counts were incomplete
   `STILL_MIN_SECONDS` does not cover a pause longer than 0.5 s such as
   Nav2's Wait recovery; that case relies on the cancels and the held-goal
   end check.
+  (Round 6: a goal this process never knew is not covered at all.)
 - The cargo bridge's receive-time sampling assumes the bridge and the
   backend share one host clock (`time.monotonic` age converted at the
   bridge's wall clock); tested with fakes only.
@@ -523,10 +702,16 @@ counts) are superseded by the above; the round-2 counts were incomplete
   otherwise the hold is never released by a halt). The cancel-all also
   cancels goals another client sent to that action server; that is
   intended for a halt, but not discussed with the owner.
-- Liveness cost (round 4): a held goal with no confirmable end (a
-  restarted rclpy host, a rosbridge token with no action name, an action
-  server that never answers) now keeps the robot held until an operator
-  removes the kept hold file; there is still no operator release.
+- Liveness cost (round 4), corrected in round 6: a held goal with no
+  confirmable end (a token with no action name, an action server that
+  never publishes its goal status) keeps the robot held until a halt can
+  confirm it or an operator releases it (`release_hold`, round 6). The
+  round-4 text said an operator could remove the kept hold file. That was
+  wrong: deleting the file while the host runs releases nothing (the hold
+  is kept in memory and the file is written again). Without the operator
+  release, the procedure is: stop the host, delete the file, start the
+  host. A restarted rclpy host no longer has this problem (round 6: its
+  held goals carry their action name).
 - `make verify` flake (reported by the reviewers, not reproduced here):
   `tests/test_managed_transport_adapter.py::test_status_reports_state_since_attempts_and_last_error`
   timed out once ("condition not reached" after 3 s) in one of the
@@ -552,8 +737,8 @@ counts) are superseded by the above; the round-2 counts were incomplete
 
 ## Follow-ups
 
-- Decide whether an operator release is wanted; today only a halt seen
-  still releases the hold (now also across a restart).
+- Operator release: added in round 6 (`release_hold`). Not yet wired to
+  a Cloud or console action; the owner decides who may call it and where.
 - Check the cancel-all confirmation against the live twin's rosbridge and
   Nav2 before relying on a release after a reconnect.
 - Look at the managed-transport timing flake on `main`.
