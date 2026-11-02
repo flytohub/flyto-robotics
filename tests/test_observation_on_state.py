@@ -12,6 +12,7 @@ would advance the fake clock instead, and a sleep or spin raises.
 from __future__ import annotations
 
 import json
+import math
 import queue
 import sys
 import threading
@@ -309,15 +310,17 @@ def test_a_safe_stop_never_waits_for_discovery(fake_rclpy, clock, monkeypatch):
         now=lambda: SimpleNamespace(to_msg=lambda: None)
     )
 
-    # The halt is completed on the odometry that shows the robot still; it
-    # never waits on discovery or a timer for it.
-    condition.feed = [lambda: backend._on_odometry(odometry(0.1))] * 3
+    # The halt is completed on the odometry that shows the robot still for
+    # STILL_MIN_SECONDS; it never waits on discovery or a timer for it.
+    condition.feed = [lambda: backend._on_odometry(odometry(0.1))] * 40
 
     result = backend.safe_stop("stop-1")
 
     assert result.outcome == "completed"
     assert len(published) == 1
-    assert condition.timed_out == 0 and condition.delivered == 3
+    assert condition.timed_out == 0
+    needed = adapter_module.STILL_MIN_SECONDS / ODOM_PERIOD + 1
+    assert needed <= condition.delivered <= needed + 1
 
 
 def test_a_goal_future_is_awaited_by_its_done_callback(fake_rclpy, clock):
@@ -426,20 +429,19 @@ def test_the_preflight_asks_only_for_what_navigation_needs(fake_rclpy, clock):
 def test_stationary_returns_on_consecutive_still_odometry(fake_rclpy, clock):
     backend, condition = rclpy_backend(clock)
     backend._on_odometry(odometry(0.10, linear=0.12))
-    condition.feed = [
-        lambda: backend._on_odometry(odometry(0.104, linear=0.08)),
-        lambda: backend._on_odometry(odometry(0.105, linear=0.0)),
-        lambda: backend._on_odometry(odometry(0.105, linear=0.0)),
-        lambda: backend._on_odometry(odometry(0.105, linear=0.0)),
-        lambda: pytest.fail("waited past the samples that showed it stopped"),
-    ]
+    # Still from the second message on, for STILL_MIN_SECONDS of odometry.
+    needed = math.ceil(adapter_module.STILL_MIN_SECONDS / ODOM_PERIOD - 1e-9) + 1
+    condition.feed = [lambda: backend._on_odometry(odometry(0.104, linear=0.08))] + [
+        (lambda: backend._on_odometry(odometry(0.105, linear=0.0))) for _ in range(needed)
+    ] + [lambda: pytest.fail("waited past the samples that showed it stopped")]
 
     settled = backend.wait_until_stationary(1.0)
 
     assert settled["stationary"] is True and settled["drifting"] is False
-    assert settled["still_samples"] == 3
-    assert condition.delivered == 4 and condition.timed_out == 0
-    assert settled["waited_seconds"] == pytest.approx(4 * ODOM_PERIOD)
+    assert settled["still_samples"] == needed
+    assert settled["still_seconds"] >= adapter_module.STILL_MIN_SECONDS
+    assert condition.delivered == needed + 1 and condition.timed_out == 0
+    assert settled["waited_seconds"] == pytest.approx((needed + 1) * ODOM_PERIOD)
     assert settled["waited_seconds"] < 1.0
 
 
@@ -461,7 +463,7 @@ def test_a_robot_still_moving_at_the_cap_is_reported_drifting(fake_rclpy, clock)
     assert condition.feed
 
 
-def test_stationary_judges_pose_when_odometry_carries_no_twist(clock):
+def test_odometry_that_carries_no_twist_is_never_stationary(clock):
     backend = quiet_backend()
     condition = FeedingCondition(clock)
     backend._condition = condition
@@ -469,18 +471,17 @@ def test_stationary_judges_pose_when_odometry_carries_no_twist(clock):
     def pose_only(x):
         return {"pose": {"pose": {"position": {"x": x, "y": 0.0}, "orientation": {"w": 1.0}}}}
 
+    # Was: judged on the pose alone. A twist that is not there is unknown, so
+    # the pose cannot show every axis still (review round 5).
     backend._update_odometry(pose_only(0.10), clock.now)
     condition.feed = [
-        lambda: backend._update_odometry(pose_only(0.12), clock.now),
-        lambda: backend._update_odometry(pose_only(0.1205), clock.now),
-        lambda: backend._update_odometry(pose_only(0.1205), clock.now),
-        lambda: backend._update_odometry(pose_only(0.1206), clock.now),
+        (lambda: backend._update_odometry(pose_only(0.1205), clock.now)) for _ in range(40)
     ]
 
     settled = backend.wait_until_stationary(1.0)
 
-    assert settled["stationary"] is True
-    assert condition.delivered == 4 and condition.timed_out == 0
+    assert settled["stationary"] is False
+    assert settled["unknown_twist_messages"] == settled["odometry_messages"] > 3
     backend.disconnect()
 
 
@@ -488,7 +489,7 @@ def test_the_adapter_exposes_the_settle_wait_for_the_host(fake_rclpy, clock):
     backend, condition = rclpy_backend(clock)
     adapter = GenericROS2Adapter(backend=backend, resource_id="robot")
     backend._on_odometry(odometry(linear=0.0))
-    condition.feed = [lambda: backend._on_odometry(odometry(linear=0.0)) for _ in range(3)]
+    condition.feed = [lambda: backend._on_odometry(odometry(linear=0.0)) for _ in range(40)]
 
     assert adapter.wait_until_stationary(1.0)["stationary"] is True
     assert adapter.supports_shared_connection is True

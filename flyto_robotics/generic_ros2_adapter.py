@@ -105,14 +105,25 @@ REQUIRE_POSE = "pose"
 REQUIRE_RANGE = "range"
 REQUIRE_MAP_TF = "map_tf"
 
-# A robot is stationary once this many consecutive odometry messages report
-# speeds this close to zero. A TurtleBot3 publishes odometry at about 30 Hz,
-# so a robot that has stopped is recognised in about 0.1 s.
+# A robot is stationary once odometry shows it still on BOTH counts, over at
+# least STILL_SAMPLES consecutive messages spanning at least STILL_MIN_SECONDS
+# of their receive times:
+# * the twist: every axis (linear x/y/z, angular x/y/z) present and this
+#   close to zero. A missing or non-numeric axis is unknown, never 0, so a
+#   driver that fills no twist can never show the robot still;
+# * the pose: within STILL_POSE_DELTA_M / STILL_YAW_DELTA_RAD of where the
+#   still run began, so a driver whose twist reads zero while the pose moves
+#   (or a slow creep) is not still.
+# The duration keeps a momentary pause (a speed reversal, the start of a
+# rotate) from passing as a stop: at 30-50 Hz three messages are under
+# 0.1 s. It does not cover a long pause such as Nav2's Wait recovery; a halt
+# therefore also cancels every goal and confirms held goals ended.
 STILL_SAMPLES = 3
+STILL_MIN_SECONDS = 0.5
 STILL_LINEAR_MPS = 0.01
 STILL_ANGULAR_RADPS = 0.02
-# motion.halt with a goal running is completed only once odometry shows the
-# robot still, within this long after the cancel was confirmed.
+# motion.halt is completed only once odometry shows the robot still (as
+# above), within this long after the cancel was confirmed.
 HALT_STILL_WAIT_S = 2.0
 # While a halted goal's cancel is unconfirmed, zero velocity is re-sent this
 # often, so the action server's last command never stands.
@@ -131,7 +142,7 @@ REASON_EFFECT_UNKNOWN = "effect_unknown"
 # Per-call results and execution counts kept for idempotent retries of the
 # same call_id. A warm adapter lives as long as its host, so this is bounded.
 CALL_HISTORY_LIMIT = 256
-# For a driver whose odometry carries no twist: movement between two messages.
+# How far the pose may move across a still run (see STILL_SAMPLES).
 STILL_POSE_DELTA_M = 0.002
 STILL_YAW_DELTA_RAD = 0.01
 # A reading after this long without one means the robot came back (it was
@@ -438,6 +449,63 @@ def _command_watch_topics() -> tuple[str, ...]:
 
 #: Watched velocity topics are sampled at most this often (ms) by rosbridge.
 COMMAND_WATCH_THROTTLE_MS = 100
+
+
+#: An odometry twist, axis by axis: linear x, y, z, then angular x, y, z.
+#: An axis the message did not carry (or not as a finite number) is None.
+TwistAxes = tuple[
+    float | None, float | None, float | None, float | None, float | None, float | None
+]
+
+
+def _axis(vector: Any, name: str) -> float | None:
+    raw = vector.get(name) if isinstance(vector, Mapping) else getattr(vector, name, None)
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        return None
+    value = float(raw)
+    return value if math.isfinite(value) else None
+
+
+def odometry_twist_axes(twist: Any) -> TwistAxes | None:
+    """Every axis of an odometry twist (a rosbridge dict or an rclpy message).
+
+    None when there is no twist at all. A missing or non-numeric axis is None:
+    unknown, never taken as 0.
+    """
+    if twist is None:
+        return None
+    if isinstance(twist, Mapping):
+        linear, angular = twist.get("linear"), twist.get("angular")
+    else:
+        linear, angular = getattr(twist, "linear", None), getattr(twist, "angular", None)
+    if linear is None and angular is None:
+        return None
+    return (
+        _axis(linear, "x"),
+        _axis(linear, "y"),
+        _axis(linear, "z"),
+        _axis(angular, "x"),
+        _axis(angular, "y"),
+        _axis(angular, "z"),
+    )
+
+
+def _twist_still(axes: TwistAxes | None) -> bool:
+    """Every axis known and near zero; anything unknown is not still."""
+    if axes is None or any(value is None for value in axes):
+        return False
+    return all(abs(value) <= STILL_LINEAR_MPS for value in axes[:3]) and all(  # type: ignore[arg-type]
+        abs(value) <= STILL_ANGULAR_RADPS for value in axes[3:]  # type: ignore[arg-type]
+    )
+
+
+def _pose_within(anchor: Mapping[str, Any], pose: Mapping[str, Any]) -> bool:
+    """The pose is still where ``anchor`` was (position and heading)."""
+    moved = math.hypot(
+        float(pose["x"]) - float(anchor["x"]), float(pose["y"]) - float(anchor["y"])
+    )
+    turned = abs(math.remainder(float(pose["yaw"]) - float(anchor["yaw"]), math.tau))
+    return moved <= STILL_POSE_DELTA_M and turned <= STILL_YAW_DELTA_RAD
 
 
 def _twist_command(message: Any) -> tuple[float, float] | None:
@@ -1060,7 +1128,9 @@ class _ObservationState:
         self._connection_listeners: list[Callable[[bool], None]] = []
         self._pose: dict[str, float | str] | None = None
         self._pose_seen_at: float | None = None
-        # (linear x, angular z) from the odometry twist, or None if absent.
+        # The odometry twist, every axis (None for an axis not carried).
+        self._twist_axes: TwistAxes | None = None
+        # (linear x, angular z) from the odometry twist, or None unless both known.
         self._velocity: tuple[float, float] | None = None
         self._odom_sequence = 0
         self._minimum_range: float | None = None
@@ -1586,12 +1656,18 @@ class _ObservationState:
     def _store_odometry(
         self,
         pose: dict[str, float | str],
-        velocity: tuple[float, float] | None,
+        twist: TwistAxes | None,
         observed: float,
     ) -> None:
+        velocity = (
+            (twist[0], twist[5])
+            if twist is not None and twist[0] is not None and twist[5] is not None
+            else None
+        )
         with self._condition:
             self._pose = pose
-            self._velocity = velocity
+            self._twist_axes = twist
+            self._velocity = velocity  # type: ignore[assignment]
             self._pose_seen_at = observed
             self._odom_sequence += 1
             for track in self._motion_tracks.values():
@@ -1609,6 +1685,7 @@ class _ObservationState:
         with self._condition:
             self._pose_seen_at = None
             self._velocity = None
+            self._twist_axes = None
             self._battery_seen_at = None
             self._battery = None
             self._range_seen_at = None
@@ -1702,6 +1779,23 @@ class _ObservationState:
                 self._condition.wait(timeout=remaining)
             return self._snapshot()
 
+    def latest_odometry(self) -> dict[str, Any] | None:
+        """The newest odometry message on this connection, without waiting.
+
+        ``{"pose", "sequence", "age_s"}``: the pose, the message's number on
+        this backend (it only ever grows, so an unchanged number means no new
+        message), and how long ago this host received it. None before the
+        first message on this connection or after a drop.
+        """
+        with self._condition:
+            if self._pose is None or self._pose_seen_at is None:
+                return None
+            return {
+                "pose": dict(self._pose),
+                "sequence": self._odom_sequence,
+                "age_s": max(0.0, time.monotonic() - self._pose_seen_at),
+            }
+
     def held_observation(self) -> dict[str, Any]:
         """The readings held now, without waiting for any.
 
@@ -1760,39 +1854,35 @@ class _ObservationState:
             "map_tf_available": fresh(self._map_tf_seen_at),
         }
 
-    def _still(self, previous: Mapping[str, Any] | None) -> bool:
-        if self._velocity is not None:
-            linear, angular = self._velocity
-            return abs(linear) <= STILL_LINEAR_MPS and abs(angular) <= STILL_ANGULAR_RADPS
-        if previous is None or self._pose is None:
-            return False
-        moved = math.hypot(
-            float(self._pose["x"]) - float(previous["x"]),
-            float(self._pose["y"]) - float(previous["y"]),
-        )
-        turned = abs(
-            math.remainder(float(self._pose["yaw"]) - float(previous["yaw"]), math.tau)
-        )
-        return moved <= STILL_POSE_DELTA_M and turned <= STILL_YAW_DELTA_RAD
-
     def wait_until_stationary(
-        self, max_seconds: float = 1.0, *, samples: int = STILL_SAMPLES
+        self,
+        max_seconds: float = 1.0,
+        *,
+        samples: int = STILL_SAMPLES,
+        min_seconds: float | None = None,
     ) -> dict[str, Any]:
-        """Return once ``samples`` consecutive odometry messages show no motion.
+        """Return once odometry shows the robot still (see ``STILL_SAMPLES``).
 
-        Each odometry callback re-judges the robot, so a robot that has stopped
-        is recognised on the messages that say so. ``max_seconds`` is only the
-        cap: a robot still moving then is reported as drifting, not waited for.
+        Only odometry received after the call counts. A run of still messages
+        (full twist near zero, pose within the deltas of the run's first
+        message) is stationary once it has ``samples`` messages spanning
+        ``min_seconds`` (default ``STILL_MIN_SECONDS``) of receive time. A
+        message that is not still ends the run. ``max_seconds`` is only the
+        cap: a robot not shown still by then is reported as drifting.
         """
         needed = max(1, int(samples))
+        span = STILL_MIN_SECONDS if min_seconds is None else max(0.0, float(min_seconds))
         started = time.monotonic()
         deadline = started + max(0.0, float(max_seconds))
         still = 0
+        still_for = 0.0
         messages = 0
+        unknown_twist = 0
+        anchor: dict[str, Any] | None = None
+        anchor_at = 0.0
         with self._condition:
             seen = self._odom_sequence
-            previous = dict(self._pose) if self._pose is not None else None
-            while still < needed and self._connected:
+            while self._connected and not (still >= needed and still_for >= span):
                 if self._odom_sequence == seen:
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
@@ -1801,16 +1891,31 @@ class _ObservationState:
                     continue
                 messages += self._odom_sequence - seen
                 seen = self._odom_sequence
-                still = still + 1 if self._still(previous) else 0
-                previous = dict(self._pose) if self._pose is not None else None
-        stationary = still >= needed
+                pose, at = self._pose, self._pose_seen_at
+                twist = self._twist_axes
+                if twist is None or any(value is None for value in twist):
+                    unknown_twist += 1
+                if pose is None or at is None or not _twist_still(twist):
+                    still, still_for, anchor = 0, 0.0, None
+                    continue
+                if anchor is None or not _pose_within(anchor, pose):
+                    # A new still run starts here; one that moved is not still.
+                    anchor, anchor_at, still, still_for = dict(pose), at, 1, 0.0
+                    continue
+                still += 1
+                still_for = at - anchor_at
+        stationary = still >= needed and still_for >= span
         return {
             "stationary": stationary,
             "drifting": not stationary,
             "still_samples": still,
+            "still_seconds": round(still_for, 3),
+            "min_still_seconds": span,
             # Odometry messages received during the wait: 0 means the robot
             # was not observed at all, which is never taken as still.
             "odometry_messages": messages,
+            # Messages whose twist lacked an axis: never still, whatever the pose.
+            "unknown_twist_messages": unknown_twist,
             "waited_seconds": round(time.monotonic() - started, 3),
         }
 
@@ -1868,9 +1973,11 @@ class _ObservationState:
         """Stop the base, and say ``completed`` only when the robot is seen still.
 
         Completed means every running goal's cancel was confirmed (or the goal
-        ended), zero velocity was published, and fresh odometry then shows the
-        robot still. No goal being tracked is not enough: the adapter may have
-        lost a goal on a reconnect, and something else may drive the base.
+        ended), zero velocity was published, fresh odometry then shows the
+        robot still (full twist and pose, for ``STILL_MIN_SECONDS``), and
+        every goal in the hold (from an earlier connection: a reconnect
+        carries running goals into it) is confirmed ended by its server. No
+        goal being tracked is not enough: something else may drive the base.
         Anything less is ``failed`` with the typed reason ``effect_unknown``
         and arms ``HALT_HOLD``: a goal whose cancel was refused or went
         unanswered keeps its handle, zero velocity is re-sent, and motion is
@@ -1890,16 +1997,70 @@ class _ObservationState:
     ) -> CallResult:
         """A halt that raised: ``effect_unknown``, the hold armed, zero held."""
         why = f"the halt raised {type(error).__name__}: {error}"[:200]
+        return self.hold_unrun_halt(call_id, why, evidence, confirmation={"error": why})
+
+    def hold_unrun_halt(
+        self,
+        call_id: str,
+        why: str,
+        evidence: Mapping[str, Any] | None = None,
+        *,
+        confirmation: Mapping[str, Any] | None = None,
+    ) -> CallResult:
+        """A halt that could not run (or raised): hold, keep zero going, ``effect_unknown``.
+
+        The hold is armed with every running goal's cancel token, zero is
+        published once and then held where this connection can publish (a
+        presence connection never does, a dropped one resumes it on
+        reconnect). The caller runs it inside ``HALT_HOLD.halting()``, so a
+        new halt epoch starts too. Never raises.
+        """
         goals: dict[str, Any] = {}
         with contextlib.suppress(Exception):
             goals = {goal: self._cancel_token(goal) for goal in self._active_goal_ids()}
         HALT_HOLD.arm(why, goals)
-        with contextlib.suppress(Exception):
-            self._hold_zero()
-        confirmation = {"error": why, "zero_velocity_held": True, "hold": HALT_HOLD.snapshot()}
+        published = False
+        if not getattr(self, "_presence_only", False):
+            published = self._zero_published()
+            with contextlib.suppress(Exception):
+                self._hold_zero()
+        held = {
+            **dict(confirmation or {}),
+            "zero_velocity_held": published,
+            "hold": HALT_HOLD.snapshot(),
+        }
         return self._halt_unconfirmed(
-            call_id, {"adapter": "generic_ros2", **evidence}, confirmation, why
+            call_id,
+            {
+                "adapter": "generic_ros2",
+                **dict(evidence or {}),
+                "zero_velocity_published": published,
+            },
+            held,
+            why,
         )
+
+    def _running_goal_ids(self) -> list[str]:
+        """Goals this connection sent that may still run (sent, accepted, not ended)."""
+        return [goal for goal in self._active_goal_ids() if self._goal_active(goal)]
+
+    def _hold_running_goals(self) -> None:
+        """Before a reconnect forgets this connection's goals: hold every running one.
+
+        Its goal ids (rosbridge) or handles (rclpy) are about to be dropped, so
+        a later halt would not see the goal at all. The hold keeps each one
+        with its cancel token: the reconnect re-sends the cancel, motion is
+        refused, and only a halt that sees the robot still AND confirms the
+        goal ended (``_held_goal_end``) releases it. Never raises.
+        """
+        tokens: dict[str, Any] = {}
+        with contextlib.suppress(Exception):
+            tokens = {goal: self._cancel_token(goal) for goal in self._running_goal_ids()}
+        if tokens:
+            HALT_HOLD.arm(
+                "a reconnect dropped goals still running: " + ", ".join(sorted(tokens)),
+                tokens,
+            )
 
     def _halt_in_epoch(self, call_id: str, evidence: Mapping[str, Any]) -> CallResult:
         # Zero velocity goes out first, so the stop never waits behind a cancel.
@@ -2741,13 +2902,12 @@ class GenericROS2Adapter:
         ``simulation`` or ``real``, as in this adapter's discovery manifest.
         """
         resource_id = configured_resource_id()
-        mode = _configured_deployment_mode()
         marker = _simulation_marker_topic()
         if not marker:
             unmarked = _unmarked_simulation_refusal()
             if unmarked is not None:
                 raise ServedIdentityError(unmarked)
-            return {"resource_id": resource_id, "deployment_mode": "real"}
+            return {"resource_id": resource_id, "deployment_mode": _served_deployment_mode()}
         # Read the graph as it is now: the robot behind this endpoint may have
         # been swapped for its simulator (or back) since discovery cached it.
         self._invalidate_discovery()
@@ -2760,10 +2920,7 @@ class GenericROS2Adapter:
         mismatch = self._deployment_mismatch_in(interfaces, marker)
         if mismatch is not None:
             raise ServedIdentityError(mismatch)
-        return {
-            "resource_id": resource_id,
-            "deployment_mode": "simulation" if mode == "simulation" else "real",
-        }
+        return {"resource_id": resource_id, "deployment_mode": _served_deployment_mode()}
 
     @staticmethod
     def _deployment_mismatch_in(
@@ -2784,6 +2941,8 @@ class GenericROS2Adapter:
         return None
 
     def invoke(self, request: CallRequest) -> CallResult:
+        if request.capability_id == "motion.halt":
+            return self._invoke_halt(request)
         if getattr(self.backend, "_presence_only", False):
             return CallResult(
                 request.call_id,
@@ -2803,6 +2962,76 @@ class GenericROS2Adapter:
         finally:
             self._gate.end(token)
 
+    # -- motion.halt: it runs, or it holds ----------------------------------------
+
+    def _invoke_halt(self, request: CallRequest) -> CallResult:
+        """``motion.halt``: run the halt, or hold the robot when it cannot run.
+
+        A halt is never refused, timed out or turned away like a motion. When
+        it cannot run (a presence connection, the link down, an operator
+        refresh in progress, ``motion.halt`` not on the graph, no time left)
+        it ends ``failed`` / ``effect_unknown`` with the hold armed, a new halt
+        epoch started (``_halt_not_run``), and zero velocity published and
+        held wherever this connection can. Its arguments are not read: a
+        stop takes none.
+        """
+        call_id = request.call_id
+        if getattr(self.backend, "_presence_only", False):
+            return self._halt_not_run(call_id, "a presence connection never commands the robot")
+        unavailable = self._link_unavailable(call_id)
+        if unavailable is not None:
+            return self._halt_not_run(
+                call_id,
+                f"the link to the robot is unavailable: {unavailable.detail}",
+                {"transport_unavailable": True, **dict(unavailable.evidence or {})},
+            )
+        token = (self, call_id)
+        if not self._gate.begin(token, actuating=False):
+            return self._halt_not_run(
+                call_id, "the connection is being refreshed by an operator"
+            )
+        try:
+            if "motion.halt" not in self._declared:
+                # cmd_vel may have appeared since the graph was last read.
+                self._invalidate_discovery()
+                with contextlib.suppress(Exception):
+                    self.describe()
+            if "motion.halt" not in self._declared:
+                return self._halt_not_run(
+                    call_id, "motion.halt (the standard cmd_vel) is not present on the ROS 2 graph"
+                )
+            if request.deadline_seconds <= 0:
+                return self._halt_not_run(call_id, "no time to run the halt")
+            with HALT_HOLD.halting():
+                return self.backend.safe_stop(call_id)
+        finally:
+            self._gate.end(token)
+
+    def _halt_not_run(
+        self, call_id: str, why: str, evidence: Mapping[str, Any] | None = None
+    ) -> CallResult:
+        """A halt that could not run: a new epoch, the hold armed, zero where it can go.
+
+        Nothing admitted before it is ever sent; motion is refused until a
+        halt sees the robot still. The backend publishes and holds zero when
+        its connection can (``hold_unrun_halt``); a backend without that
+        still arms the hold here.
+        """
+        with HALT_HOLD.halting():
+            hold = getattr(self.backend, "hold_unrun_halt", None)
+            if callable(hold):
+                try:
+                    return hold(call_id, why, evidence)
+                except Exception as error:  # noqa: BLE001 - the hold below still applies
+                    why = f"{why}; holding raised {type(error).__name__}: {error}"
+            HALT_HOLD.arm(why, {})
+            return _ObservationState._halt_unconfirmed(
+                call_id,
+                {"adapter": "generic_ros2", **dict(evidence or {})},
+                {"hold": HALT_HOLD.snapshot()},
+                why,
+            )
+
     def _invoke(self, request: CallRequest) -> CallResult:
         if request.capability_id not in self._declared:
             # A capability the graph did not have before may have appeared
@@ -2817,9 +3046,9 @@ class GenericROS2Adapter:
             )
         if request.deadline_seconds <= 0:
             return CallResult(request.call_id, OUTCOME_TIMEOUT, detail="no time to run")
-        if request.capability_id != "motion.halt":
-            # Admitted now: a halt from here on ends this call before it moves.
-            HALT_HOLD.admit(request.call_id)
+        # Admitted now: a halt from here on ends this call before it moves.
+        # (motion.halt never comes here: ``_invoke_halt``.)
+        HALT_HOLD.admit(request.call_id)
         try:
             arguments = _numeric_arguments(request.capability_id, request.arguments)
         except ValueError as error:
@@ -2855,7 +3084,7 @@ class GenericROS2Adapter:
                 )
             )
         supervised = _safety_basis() == SAFETY_BASIS_OPERATOR
-        if supervised and request.capability_id != "motion.halt":
+        if supervised:
             arguments, bound_error = _supervised_arguments(request.capability_id, arguments)
             if bound_error is not None:
                 return CallResult(request.call_id, OUTCOME_REFUSED, detail=bound_error)
@@ -2873,9 +3102,6 @@ class GenericROS2Adapter:
                 OUTCOME_REFUSED,
                 detail=preflight_error,
             )
-        if request.capability_id == "motion.halt":
-            with HALT_HOLD.halting():
-                return self.backend.safe_stop(request.call_id)
         kept = self._provided.get(request.call_id)
         if kept is not None:
             # The same call again: its result, not a second motion's evidence.
@@ -3495,10 +3721,15 @@ class GenericROS2Adapter:
         return self.backend.cancel(call_id)
 
     def safe_stop(self) -> CallResult:
+        """The host's stop: a halt that never fails open (see ``_invoke_halt``)."""
         call_id = f"safe-stop-{time.monotonic_ns()}"
         down = self._transport_down(call_id)
         if down is not None:
-            return down
+            return self._halt_not_run(
+                call_id,
+                f"the link to the robot is unavailable: {down.detail}",
+                {"transport_unavailable": True, **dict(down.evidence or {})},
+            )
         with HALT_HOLD.halting():
             return self.backend.safe_stop(call_id)
 
@@ -3861,6 +4092,10 @@ class RclpyROS2Backend(_ObservationState):
         self._action_clients: dict[str, Any] = {}
         self._node: Any | None = None
         self._create_node()
+        # Like a rosbridge connection: a host that starts held (a kept hold
+        # file, or another connection's hold) sends zero and holds it now.
+        if self.is_connected():
+            self._resume_hold()
 
     def _create_node(self) -> None:
         """A node with the standard observation subscriptions."""
@@ -4072,10 +4307,7 @@ class RclpyROS2Backend(_ObservationState):
             2.0 * (orientation.w * orientation.z + orientation.x * orientation.y),
             1.0 - 2.0 * (orientation.y * orientation.y + orientation.z * orientation.z),
         )
-        twist = getattr(getattr(message, "twist", None), "twist", None)
-        velocity = (
-            (float(twist.linear.x), float(twist.angular.z)) if twist is not None else None
-        )
+        twist = odometry_twist_axes(getattr(getattr(message, "twist", None), "twist", None))
         self._store_odometry(
             {
                 "frame": "odom",
@@ -4083,7 +4315,7 @@ class RclpyROS2Backend(_ObservationState):
                 "y": float(message.pose.pose.position.y),
                 "yaw": float(yaw),
             },
-            velocity,
+            twist,
             time.monotonic(),
         )
 
@@ -4600,6 +4832,14 @@ class RclpyROS2Backend(_ObservationState):
         future = self._result_futures.get(call_id)
         return call_id in self._goal_handles and not (future is not None and future.done())
 
+    def _running_goal_ids(self) -> list[str]:
+        # A goal sent and not yet answered may be accepted after the reconnect.
+        return [
+            goal
+            for goal in self._active_goal_ids()
+            if goal in self._pending_goals or self._goal_active(goal)
+        ]
+
     def _cancel_for_halt(self, call_id: str) -> str | None:
         started = self._pending_goals.get(call_id)
         if call_id not in self._goal_handles and started is not None:
@@ -4674,9 +4914,11 @@ class RclpyROS2Backend(_ObservationState):
         self._stop_graph_events()
 
     def reconnect(self) -> None:
+        # Goals sent before the drop are no longer followed by this executor:
+        # every one still running goes into the hold before it is forgotten.
+        self._hold_running_goals()
         self._stop_executor()
         self._reset_readings()
-        # Goals sent before the drop are no longer followed by this executor.
         self._goal_handles.clear()
         self._result_futures.clear()
         self._pending_goals.clear()
@@ -4904,17 +5146,10 @@ class RosbridgeROS2Backend(_ObservationState):
         )
 
     @staticmethod
-    def _twist(message: Mapping[str, Any]) -> tuple[float, float] | None:
+    def _twist(message: Mapping[str, Any]) -> TwistAxes | None:
         outer = message.get("twist")
         twist = outer.get("twist") if isinstance(outer, Mapping) else None
-        linear = twist.get("linear") if isinstance(twist, Mapping) else None
-        angular = twist.get("angular") if isinstance(twist, Mapping) else None
-        if not isinstance(linear, Mapping) or not isinstance(angular, Mapping):
-            return None
-        try:
-            return float(linear.get("x", 0.0)), float(angular.get("z", 0.0))
-        except (TypeError, ValueError):
-            return None
+        return odometry_twist_axes(twist) if isinstance(twist, Mapping) else None
 
     def _update_scan(self, message: Mapping[str, Any], observed: float) -> None:
         ranges = message.get("ranges")
@@ -5141,14 +5376,11 @@ class RosbridgeROS2Backend(_ObservationState):
         )
 
     def _cargo_subscription_topic(self) -> str | None:
-        """The topic this connection listens to for cargo: configured, or the
-        shared one when it serves a simulation (the graph decides later)."""
-        explicit = cargo_sensor.configured_topic()
-        if explicit is not None:
-            return explicit
-        if _served_deployment_mode() == "simulation":
-            return cargo_sensor.CONVENTIONAL_TOPIC
-        return None
+        """The topic this connection listens to for cargo: ``served_topic`` with
+        the marker assumed present (the graph decides the read later)."""
+        return cargo_sensor.served_topic(
+            deployment_mode=_served_deployment_mode(), sim_marker_on_graph=True
+        )
 
     def cargo_topic(self) -> str | None:
         """The cargo topic this robot answers on, or None (``served_topic``)."""
@@ -5806,7 +6038,7 @@ class RosbridgeROS2Backend(_ObservationState):
         self._advertised_topics.add(key)
 
     def publish_simulated_state(self, topic: str, value: bool) -> None:
-        """SIMULATION ONLY: publish a simulated boolean state (the twin's tray).
+        """SIMULATION ONLY: publish the simulated tray's boolean state.
 
         Refused (``SimulationOnlyError``) unless the configured deployment is
         ``simulation`` and this connection's graph carries the simulator
@@ -5814,8 +6046,9 @@ class RosbridgeROS2Backend(_ObservationState):
         is the one read on this connection (a reconnect forgets it and reads
         the new one); a graph without the marker is read again once before
         refusing, in case it predates a restart.
-        Only a ``std_msgs/msg/Bool`` with a literal boolean on an absolute
-        topic: never a command. Volatile, not latched: the caller repeats it
+        Only a ``std_msgs/msg/Bool`` with a literal boolean, only on
+        ``cargo_sensor.simulated_tray_topic()`` and never on a command topic.
+        Volatile, not latched: the caller repeats it
         at ``cargo_sensor.MIN_PUBLISH_HZ`` or faster.
         """
         if type(value) is not bool:
@@ -5824,6 +6057,10 @@ class RosbridgeROS2Backend(_ObservationState):
             raise ValueError("a state topic is an absolute ROS name")
         if topic in {DEFAULT_INTERFACES["motion.halt"][1], *_command_watch_topics()}:
             raise ValueError(f"{topic} is a command topic")
+        tray = cargo_sensor.simulated_tray_topic()
+        if topic != tray:
+            # Not a general publisher: only the simulated tray's own topic.
+            raise ValueError(f"simulated state is published only on the tray topic {tray}")
         refusal = simulation_publish_refusal()
         if refusal is not None:
             raise SimulationOnlyError(refusal)
@@ -6004,8 +6241,11 @@ class RosbridgeROS2Backend(_ObservationState):
         self._stop_graph_events()
 
     def reconnect(self) -> None:
+        # Goal ids belong to the socket that sent them: every goal still
+        # running goes into the hold (with its id and action) before they are
+        # forgotten, so a later halt must cancel it and confirm it ended.
+        self._hold_running_goals()
         self.disconnect()
-        # Goal ids belong to the socket that sent them.
         self._active_actions.clear()
         self._goal_ids.clear()
         self._goal_owner.clear()

@@ -24,8 +24,10 @@ move can be exercised on any machine.
 
 from __future__ import annotations
 
+import os
 from collections.abc import Mapping
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Literal
 
 from .fsio import atomic_write
@@ -208,9 +210,7 @@ def load_profile(path: Any) -> dict[str, float]:
     that wrote a profile and had it silently ignored would believe a limit was
     in force that was not.
     """
-    from pathlib import Path as _Path
-
-    profile_path = _Path(path)
+    profile_path = Path(path)
     if not profile_path.exists():
         return {}
     if profile_path.stat().st_size > MAX_PROFILE_BYTES:
@@ -224,16 +224,24 @@ def load_profile(path: Any) -> dict[str, float]:
     return parse_profile(document)
 
 
-def configured_profile() -> dict[str, float]:
-    """This installation's profile: ``$FLYTO_SAFETY_PROFILE``, else the default path.
+def configured_profile_path() -> Path:
+    """Where this installation keeps its profile: ``$FLYTO_SAFETY_PROFILE``, else
+    ``DEFAULT_PROFILE_PATH``.
 
-    Every reader of the site's limits (a job's SafetyLimits, the ROS 2
-    adapter's declared speed) goes through here, so they cannot read two
-    different files. Raises SafetyProfileError like ``load_profile``.
+    The one resolver: ``configured_profile`` (a job's SafetyLimits, the ROS 2
+    adapter's declared speed) and the mission gateway (which shows and
+    changes the profile) both take the path from here, so they cannot read
+    or write two different files.
     """
-    import os as _os
+    return Path(os.getenv(PROFILE_PATH_ENV, DEFAULT_PROFILE_PATH))
 
-    return load_profile(_os.getenv(PROFILE_PATH_ENV, DEFAULT_PROFILE_PATH))
+
+def configured_profile() -> dict[str, float]:
+    """This installation's profile, read from ``configured_profile_path()``.
+
+    Raises SafetyProfileError like ``load_profile``.
+    """
+    return load_profile(configured_profile_path())
 
 
 def change_record(
@@ -303,8 +311,6 @@ def update_profile(
     reach into one in flight — which is why there is no lock here.
     """
     import json as _json
-    from pathlib import Path as _Path
-
     if not changed_by.strip():
         raise SafetyProfileError("changed_by is required; an unattributed change is not an audit")
     if not reason.strip():
@@ -316,20 +322,18 @@ def update_profile(
         changed_by=changed_by, at=at, before=before, after=validated, reason=reason
     )
 
-    audit = _Path(audit_path)
+    audit = Path(audit_path)
     audit.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     try:
         # Open before writing the profile: if the record cannot be kept, the
         # change does not happen.
-        import os as _os
-
-        flags = _os.O_APPEND | _os.O_CREAT | _os.O_WRONLY | getattr(_os, "O_NOFOLLOW", 0)
-        descriptor = _os.open(audit, flags, 0o600)
-        _os.fchmod(descriptor, 0o600)
-        with _os.fdopen(descriptor, "a", encoding="utf-8") as handle:
+        flags = os.O_APPEND | os.O_CREAT | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(audit, flags, 0o600)
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "a", encoding="utf-8") as handle:
             handle.write(_json.dumps(record, sort_keys=True) + "\n")
             handle.flush()
-            _os.fsync(handle.fileno())
+            os.fsync(handle.fileno())
     except OSError as exc:
         raise SafetyProfileError(
             f"{audit} could not be written, so the change was not made"
@@ -350,9 +354,7 @@ def update_profile(
 def audit_tail(audit_path: Any, limit: int = 20) -> list[dict[str, Any]]:
     """The most recent changes, newest last. Empty when nothing was recorded."""
     import json as _json
-    from pathlib import Path as _Path
-
-    path = _Path(audit_path)
+    path = Path(audit_path)
     if not path.exists():
         return []
     entries: list[dict[str, Any]] = []

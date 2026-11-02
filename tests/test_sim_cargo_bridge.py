@@ -459,16 +459,40 @@ def test_malformed_reports_are_rejected_and_counted(tmp_path):
 
 
 class FakeLink:
-    """Only what the bridge may use: a pose read, the simulated publish, reconnect."""
+    """Only what the bridge may use: the newest odometry, the simulated publish, reconnect.
+
+    Each read is a new odometry message received ``age_s`` ago, unless
+    ``silent`` (no message since the last read) or ``broken`` (the read raises).
+    """
 
     def __init__(self, pose=AT_STATION):
         self.pose = pose
         self.published: list[tuple[str, bool]] = []
         self.fail: Exception | None = None
         self.reconnects = 0
+        self.sequence = 0
+        self.age_s = 0.0
+        self.silent = False
+        self.broken: Exception | None = None
+        # The bridge's clock, when shared: a silent link's message then ages.
+        self.now: list[float] | None = None
+        self._received_at: float | None = None
 
-    def held_observation(self):
-        return {"pose": self.pose}
+    def latest_odometry(self):
+        if self.broken is not None:
+            raise self.broken
+        if self.now is None:
+            if not self.silent:
+                self.sequence += 1
+            return {"pose": self.pose, "sequence": self.sequence, "age_s": self.age_s}
+        if not self.silent or self._received_at is None:
+            self.sequence += 1
+            self._received_at = self.now[0] - self.age_s
+        return {
+            "pose": self.pose,
+            "sequence": self.sequence,
+            "age_s": self.now[0] - self._received_at,
+        }
 
     def publish_simulated_state(self, topic, value):
         if self.fail is not None:
@@ -670,13 +694,32 @@ def test_the_simulated_publish_refuses_with_the_marker_check_disabled(backend_on
 
 @pytest.mark.parametrize(
     ("topic", "value"),
-    [("/cmd_vel", True), ("/flyto/cargo_present", 1), ("flyto/cargo_present", True)],
+    [("/flyto/cargo_present", 1), ("flyto/cargo_present", True), ("/other/state", True)],
 )
-def test_the_simulated_publish_sends_only_a_boolean_state(backend_on, topic, value):
+def test_the_simulated_publish_sends_only_a_boolean_on_the_tray_topic(backend_on, topic, value):
     backend, sent = backend_on(SIM_GRAPH)
-    with pytest.raises((ValueError, SimulationOnlyError)):
+    with pytest.raises(ValueError):
         backend.publish_simulated_state(topic, value)
     assert published(sent) == []
+
+
+@pytest.mark.parametrize("topic", ["/cmd_vel", "/cmd_vel_nav"])
+def test_the_simulated_publish_never_writes_a_command_topic(backend_on, monkeypatch, topic):
+    # Even a cargo topic misconfigured onto a command topic is refused.
+    monkeypatch.setenv(cargo_sensor.TOPIC_ENV, topic)
+    backend, sent = backend_on(SIM_GRAPH)
+    with pytest.raises(ValueError, match="command topic"):
+        backend.publish_simulated_state(topic, True)
+    assert published(sent) == []
+
+
+def test_the_simulated_publish_follows_the_configured_tray_topic(backend_on, monkeypatch):
+    monkeypatch.setenv(cargo_sensor.TOPIC_ENV, "/robot/tray")
+    backend, sent = backend_on(SIM_GRAPH)
+    backend.publish_simulated_state("/robot/tray", True)
+    with pytest.raises(ValueError):
+        backend.publish_simulated_state("/flyto/cargo_present", True)
+    assert [m["topic"] for m in published(sent)] == ["/robot/tray", "/robot/tray"]
 
 
 def test_the_bridge_publishes_on_the_topic_the_adapter_reads(monkeypatch):
@@ -684,6 +727,9 @@ def test_the_bridge_publishes_on_the_topic_the_adapter_reads(monkeypatch):
     assert cargo_bridge.bridge_topic() == cargo_sensor.CONVENTIONAL_TOPIC
     monkeypatch.setenv(cargo_sensor.TOPIC_ENV, "/robot/tray")
     assert cargo_bridge.bridge_topic() == "/robot/tray"
+    # One resolver: the bridge asks the adapter's, never its own copy.
+    monkeypatch.setattr(cargo_sensor, "simulated_tray_topic", lambda: "/from/the/resolver")
+    assert cargo_bridge.bridge_topic() == "/from/the/resolver"
 
 
 # --- the offline mission pushes the trail -----------------------------------------------
@@ -869,3 +915,161 @@ def test_settling_needs_the_simulated_time_span_not_only_the_readings():
     # Four readings inside the tray, still, but only 0.3 s of simulated time.
     assert reports.settled_run(_in_tray([1.0, 1.1, 1.2, 1.3])) is None
     assert reports.settled_run(_in_tray([1.0, 1.2, 1.4, 1.6])) is not None
+
+
+# --- review round 5: guards pinned, and the parked check reads odometry's own clock ----
+
+
+def test_a_retract_to_any_pose_but_ready_never_loads():
+    handoff = CargoHandoff(STATION)
+    _parked(handoff, 100.0, 104.0)
+    _feed(
+        handoff,
+        [
+            _place(102.0),
+            *_settled(102.1),
+            reports.retract_report("completed", pose="home", at=103.0),
+        ],
+    )
+    handoff.evaluate(104.0)
+    assert handoff.cargo_present is False
+    assert handoff.events[-1]["accepted"] is False
+
+
+def test_settling_needs_the_minimum_number_of_readings():
+    # Two readings, still, spanning more than SETTLE_S: too few to judge.
+    assert reports.SETTLE_MIN_READINGS >= 3
+    assert reports.settled_run(_in_tray([1.0, 2.0])) is None
+    assert reports.settled_run(_in_tray([1.0, 1.5, 2.0])) is not None
+
+
+def _ticking_bridge(link, path):
+    now = [100.0]
+    link.now = now
+    bridge = CargoBridge(
+        link=link,
+        handoff=CargoHandoff(STATION),
+        reports=reports.ArmReportTail(path),
+        clock=lambda: now[0],
+    )
+
+    def tick_until(t):
+        while now[0] < t:
+            bridge.tick()
+            now[0] += 0.5
+
+    return bridge, now, tick_until
+
+
+def _push_handoff(path):
+    for record in [_place(102.0), *_settled(102.1)]:
+        reports.append_report(path, record)
+
+
+def test_an_odometry_read_that_raises_is_an_unknown_pose_that_never_loads(tmp_path):
+    path = tmp_path / "reports.jsonl"
+    link = FakeLink()
+    _bridge, _now, tick_until = _ticking_bridge(link, path)
+    tick_until(102.0)
+    _push_handoff(path)  # the place started at 101.5
+    link.broken = RuntimeError("rosbridge adapter disconnected")
+    tick_until(102.5)  # one read, inside the parked window, failed
+    link.broken = None
+    tick_until(103.0)
+    reports.append_report(path, reports.retract_report("completed", at=103.0))
+    tick_until(110.0)
+    assert link.published[-1] == ("/flyto/cargo_present", False)
+    assert all(value is False for _topic, value in link.published)
+
+
+def test_odometry_silence_is_a_gap_even_while_the_bridge_keeps_ticking(tmp_path):
+    # The bridge ticks every 0.5 s, but no odometry message arrives for 2 s:
+    # the last pose is not a fresh sample, so the robot is unaccounted for.
+    path = tmp_path / "reports.jsonl"
+    link = FakeLink()
+    _bridge, _now, tick_until = _ticking_bridge(link, path)
+    tick_until(101.0)
+    link.silent = True
+    tick_until(103.0)
+    link.silent = False
+    _push_handoff(path)
+    tick_until(103.5)
+    reports.append_report(path, reports.retract_report("completed", at=103.5))
+    tick_until(110.0)
+    assert link.published[-1] == ("/flyto/cargo_present", False)
+    assert any(e.get("accepted") is False for e in _bridge.handoff.events)
+
+
+def test_a_sample_is_stamped_when_odometry_received_it_not_when_the_bridge_read_it(tmp_path):
+    link = FakeLink()
+    link.age_s = 1.2
+    handoff = CargoHandoff(STATION)
+    bridge = CargoBridge(link=link, handoff=handoff, clock=lambda: 100.0)
+    bridge.tick()
+    assert [t for t, _xy in handoff.poses._samples] == [pytest.approx(98.8)]
+    # The same message read again is not a second sample.
+    link.silent = True
+    bridge.tick()
+    assert len(handoff.poses._samples) == 1
+
+
+def test_a_handoff_is_decided_on_odometry_received_after_the_decision_time(tmp_path):
+    path = tmp_path / "reports.jsonl"
+    link = FakeLink()
+    link.age_s = 0.1  # every sample is a little older than the tick that reads it
+    bridge, _now, tick_until = _ticking_bridge(link, path)
+    tick_until(102.0)
+    _push_handoff(path)
+    tick_until(103.0)
+    reports.append_report(path, reports.retract_report("completed", at=103.0))
+    tick_until(105.0)
+    assert link.published[-1] == ("/flyto/cargo_present", True)
+    accepted = [e for e in bridge.handoff.events if e.get("accepted") is True]
+    assert len(accepted) == 1
+
+
+def test_the_pose_history_stays_in_time_order_whatever_order_samples_arrive():
+    history = cargo_bridge.PoseHistory()
+    history.add(100.0, AT_STATION)
+    history.add(101.0, None)  # an unknown read at the bridge's clock
+    history.add(100.9, AT_STATION)  # a message received just before it
+    history.add(101.4, AT_STATION)
+    assert [t for t, _xy in history._samples] == [100.0, 100.9, 101.0, 101.4]
+    # The unknown stays inside the window, so the robot is not parked over it.
+    assert history.parked(100.0, 101.4, STATION) is False
+
+
+def test_the_backend_reports_each_odometry_message_once_with_its_receive_age():
+    # The bridge's samples come from here: a number that grows only with a new
+    # message, and the age of the newest one, so silence is never a fresh pose.
+    from test_halt_hold import rosbridge
+
+    backend, _sockets = rosbridge(answers=True)
+    try:
+        assert backend.latest_odometry() is None
+        odom = {
+            "op": "publish",
+            "topic": "/odom",
+            "msg": {
+                "pose": {
+                    "pose": {
+                        "position": {"x": 2.0, "y": 0.0},
+                        "orientation": {"x": 0.0, "y": 0.0, "z": 0.0, "w": 1.0},
+                    }
+                }
+            },
+        }
+        backend._handle_message(odom)
+        first = backend.latest_odometry()
+        assert first is not None and first["pose"]["x"] == pytest.approx(2.0)
+        threading.Event().wait(0.15)
+        again = backend.latest_odometry()
+        assert again["sequence"] == first["sequence"]
+        assert again["age_s"] >= 0.15
+        backend._handle_message(odom)
+        newer = backend.latest_odometry()
+        assert newer["sequence"] > first["sequence"] and newer["age_s"] < 0.15
+        backend._reset_readings()
+        assert backend.latest_odometry() is None
+    finally:
+        backend.disconnect()

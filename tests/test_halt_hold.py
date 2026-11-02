@@ -39,6 +39,7 @@ from flyto_robotics.generic_ros2_adapter import GenericROS2Adapter, RosbridgeROS
 @pytest.fixture(autouse=True)
 def short_still_wait(monkeypatch):
     monkeypatch.setattr(adapter_module, "HALT_STILL_WAIT_S", 0.3)
+    monkeypatch.setattr(adapter_module, "STILL_MIN_SECONDS", 0.1)
     monkeypatch.setattr(adapter_module, "HELD_GOAL_END_WAIT_S", 0.3)
     monkeypatch.setenv("FLYTO_ROS2_OBSERVATION_WAIT_SECONDS", "0.25")
 

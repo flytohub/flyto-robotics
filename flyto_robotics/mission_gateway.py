@@ -17,13 +17,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
+from . import safety_profile
 from .capabilities import CapabilityRegistry, CapabilityValidationError
 from .safety_profile import (
     CONSTRAINABLE,
     DEFAULT_AUDIT_PATH,
-    DEFAULT_PROFILE_PATH,
     PROFILE_CONTRACT_VERSION,
-    PROFILE_PATH_ENV,
     SafetyProfileError,
     audit_tail,
     load_profile,
@@ -316,10 +315,9 @@ class MissionGateway:
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
         # Outside the deployed tree: a site limit inside it would be replaced
-        # by the next git pull, which is the opposite of what it is for.
-        self.safety_profile_path = Path(
-            os.getenv(PROFILE_PATH_ENV, DEFAULT_PROFILE_PATH)
-        )
+        # by the next git pull, which is the opposite of what it is for. The
+        # same file every other reader of the site limits resolves.
+        self.safety_profile_path = safety_profile.configured_profile_path()
         self.safety_audit_path = Path(
             os.getenv("FLYTO_SAFETY_PROFILE_AUDIT", DEFAULT_AUDIT_PATH)
         )

@@ -87,7 +87,7 @@ measurement, and it can only reach a simulation.
 
 | What | Value |
 | --- | --- |
-| Topic | `$FLYTO_ROS2_CARGO_TOPIC`, else `/flyto/cargo_present` (the adapter's simulation default) |
+| Topic | `$FLYTO_ROS2_CARGO_TOPIC`, else `/flyto/cargo_present` (the adapter's simulation default; `cargo_sensor.simulated_tray_topic`). A hardware adapter never reads `/flyto/cargo_present`, not even when configured to |
 | Type | `std_msgs/msg/Bool` (`{"data": true}` = block in tray) |
 | QoS | volatile, re-published at `--rate-hz` (2-10, default 2); never latched. The rate contract is written once, in `flyto_robotics/cargo_sensor.py` |
 | Publisher | the adapter's `RosbridgeROS2Backend.publish_simulated_state`, presence mode (odometry only, never motion) |
@@ -102,6 +102,9 @@ simulated time, inside 2 mm, not held); a completed retract to `ready`; and
 odometry within `--station-tolerance-m` of the station, moving less than
 1 cm, with no gap over 1.5 s, **from the place report's `started_at` (taken
 before the place was commanded) until the moment the handoff is decided**.
+Each pose sample is one odometry message stamped when it was received, so
+odometry silence is a gap however often the bridge ticks, and the decision
+waits for a message received after the decision time.
 
 It empties on an `unload` report (delivered at home), a `mission_end` report
 (and nothing reported before it loads again), a `loss` report, an arm
@@ -111,15 +114,31 @@ publishes `false` last).
 
 ```
 PY=<repo>/.venv/bin/python
-# 1. The twin is up (sim/twin/compose.yaml); the station is the parked pose in
-#    the odometry frame.
+# 1. The twin is up (sim/twin/compose.yaml) and the robot has not moved since
+#    it was launched, so its odometry frame starts at its start pose.
 # 2. FLYTO_ROS2_DEPLOYMENT_MODE=simulation $PY sim/fetch_return/cargo_bridge.py \
-#      --station-x 2.0 --station-y 0.0 --reports /tmp/fetch-reports.jsonl
-# 3. The arm/mission host appends to the same file, e.g.
-#      $PY sim/fetch_return/run.py --arm-config <config> --reports /tmp/fetch-reports.jsonl
+#      --station-x 0.4 --station-y 0.0 --reports /tmp/fetch-reports.jsonl
+# 3. The arm/mission host drives the twin itself and appends to the same file:
+#      $PY sim/fetch_return/run.py --arm-config <config> \
+#        --navigation gazebo --station-distance-m 0.4 \
+#        --reports /tmp/fetch-reports.jsonl
 # Tests (no Docker; fake rosbridge):
-$PY -m pytest -q tests/test_sim_cargo_bridge.py
+$PY -m pytest -q tests/test_sim_cargo_bridge.py tests/test_fetch_return_report_trail.py
 ```
+
+Step 3 needs `--navigation gazebo`: the default kinematic navigator never
+moves the twin, so the odometry the bridge reads never reaches the station and
+the tray can never load. With it, `run.py` parks the twin
+`--station-distance-m` ahead of the pose it started from (in the map frame,
+along its start heading). The bridge's station is in the **odometry** frame:
+for a twin that has not moved since launch, odometry starts at the start pose
+with heading 0, so the parked pose is (`--station-distance-m`, 0), which is
+what `--station-x 0.4 --station-y 0.0` says. If the twin has moved before,
+read `/odom` once before step 3 and put the station `--station-distance-m`
+ahead of that pose along its heading. Nav2's arrival tolerance must stay
+inside `--station-tolerance-m` (0.10 m by default), or the parked check fails.
+This live sequence has not been run against the twin; only the tests above
+have.
 
 The bridge never commands motion and never touches the 0.35 m clearance
 floor or any other safety limit.

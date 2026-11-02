@@ -79,16 +79,30 @@ def configured_topic() -> str | None:
 def served_topic(*, deployment_mode: str, sim_marker_on_graph: bool) -> str | None:
     """The topic to read: the configured one, else the shared one on a simulation.
 
-    ``deployment_mode`` is the served one (``simulation`` / ``real``) and
-    ``sim_marker_on_graph`` whether the graph carries the simulator marker.
-    Anything but a marked simulation without a configured topic has none.
+    ``deployment_mode`` is the served one (``simulation`` / ``real`` /
+    ``unconfirmed``) and ``sim_marker_on_graph`` whether the graph carries
+    the simulator marker. ``CONVENTIONAL_TOPIC`` is the simulated tray's, so
+    it is served only on a marked simulation, also when configured
+    explicitly: a hardware adapter pointed at the twin's shared endpoint
+    would otherwise read simulated state as real. Anything else has none.
     """
     explicit = configured_topic()
-    if explicit is not None:
+    if explicit is not None and explicit != CONVENTIONAL_TOPIC:
         return explicit
     if deployment_mode == "simulation" and sim_marker_on_graph:
-        return CONVENTIONAL_TOPIC
+        return CONVENTIONAL_TOPIC if explicit is None else explicit
     return None
+
+
+def simulated_tray_topic() -> str:
+    """The topic the simulated tray is published on: the one a marked simulation reads.
+
+    ``served_topic`` for a served simulation with its marker on the graph,
+    so the publisher (``sim/fetch_return/cargo_bridge.py``) and the reader
+    can never name two different topics.
+    """
+    topic = served_topic(deployment_mode="simulation", sim_marker_on_graph=True)
+    return topic if topic is not None else CONVENTIONAL_TOPIC
 
 
 def refused_result(
@@ -117,7 +131,9 @@ def no_topic_result(call_id: str, *, deployment_mode: str) -> CallResult:
         deployment_mode=deployment_mode,
         detail=(
             f"{REASON_NO_TOPIC}: no cargo topic for this {deployment_mode} deployment; "
-            f"a robot reads one only when {TOPIC_ENV} names it"
+            f"a robot reads one only when {TOPIC_ENV} names it, and "
+            f"{CONVENTIONAL_TOPIC} (the simulated tray) only on a simulation whose "
+            "graph carries the simulator marker"
         ),
     )
 

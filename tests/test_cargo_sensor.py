@@ -45,6 +45,8 @@ from flyto_robotics.generic_ros2_adapter import (
 TOPIC = "/flyto/cargo_present"
 ODOM = {"/odom": "nav_msgs/msg/Odometry"}
 SIM_GRAPH = {**ODOM, "/clock": CLOCK_TYPE, TOPIC: "std_msgs/msg/Bool"}
+#: A robot's own tray sensor topic (anything but the simulated tray's).
+SENSOR = "/tray/loaded"
 
 
 class FakeBridge:
@@ -422,9 +424,10 @@ def test_the_call_takes_no_arguments(twin, connect):
 def test_a_hardware_graph_under_a_simulation_configuration_refuses_the_read(
     twin, monkeypatch, connect
 ):
-    adapter, bridge = connect({**ODOM, TOPIC: "std_msgs/msg/Bool"})  # no /clock
+    monkeypatch.setenv(cargo_sensor.TOPIC_ENV, SENSOR)
+    adapter, bridge = connect({**ODOM, SENSOR: "std_msgs/msg/Bool"})  # no /clock
     assert cargo_sensor.CAPABILITY_ID in declared(adapter)
-    bridge.publish(TOPIC, {"data": True})
+    bridge.publish(SENSOR, {"data": True})
     wait_for_reading(adapter)
     result = read(adapter)
     assert result.outcome == OUTCOME_REFUSED
@@ -539,9 +542,10 @@ def test_a_simulation_with_the_marker_check_disabled_refuses_the_read(
     # A configured topic, a simulated graph, and the marker check switched off:
     # nothing confirms this is the simulator rather than the physical robot.
     monkeypatch.setenv("FLYTO_ROS2_SIM_MARKER_TOPIC", "")
-    adapter, bridge = connect(SIM_GRAPH)
+    monkeypatch.setenv(cargo_sensor.TOPIC_ENV, SENSOR)
+    adapter, bridge = connect({**SIM_GRAPH, SENSOR: "std_msgs/msg/Bool"})
     adapter.describe()
-    bridge.publish(TOPIC, {"data": True})
+    bridge.publish(SENSOR, {"data": True})
     wait_for_reading(adapter)
     result = read(adapter)
     assert result.outcome == OUTCOME_REFUSED
@@ -552,7 +556,7 @@ def test_a_simulation_with_the_marker_check_disabled_refuses_the_read(
     assert "FLYTO_ROS2_SIM_MARKER_TOPIC" in result.detail
     # Read straight from the backend, the value is never labelled real either.
     direct = adapter.backend.cargo_reading(call_id="cargo-2", deadline_seconds=0.5)
-    assert direct.evidence[cargo_sensor.READING_KEY]["deployment_mode"] != "real"
+    assert direct.evidence[cargo_sensor.READING_KEY]["deployment_mode"] == "unconfirmed"
 
 
 def test_a_simulation_with_the_marker_check_disabled_refuses_motion(
@@ -567,9 +571,10 @@ def test_a_simulation_with_the_marker_check_disabled_refuses_motion(
     assert isinstance(refusal, str) and "FLYTO_ROS2_SIM_MARKER_TOPIC" in refusal
 
 
-def test_a_mismatch_refusal_names_the_deployment(twin, connect):
-    adapter, bridge = connect({**ODOM, TOPIC: "std_msgs/msg/Bool"})  # no /clock
-    bridge.publish(TOPIC, {"data": True})
+def test_a_mismatch_refusal_names_the_deployment(twin, monkeypatch, connect):
+    monkeypatch.setenv(cargo_sensor.TOPIC_ENV, SENSOR)
+    adapter, bridge = connect({**ODOM, SENSOR: "std_msgs/msg/Bool"})  # no /clock
+    bridge.publish(SENSOR, {"data": True})
     wait_for_reading(adapter)
     result = read(adapter)
     assert result.outcome == OUTCOME_REFUSED
@@ -586,3 +591,75 @@ def test_a_disconnected_read_names_the_deployment(twin, connect):
     reading = result.evidence[cargo_sensor.READING_KEY]
     assert reading["deployment_mode"] == "simulation"
     assert reading["reason"] == cargo_sensor.REASON_DISCONNECTED
+
+
+# --- review round 5: the served mode has one owner; the simulated topic stays simulated --
+
+
+@pytest.mark.parametrize(
+    ("mode", "marker", "served"),
+    [
+        ("simulation", "/clock", "simulation"),
+        ("simulation", "", "unconfirmed"),
+        ("hardware", "/clock", "real"),
+        ("hardware", "", "real"),
+    ],
+)
+def test_the_served_deployment_mode_never_labels_an_unmarked_simulation(
+    monkeypatch, mode, marker, served
+):
+    from flyto_robotics import generic_ros2_adapter as adapter_module
+
+    monkeypatch.setenv("FLYTO_ROS2_DEPLOYMENT_MODE", mode)
+    monkeypatch.setenv("FLYTO_ROS2_SIM_MARKER_TOPIC", marker)
+    assert adapter_module._served_deployment_mode() == served
+
+
+def test_served_identity_answers_the_one_served_mode(twin, monkeypatch, connect):
+    from flyto_robotics import generic_ros2_adapter as adapter_module
+
+    adapter, _ = connect(SIM_GRAPH)
+    monkeypatch.setattr(adapter_module, "_served_deployment_mode", lambda: "simulation-x")
+    assert adapter.served_identity()["deployment_mode"] == "simulation-x"
+
+
+@pytest.mark.parametrize(
+    ("mode", "marker", "expected"),
+    [("simulation", True, TOPIC), ("simulation", False, None), ("real", True, None)],
+)
+def test_the_simulated_trays_topic_configured_explicitly_is_served_only_on_a_marked_simulation(
+    monkeypatch, mode, marker, expected
+):
+    monkeypatch.setenv(cargo_sensor.TOPIC_ENV, cargo_sensor.CONVENTIONAL_TOPIC)
+    assert (
+        cargo_sensor.served_topic(deployment_mode=mode, sim_marker_on_graph=marker) == expected
+    )
+
+
+def test_a_hardware_robot_configured_on_the_simulated_trays_topic_reads_nothing(
+    monkeypatch, connect
+):
+    # Pointed at the twin's shared endpoint, a hardware adapter configured on
+    # /flyto/cargo_present would read the simulated tray labelled real.
+    monkeypatch.setenv("FLYTO_ROS2_DEPLOYMENT_MODE", "hardware")
+    monkeypatch.setenv("FLYTO_ROS2_SIM_MARKER_TOPIC", "")
+    monkeypatch.setenv(cargo_sensor.TOPIC_ENV, TOPIC)
+    monkeypatch.setenv(cargo_sensor.MAX_AGE_ENV, "0.3")
+    adapter, bridge = connect({**ODOM, TOPIC: "std_msgs/msg/Bool"})
+    assert cargo_sensor.CAPABILITY_ID not in declared(adapter)
+    assert TOPIC not in {item["topic"] for item in bridge.subscribed}
+    bridge.publish(TOPIC, {"data": True})
+    result = adapter.backend.cargo_reading(call_id="cargo-1", deadline_seconds=0.1)
+    assert result.outcome == OUTCOME_REFUSED
+    assert cargo_sensor.RESULT_FIELD not in result.evidence
+    assert result.evidence[cargo_sensor.READING_KEY]["reason"] == cargo_sensor.REASON_NO_TOPIC
+    assert "simulated tray" in result.detail
+
+
+def test_the_simulated_trays_topic_is_the_one_the_adapter_reads_on_a_simulation(monkeypatch):
+    monkeypatch.delenv(cargo_sensor.TOPIC_ENV, raising=False)
+    assert cargo_sensor.simulated_tray_topic() == TOPIC
+    monkeypatch.setenv(cargo_sensor.TOPIC_ENV, "/robot/tray")
+    assert cargo_sensor.simulated_tray_topic() == "/robot/tray"
+    monkeypatch.setattr(cargo_sensor, "served_topic", lambda **_kw: "/from/the/resolver")
+    assert cargo_sensor.simulated_tray_topic() == "/from/the/resolver"

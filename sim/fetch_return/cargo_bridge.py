@@ -24,7 +24,10 @@ and only when every input holds for the same place:
 * the arm reported it retracted to ``ready``;
 * the robot's odometry put it within the station tolerance, and still, from
   before the place started (the report's ``started_at``) until the moment the
-  handoff is decided, with no gap in the readings.
+  handoff is decided, with no gap in the readings. Each pose sample is an
+  odometry message, stamped when this host received it: a message read twice
+  is one sample, and odometry silence is a gap however often this process
+  ticks. The decision waits for a message received after the decision time.
 
 A missing or unreadable input never loads it, nor does a place stamped
 later than this process's clock (``MAX_REPORT_SKEW_S``). An ``unload``,
@@ -49,13 +52,12 @@ motion).
 from __future__ import annotations
 
 import argparse
+import bisect
 import json
 import math
-import os
 import sys
 import threading
 import time
-from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Protocol
@@ -89,13 +91,12 @@ from sim.fetch_return.mobile_cargo import MobileCargoSimulator
 #: The robot counts as parked when every odometry sample through the handoff
 #: is within the station tolerance and within this distance of the first one.
 PARKED_SPREAD_M = 0.01
-#: Two odometry samples further apart than this leave the robot unaccounted for.
+#: Two odometry messages received further apart than this leave the robot
+#: unaccounted for.
 MAX_SAMPLE_GAP_S = 1.5
 #: How long after the retract the bridge waits for a settled reading before
 #: it decides the handoff with what it has.
 DECIDE_AFTER_S = 5.0
-POSE_MAX_AGE_ENV = "FLYTO_ROS2_OBSERVATION_MAX_AGE_SECONDS"
-POSE_MAX_AGE_S = 1.5
 #: The longest the tray may stay loaded without an unload or mission end.
 MAX_CARRY_S = 600.0
 #: How far ahead of this process's clock a report may be stamped (the arm's
@@ -136,13 +137,18 @@ def _xy(pose: Any) -> tuple[float, float] | None:
 
 
 class PoseHistory:
-    """Wall-clock odometry samples; an unknown pose is kept as a gap, never skipped."""
+    """Odometry samples in wall-clock time order; an unknown pose is kept, never skipped."""
 
     def __init__(self, maxlen: int = HISTORY):
-        self._samples: deque[tuple[float, tuple[float, float] | None]] = deque(maxlen=maxlen)
+        self._maxlen = int(maxlen)
+        self._samples: list[tuple[float, tuple[float, float] | None]] = []
 
     def add(self, at: float, pose: Any) -> None:
-        self._samples.append((float(at), _xy(pose)))
+        # A message's receive time can precede a sample recorded earlier (an
+        # unknown read at the bridge's own clock), so keep the history ordered.
+        times = [t for t, _ in self._samples]
+        self._samples.insert(bisect.bisect_right(times, float(at)), (float(at), _xy(pose)))
+        del self._samples[: max(0, len(self._samples) - self._maxlen)]
 
     def parked(self, start: float, end: float, station: Station) -> bool | None:
         """Whether the robot stayed parked at the station from ``start`` to ``end``.
@@ -183,8 +189,8 @@ class PoseHistory:
 
 
 def bridge_topic() -> str:
-    """The topic the adapter reads on a simulation (``cargo_sensor.served_topic``)."""
-    return cargo_sensor.configured_topic() or cargo_sensor.CONVENTIONAL_TOPIC
+    """The topic the adapter reads on a simulation (``cargo_sensor.simulated_tray_topic``)."""
+    return cargo_sensor.simulated_tray_topic()
 
 
 class CargoHandoff:
@@ -208,6 +214,9 @@ class CargoHandoff:
         self._watch_from = 0  # first report index the loss watch has not read
         self._lifecycle_from = 0  # first report index not yet checked for unload/loss/end
         self._departed_at: float | None = None
+        # (place index, decision time): fixed when a place is first ready to
+        # be decided, so the decision waits for odometry received after it.
+        self._decision: tuple[int, float] | None = None
         self.events: list[dict[str, Any]] = []
 
     @property
@@ -302,10 +311,13 @@ class CargoHandoff:
         settled = settled_run(readings)
         if settled is None and now - retract.at < DECIDE_AFTER_S:
             return  # the block may still be settling
-        # Parked from before the place was commanded until this decision.
-        docked = self.poses.parked(place.fields["started_at"], now, self.station)
+        if self._decision is None or self._decision[0] != p:
+            self._decision = (p, now)
+        decided_at = self._decision[1]
+        # Parked from before the place was commanded until the decision time.
+        docked = self.poses.parked(place.fields["started_at"], decided_at, self.station)
         if docked is None:
-            return  # no odometry yet from the moment of the handoff
+            return  # no odometry received yet at or after the decision time
         self._consumed = p
         try:
             accepted = self.tray.accept_station_handoff(
@@ -347,7 +359,7 @@ class CargoHandoff:
 
 
 class SimulatedStatePublisher(Protocol):
-    def held_observation(self) -> dict[str, Any]: ...
+    def latest_odometry(self) -> dict[str, Any] | None: ...
 
     def publish_simulated_state(self, topic: str, value: bool) -> None: ...
 
@@ -371,6 +383,7 @@ class CargoBridge:
         self._clock = clock
         self.last_error: str | None = None
         self._stop = threading.Event()
+        self._odometry_sequence: int | None = None
         # One tick at a time, and none after stop() published the last false.
         self._lock = threading.Lock()
         self._stopped = False
@@ -383,17 +396,35 @@ class CargoBridge:
 
     def _tick(self) -> bool:
         now = self._clock()
-        try:
-            pose = (self.link.held_observation() or {}).get("pose")
-        except Exception:  # a dropped connection is an unknown pose
-            pose = None
-        self.handoff.observe_pose(now, pose)
+        self._sample_odometry(now)
         if self.reports is not None:
             self.handoff.observe_reports(self.reports.read_new())
         self.handoff.evaluate(now)
         value = self.handoff.cargo_present
         self._publish(value)
         return value
+
+    def _sample_odometry(self, now: float) -> None:
+        """Record the newest odometry message once, at the time it was received.
+
+        No message since the last tick records nothing, so silence is a gap
+        in the history. No odometry at all (none yet, a dropped connection, a
+        read that raised) is an unknown pose at ``now``.
+        """
+        try:
+            message = self.link.latest_odometry()
+            sequence = int(message["sequence"]) if message is not None else None
+            age = float(message["age_s"]) if message is not None else None
+        except Exception:  # a dropped connection is an unknown pose
+            message, sequence, age = None, None, None
+        if message is None or sequence is None or age is None or not math.isfinite(age):
+            self._odometry_sequence = None
+            self.handoff.observe_pose(now, None)
+            return
+        if sequence == self._odometry_sequence:
+            return  # the same message again: not a new sample
+        self._odometry_sequence = sequence
+        self.handoff.observe_pose(now - max(0.0, age), message.get("pose"))
 
     def _publish(self, value: bool) -> None:
         try:
@@ -456,14 +487,6 @@ class CargoBridge:
         }
 
 
-def _env_float(name: str, default: float) -> float:
-    try:
-        value = float(os.getenv(name, str(default)))
-    except ValueError:
-        return default
-    return value if math.isfinite(value) and value > 0 else default
-
-
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=(__doc__ or "").splitlines()[0])
     parser.add_argument("--station-x", type=float, required=True, help="odometry frame, metres")
@@ -492,10 +515,6 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[cargo-bridge SIMULATION] refused to start: {refusal}", file=sys.stderr)
         return 2
 
-    # The adapter's own freshness rule judges each pose; the parked check needs
-    # it tighter than its 5 s default, so a silent odometry stream turns into
-    # unknown poses within ~3 samples instead of repeating the last one.
-    os.environ[POSE_MAX_AGE_ENV] = str(min(_env_float(POSE_MAX_AGE_ENV, 5.0), POSE_MAX_AGE_S))
     # Presence mode: odometry only, never a motion command. FLYTO_ROSBRIDGE_URL
     # names the endpoint (default ws://127.0.0.1:19090, the twin's).
     link = RosbridgeROS2Backend(presence_only=True, connect=False)

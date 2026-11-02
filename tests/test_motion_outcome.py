@@ -242,7 +242,10 @@ def odom(x, linear=0.0):
         "msg": {
             "pose": {"pose": {"position": {"x": x, "y": 0.0},
                               "orientation": {"x": 0.0, "y": 0.0, "z": 0.0, "w": 1.0}}},
-            "twist": {"twist": {"linear": {"x": linear}, "angular": {"z": 0.0}}},
+            # Every axis, as a real nav_msgs/Odometry carries it: a missing
+            # axis is unknown and never counts as still.
+            "twist": {"twist": {"linear": {"x": linear, "y": 0.0, "z": 0.0},
+                                "angular": {"x": 0.0, "y": 0.0, "z": 0.0}}},
         },
     }
 

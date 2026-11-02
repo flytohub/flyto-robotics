@@ -465,3 +465,31 @@ class TestTheOperatorInterface:
                 at="2026-08-09T00:00:00Z",
             )
         assert not profile.exists(), "the profile changed despite the audit failing"
+
+
+# --- review round 5: one resolver for where the site profile lives -----------------
+
+
+def test_every_reader_resolves_the_profile_path_through_one_function(tmp_path, monkeypatch):
+    from flyto_robotics import mission_gateway, safety_profile
+    from flyto_robotics.capabilities import default_capability_registry
+
+    elsewhere = tmp_path / "elsewhere.json"
+    elsewhere.write_text(
+        json.dumps({"contract_version": PROFILE_CONTRACT_VERSION, "limits": SITE}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(safety_profile, "configured_profile_path", lambda: elsewhere)
+    # The job/adapter reader and the gateway both follow the one resolver.
+    assert safety_profile.configured_profile() == SITE
+    gateway = mission_gateway.MissionGateway(default_capability_registry(), "t" * 32)
+    assert gateway.safety_profile_path == elsewhere
+
+
+def test_the_profile_path_is_the_env_value_else_the_default(monkeypatch, tmp_path):
+    from flyto_robotics import safety_profile
+
+    monkeypatch.delenv(safety_profile.PROFILE_PATH_ENV, raising=False)
+    assert safety_profile.configured_profile_path() == Path(safety_profile.DEFAULT_PROFILE_PATH)
+    monkeypatch.setenv(safety_profile.PROFILE_PATH_ENV, str(tmp_path / "p.json"))
+    assert safety_profile.configured_profile_path() == tmp_path / "p.json"
