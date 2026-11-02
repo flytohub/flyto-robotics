@@ -117,6 +117,13 @@ HALT_STILL_WAIT_S = 2.0
 # While a halted goal's cancel is unconfirmed, zero velocity is re-sent this
 # often, so the action server's last command never stands.
 ZERO_HOLD_PERIOD_S = 0.1
+# A goal held from an earlier connection is released only once its action
+# server answers that it has ended; each answer is awaited this long.
+HELD_GOAL_END_WAIT_S = 2.0
+# action_msgs/srv/CancelGoal return codes that mean the goal is no longer
+# running (unknown to the server, or already terminated).
+CANCEL_ERROR_NONE = 0
+CANCEL_GOAL_ENDED_CODES = frozenset({2, 3})
 # The typed reason of a halt that could not confirm the robot stopped. It is
 # Flyto2 Cloud's own code (services/space_tasks/uncertain_task_effect.py), so
 # the task is held for inspection rather than taken as stopped.
@@ -533,17 +540,38 @@ def _simulation_marker_topic() -> str:
     return os.getenv("FLYTO_ROS2_SIM_MARKER_TOPIC", "/clock").strip()
 
 
-def _served_deployment_mode() -> str:
-    """``simulation`` or ``real``, as ``served_identity`` answers once confirmed.
+#: The served deployment of a simulation configured with the marker check
+#: disabled: nothing can confirm it, so it is never labelled real or simulation.
+DEPLOYMENT_UNCONFIRMED = "unconfirmed"
 
-    A motion reaches the robot only after the graph has confirmed the
-    configured mode (``_deployment_mismatch``), and a simulation is never
-    served with the marker check disabled, so during a motion this is the
-    deployment the adapter serves. Never derived from a resource name.
+
+def _served_deployment_mode() -> str:
+    """``simulation``, ``real`` or ``unconfirmed``, as ``served_identity`` answers.
+
+    A motion or a reading reaches the robot only after the graph has
+    confirmed the configured mode (``_deployment_mismatch``), so during one
+    this is the deployment the adapter serves. A simulation configured with
+    the marker check disabled is ``unconfirmed``: it is refused, and simulated
+    data is never labelled ``real``. Never derived from a resource name.
     """
-    if _configured_deployment_mode() == "simulation" and _simulation_marker_topic():
-        return "simulation"
+    if _configured_deployment_mode() == "simulation":
+        return "simulation" if _simulation_marker_topic() else DEPLOYMENT_UNCONFIRMED
     return "real"
+
+
+def _unmarked_simulation_refusal() -> str | None:
+    """Why a simulation configured with the marker check disabled is refused, or None.
+
+    With no marker the graph cannot show it is not the physical robot, so
+    neither motion, nor a reading, nor ``served_identity`` is served.
+    """
+    if _configured_deployment_mode() == "simulation" and not _simulation_marker_topic():
+        return (
+            "the adapter is configured for simulation but the simulation marker "
+            "check is disabled (FLYTO_ROS2_SIM_MARKER_TOPIC is empty), so the "
+            "graph cannot confirm it is not physical hardware"
+        )
+    return None
 
 
 def _safe_fragment(value: str) -> str:
@@ -1812,13 +1840,24 @@ class _ObservationState:
         """Re-send a held goal's cancel without waiting for an answer (may raise)."""
         raise NotImplementedError
 
+    def _held_goal_end(self, call_id: str, token: Any) -> str | None:
+        """None once the action server confirms a held goal has ended; else why not.
+
+        Asked of goals held from an earlier connection (or host process),
+        whose cancel this connection cannot follow: a robot seen still does
+        not show the goal is over, and its server could resume it.
+        """
+        raise NotImplementedError
+
     def _publish_zero(self) -> bool:
         raise NotImplementedError
 
     def _zero_published(self) -> bool:
+        """Whether zero velocity went out. Never raises: a transport error
+        (RuntimeError, OSError, a closed websocket) is a stop not published."""
         try:
             return bool(self._publish_zero())
-        except RuntimeError:
+        except Exception:  # noqa: BLE001 - an unsent stop is unpublished, not an error
             return False
 
     def halt_hold(self) -> dict[str, Any] | None:
@@ -1841,7 +1880,26 @@ class _ObservationState:
         it runs, and nothing admitted before it is sent after it.
         """
         with HALT_HOLD.halting():
-            return self._halt_in_epoch(call_id, evidence)
+            try:
+                return self._halt_in_epoch(call_id, evidence)
+            except Exception as error:  # noqa: BLE001 - a halt never fails open
+                return self._halt_raised(call_id, evidence, error)
+
+    def _halt_raised(
+        self, call_id: str, evidence: Mapping[str, Any], error: BaseException
+    ) -> CallResult:
+        """A halt that raised: ``effect_unknown``, the hold armed, zero held."""
+        why = f"the halt raised {type(error).__name__}: {error}"[:200]
+        goals: dict[str, Any] = {}
+        with contextlib.suppress(Exception):
+            goals = {goal: self._cancel_token(goal) for goal in self._active_goal_ids()}
+        HALT_HOLD.arm(why, goals)
+        with contextlib.suppress(Exception):
+            self._hold_zero()
+        confirmation = {"error": why, "zero_velocity_held": True, "hold": HALT_HOLD.snapshot()}
+        return self._halt_unconfirmed(
+            call_id, {"adapter": "generic_ros2", **evidence}, confirmation, why
+        )
 
     def _halt_in_epoch(self, call_id: str, evidence: Mapping[str, Any]) -> CallResult:
         # Zero velocity goes out first, so the stop never waits behind a cancel.
@@ -1900,6 +1958,25 @@ class _ObservationState:
                 return unconfirmed_halt(f"no fresh odometry within {HALT_STILL_WAIT_S:g} s")
             return unconfirmed_halt(
                 f"odometry did not show the robot still within {HALT_STILL_WAIT_S:g} s"
+            )
+        # Goals held from an earlier connection were never cancelled here:
+        # the hold is released only once their action server confirms they
+        # ended, or Nav2 could resume one after the release.
+        held = {goal: token for goal, token in HALT_HOLD.tokens().items() if goal not in cancelled}
+        unended: dict[str, str] = {}
+        for goal, token in held.items():
+            try:
+                why = self._held_goal_end(goal, token)
+            except Exception as error:  # noqa: BLE001 - an unanswered end is unconfirmed
+                why = f"end not confirmed: {type(error).__name__}: {error}"
+            if why is not None:
+                unended[goal] = why[:200]
+        if held:
+            confirmation["held_goals_ended"] = sorted(set(held) - set(unended))
+        if unended:
+            confirmation["held_goals_unconfirmed"] = unended
+            return unconfirmed_halt(
+                "no confirmed end for held goals " + ", ".join(sorted(unended))
             )
         released = HALT_HOLD.release()
         if released is not None:
@@ -2617,7 +2694,12 @@ class GenericROS2Adapter:
         """
         mismatch = self._deployment_mismatch()
         if mismatch is not None:
-            return CallResult(request.call_id, OUTCOME_REFUSED, detail=mismatch)
+            return cargo_sensor.refused_result(
+                request.call_id,
+                reason=cargo_sensor.REASON_DEPLOYMENT_UNCONFIRMED,
+                detail=mismatch,
+                deployment_mode=DEPLOYMENT_UNCONFIRMED,
+            )
         return self.backend.cargo_reading(  # type: ignore[attr-defined]
             call_id=request.call_id, deadline_seconds=float(request.deadline_seconds)
         )
@@ -2632,7 +2714,7 @@ class GenericROS2Adapter:
         """
         marker = _simulation_marker_topic()
         if not marker:
-            return None
+            return _unmarked_simulation_refusal()
         mismatch = self._deployment_mismatch_in(self.backend.discover(), marker)
         if mismatch is None:
             return None
@@ -2662,12 +2744,9 @@ class GenericROS2Adapter:
         mode = _configured_deployment_mode()
         marker = _simulation_marker_topic()
         if not marker:
-            if mode == "simulation":
-                raise ServedIdentityError(
-                    "the adapter is configured for simulation but the simulation marker "
-                    "check is disabled (FLYTO_ROS2_SIM_MARKER_TOPIC is empty), so the "
-                    "graph cannot confirm it is not physical hardware"
-                )
+            unmarked = _unmarked_simulation_refusal()
+            if unmarked is not None:
+                raise ServedIdentityError(unmarked)
             return {"resource_id": resource_id, "deployment_mode": "real"}
         # Read the graph as it is now: the robot behind this endpoint may have
         # been swapped for its simulator (or back) since discovery cached it.
@@ -4561,6 +4640,27 @@ class RclpyROS2Backend(_ObservationState):
                 return
         token.cancel_goal_async()
 
+    def _held_goal_end(self, call_id: str, token: Any) -> str | None:
+        if token is None:
+            return (
+                "no goal handle is kept for it (the host restarted), "
+                "so nothing can confirm its end"
+            )
+        if not hasattr(token, "cancel_goal_async"):
+            # A goal whose acceptance was pending when it was held.
+            if not token.done():
+                return "its acceptance was never answered"
+            token = token.result()
+            if token is None or not getattr(token, "accepted", False):
+                return None  # refused: it never ran
+        future = token.cancel_goal_async()
+        if not self._wait_future(future, time.monotonic() + HELD_GOAL_END_WAIT_S):
+            return "its action server did not answer the cancel"
+        code = getattr(future.result(), "return_code", None)
+        if code in CANCEL_GOAL_ENDED_CODES:
+            return None
+        return f"its action server answered the cancel with return_code {code}; it has not ended"
+
     def execution_count(self, call_id: str) -> int:
         return self._counts.get(call_id, 0)
 
@@ -5012,7 +5112,12 @@ class RosbridgeROS2Backend(_ObservationState):
         then fails with the typed reason and no value.
         """
         if not self._connected:
-            return CallResult(call_id, OUTCOME_REFUSED, detail="rosbridge adapter disconnected")
+            return cargo_sensor.refused_result(
+                call_id,
+                reason=cargo_sensor.REASON_DISCONNECTED,
+                detail="rosbridge adapter disconnected",
+                deployment_mode=_served_deployment_mode(),
+            )
         topic = self.cargo_topic()
         if topic is None:
             return cargo_sensor.no_topic_result(
@@ -5831,8 +5936,12 @@ class RosbridgeROS2Backend(_ObservationState):
     def _cancel_for_halt(self, call_id: str) -> str | None:
         try:
             result = self.cancel(call_id)
-        except RuntimeError as error:
-            result = CallResult(call_id, OUTCOME_FAILED, detail=f"cancel not sent: {error}")
+        except Exception as error:  # noqa: BLE001 - an unsent cancel is unconfirmed
+            result = CallResult(
+                call_id,
+                OUTCOME_FAILED,
+                detail=f"cancel not sent: {type(error).__name__}: {error}",
+            )
         if result.outcome == OUTCOME_CANCELLED:
             return None
         with self._condition:
@@ -5852,6 +5961,30 @@ class RosbridgeROS2Backend(_ObservationState):
         goal_id, action_name = token if isinstance(token, tuple) else (call_id, None)
         if action_name:
             self._send({"op": "cancel_action_goal", "id": goal_id, "action": action_name})
+
+    def _held_goal_end(self, call_id: str, token: Any) -> str | None:
+        # A goal id belongs to the rosbridge session that sent it, so the
+        # action server itself is asked: its cancel service with the zero goal
+        # id cancels every goal it runs and names those still canceling. None
+        # left means nothing on that action server runs, the held goal included.
+        action_name = token[1] if isinstance(token, tuple) else None
+        if not action_name:
+            return "no action name is kept for it, so nothing can confirm its end"
+        values = self._service(
+            f"{action_name.rstrip('/')}/_action/cancel_goal",
+            {"goal_info": {"goal_id": {"uuid": [0] * 16}, "stamp": {"sec": 0, "nanosec": 0}}},
+            timeout=HELD_GOAL_END_WAIT_S,
+            service_type="action_msgs/srv/CancelGoal",
+        )
+        code = values.get("return_code")
+        canceling = values.get("goals_canceling")
+        if code == CANCEL_ERROR_NONE and isinstance(canceling, list) and not canceling:
+            return None
+        count = len(canceling) if isinstance(canceling, list) else "unknown"
+        return (
+            f"cancel-all on {action_name} answered return_code {code} with "
+            f"{count} goal(s) still canceling"
+        )
 
     def execution_count(self, call_id: str) -> int:
         return self._counts.get(call_id, 0)

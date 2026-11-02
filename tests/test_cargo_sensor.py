@@ -528,3 +528,61 @@ def test_a_reconnect_forgets_the_graph_the_old_connection_read(twin, monkeypatch
         assert backend.published_topics() == {}
     finally:
         backend.disconnect()
+
+
+# --- review round 4: a simulation is never labelled real ----------------------
+
+
+def test_a_simulation_with_the_marker_check_disabled_refuses_the_read(
+    twin, monkeypatch, connect
+):
+    # A configured topic, a simulated graph, and the marker check switched off:
+    # nothing confirms this is the simulator rather than the physical robot.
+    monkeypatch.setenv("FLYTO_ROS2_SIM_MARKER_TOPIC", "")
+    adapter, bridge = connect(SIM_GRAPH)
+    adapter.describe()
+    bridge.publish(TOPIC, {"data": True})
+    wait_for_reading(adapter)
+    result = read(adapter)
+    assert result.outcome == OUTCOME_REFUSED
+    assert cargo_sensor.RESULT_FIELD not in result.evidence
+    reading = result.evidence[cargo_sensor.READING_KEY]
+    assert reading["deployment_mode"] == "unconfirmed"
+    assert reading["reason"] == cargo_sensor.REASON_DEPLOYMENT_UNCONFIRMED
+    assert "FLYTO_ROS2_SIM_MARKER_TOPIC" in result.detail
+    # Read straight from the backend, the value is never labelled real either.
+    direct = adapter.backend.cargo_reading(call_id="cargo-2", deadline_seconds=0.5)
+    assert direct.evidence[cargo_sensor.READING_KEY]["deployment_mode"] != "real"
+
+
+def test_a_simulation_with_the_marker_check_disabled_refuses_motion(
+    twin, monkeypatch, connect
+):
+    from flyto_robotics import generic_ros2_adapter as adapter_module
+
+    monkeypatch.setenv("FLYTO_ROS2_SIM_MARKER_TOPIC", "")
+    adapter, _ = connect(SIM_GRAPH)
+    adapter_module.HALT_HOLD.admit("move-1")
+    refusal = adapter._motion_preflight("move-1", "motion.advance")
+    assert isinstance(refusal, str) and "FLYTO_ROS2_SIM_MARKER_TOPIC" in refusal
+
+
+def test_a_mismatch_refusal_names_the_deployment(twin, connect):
+    adapter, bridge = connect({**ODOM, TOPIC: "std_msgs/msg/Bool"})  # no /clock
+    bridge.publish(TOPIC, {"data": True})
+    wait_for_reading(adapter)
+    result = read(adapter)
+    assert result.outcome == OUTCOME_REFUSED
+    reading = result.evidence[cargo_sensor.READING_KEY]
+    assert reading["deployment_mode"] == "unconfirmed"
+    assert reading["reason"] == cargo_sensor.REASON_DEPLOYMENT_UNCONFIRMED
+
+
+def test_a_disconnected_read_names_the_deployment(twin, connect):
+    adapter, _ = connect(SIM_GRAPH)
+    adapter.backend.disconnect()
+    result = adapter.backend.cargo_reading(call_id="cargo-1", deadline_seconds=0.1)
+    assert result.outcome == OUTCOME_REFUSED
+    reading = result.evidence[cargo_sensor.READING_KEY]
+    assert reading["deployment_mode"] == "simulation"
+    assert reading["reason"] == cargo_sensor.REASON_DISCONNECTED

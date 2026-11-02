@@ -849,3 +849,23 @@ def test_stop_waits_for_a_tick_in_flight_so_false_is_published_last():
     _full_handoff(handoff, t0=200.0)
     bridge.tick()
     assert len(link.published) == count
+
+
+# --- review round 4: settling is a span of simulated time ---------------------------
+
+
+def _in_tray(sim_times):
+    return [
+        reports.parse_report(
+            reports.tray_reading(
+                inside=True, held=False, block=[0.1, 0.0, 0.3], sim_t=t, at=100.0 + i
+            )
+        )
+        for i, t in enumerate(sim_times)
+    ]
+
+
+def test_settling_needs_the_simulated_time_span_not_only_the_readings():
+    # Four readings inside the tray, still, but only 0.3 s of simulated time.
+    assert reports.settled_run(_in_tray([1.0, 1.1, 1.2, 1.3])) is None
+    assert reports.settled_run(_in_tray([1.0, 1.2, 1.4, 1.6])) is not None

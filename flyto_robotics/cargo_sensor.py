@@ -65,6 +65,10 @@ READING_KEY = "cargo_reading"
 REASON_MISSING = "cargo_reading_missing"
 REASON_STALE = "cargo_reading_stale"
 REASON_NO_TOPIC = "cargo_topic_not_configured"
+#: The graph did not confirm the configured deployment (or a simulation runs
+#: with the marker check disabled): a value from the wrong robot is no answer.
+REASON_DEPLOYMENT_UNCONFIRMED = "deployment_not_confirmed"
+REASON_DISCONNECTED = "transport_disconnected"
 
 
 def configured_topic() -> str | None:
@@ -87,8 +91,10 @@ def served_topic(*, deployment_mode: str, sim_marker_on_graph: bool) -> str | No
     return None
 
 
-def no_topic_result(call_id: str, *, deployment_mode: str) -> CallResult:
-    """A read with no cargo topic for this deployment: refused, no value."""
+def refused_result(
+    call_id: str, *, reason: str, detail: str, deployment_mode: str
+) -> CallResult:
+    """A refused read: no value, and the evidence names the reason and deployment."""
     return CallResult(
         call_id,
         OUTCOME_REFUSED,
@@ -96,9 +102,19 @@ def no_topic_result(call_id: str, *, deployment_mode: str) -> CallResult:
             READING_KEY: {
                 "message_type": MESSAGE_TYPE,
                 "deployment_mode": deployment_mode,
-                "reason": REASON_NO_TOPIC,
+                "reason": reason,
             }
         },
+        detail=detail,
+    )
+
+
+def no_topic_result(call_id: str, *, deployment_mode: str) -> CallResult:
+    """A read with no cargo topic for this deployment: refused, no value."""
+    return refused_result(
+        call_id,
+        reason=REASON_NO_TOPIC,
+        deployment_mode=deployment_mode,
         detail=(
             f"{REASON_NO_TOPIC}: no cargo topic for this {deployment_mode} deployment; "
             f"a robot reads one only when {TOPIC_ENV} names it"

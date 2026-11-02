@@ -463,11 +463,25 @@ class CancelRosbridge(ScriptedRosbridge):
     def __init__(self):
         super().__init__(lambda _id: [])
         self.answers = False
+        self.still_canceling: list[dict] = []
 
     def send(self, raw):
         message = json.loads(raw)
         if message.get("op") == "cancel_action_goal" and not self.answers:
             self.sent.append(message)  # Nav2 restarted: nobody answers
+            return
+        if message.get("op") == "call_service" and message["service"].endswith(
+            "/_action/cancel_goal"
+        ):
+            # The action server's own cancel service (cancel all goals):
+            # answered only while ``answers``, naming the goals still canceling.
+            self.sent.append(message)
+            if self.answers:
+                values = {"return_code": 0, "goals_canceling": list(self.still_canceling)}
+                self.inbox.put(json.dumps(
+                    {"op": "service_response", "id": message["id"], "result": True,
+                     "values": values}
+                ))
             return
         if message.get("op") == "call_service":
             # rosapi: a reconnect reads the robot's graph afresh.
