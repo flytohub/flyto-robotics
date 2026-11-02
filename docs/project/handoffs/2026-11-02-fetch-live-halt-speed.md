@@ -18,7 +18,10 @@ Base `main` 0f283a0. Commits, oldest first:
 - 2270c4b, 4065417, 16f814d, 4c5922e: second round, the reviewer findings
   below. This file was rewritten in the commit after them (15f882c).
 - 2973fc0, 9015cd3: third round (repair round 1), see "What changed in the
-  third round". This file and the registry row were updated after them.
+  third round". This file and the registry row were updated after them
+  (ab69ad9).
+- a279e61: fourth round (repair round 2), see "What changed in the fourth
+  round". This file and the registry row were updated after it.
 
 `claude/fetch-live-sim-bridge` (the rejected second bridge, 7c5947e and
 386f565, never pushed) and its worktree `.claude/worktrees/flyto-robotics-cargo-bridge`
@@ -166,10 +169,109 @@ the `run.py` report hooks, and the `_advertise_once` extraction. Its
   A join was tried as well and removed: with the lock it changed nothing
   observable (its mutant survived), so the lock is the one mechanism.
 
+## What changed in the fourth round (a279e61)
+
+### A halt never fails open on a transport error
+
+- `_ObservationState._zero_published` catches any exception (was only
+  `RuntimeError`): an `OSError` or a closed websocket is a stop not
+  published, so `zero_velocity_published: false` and the halt ends
+  `effect_unknown` "standard cmd_vel stop unavailable" with the hold armed,
+  also when the robot is then seen still. The zero-hold thread uses the
+  same call, so it no longer dies on such an error.
+- `RosbridgeROS2Backend._cancel_for_halt` catches any exception from
+  `cancel()` (was only `RuntimeError`), like the rclpy one: the goal is
+  `unconfirmed` "cancel not sent: <type>: <message>" and the halt goes on.
+- `_halt` wraps the whole halt: anything that still raises inside it
+  (`_halt_raised`) arms the hold with the running goals' tokens, starts the
+  zero hold and returns `failed`, `reason_code: effect_unknown`,
+  `halt_confirmation.error`. It never raises out of `safe_stop`.
+- Round-3 statement corrected: the rosbridge halt did **not** guard every
+  cancel error before this round (only `RuntimeError`), and its guard had
+  no test.
+
+### The hold is released only on a confirmed end of the held goals
+
+- After a halt sees the robot still, every goal in the hold that this halt
+  did not itself cancel (held from an earlier connection or process) must
+  be confirmed ended by its action server (`_held_goal_end`), else the halt
+  is `effect_unknown`, the hold stays, and the evidence lists
+  `held_goals_unconfirmed`; confirmed goals are listed in
+  `held_goals_ended`.
+- rosbridge: `call_service` `<action>/_action/cancel_goal`
+  (`action_msgs/srv/CancelGoal`, zero goal id and stamp = cancel all goals
+  on that server), waiting `HELD_GOAL_END_WAIT_S` (2 s). Confirmed only on
+  `return_code` 0 with an empty `goals_canceling`. A token with no action
+  name is never confirmed.
+- rclpy: the kept handle's `cancel_goal_async()`; confirmed only on
+  `return_code` 2 (unknown goal) or 3 (terminated). No kept handle (a
+  restarted host) is never confirmed.
+
+### A simulation with the marker check disabled is never served as real
+
+- `_unmarked_simulation_refusal()` is the one reason, used by
+  `served_identity` (unchanged behaviour) and now by `_deployment_mismatch`,
+  so motion preflight and `sensing.cargo_present` refuse a configured
+  simulation whose `FLYTO_ROS2_SIM_MARKER_TOPIC` is empty.
+- `_served_deployment_mode()` returns `unconfirmed` (was `real`) for that
+  configuration, so a backend read never labels it real.
+- `cargo_sensor.refused_result` is the one refused-read shape;
+  `no_topic_result` uses it. A deployment mismatch refusal now carries
+  `cargo_reading` with `deployment_mode: unconfirmed`, `reason:
+  deployment_not_confirmed`; a disconnected rosbridge read carries
+  `reason: transport_disconnected` and the served mode.
+
+### Settle span pinned
+
+- `arm_reports.settled_run`'s `SETTLE_S` simulated-time span had no test;
+  one is added (no code change).
+
 ## Verified
 
-All in `.claude/worktrees/flyto-robotics-fetch-live`, nothing pushed. Third
-round (tip after 9015cd3):
+All in `.claude/worktrees/flyto-robotics-fetch-live`, nothing pushed.
+
+Fourth round (a279e61):
+
+- Tests first, failing on behaviour before the fix: a rosbridge cancel send
+  raising `OSError` (raised out of `safe_stop`, no hold); a `/cmd_vel` zero
+  publish raising `OSError` (raised out); a halt whose stillness wait
+  raises (raised out); the zero hold after a failed publish (thread died);
+  a halt seen still after a reconnect released a held goal with no
+  confirmed end (completed); rclpy held goals with return codes 0/1 and no
+  kept handle released, and 2/3 had no `held_goals_ended`; a simulation
+  with the marker check disabled read cargo `completed` labelled `real`
+  and passed the motion preflight's deployment check; mismatch and
+  disconnected refusals had no `cargo_reading`. The rosbridge cancel test
+  with `RuntimeError` and the settle-span test passed before (they pin
+  existing guards the reviewers found unpinned).
+- The reviewers' probes (`scratchpad/probe/test_probe_halt.py`,
+  `test_probe_cargo.py`) now give `failed effect_unknown ... cancel not
+  confirmed for nav-1`, `failed effect_unknown ... standard cmd_vel stop
+  unavailable`, and a refused cargo read with `deployment_mode:
+  unconfirmed`.
+- Mutation checks, this round's guards (17, each changed in turn, 12 test
+  files run, file restored): all 17 killed. They are the rosbridge cancel
+  guard removed, narrowed to `RuntimeError`, and not catching
+  `RuntimeError`; the `if not stopped` refusal; the `_halt` wrapper; the
+  arm in `_halt_raised`; `_zero_published` narrowed to `RuntimeError`; the
+  held-goal end check; a held-goal end error taken as ended; rosbridge
+  ignoring `goals_canceling`; rclpy taking any code as ended; rclpy with no
+  handle taken as ended; `_deployment_mismatch` not refusing an unmarked
+  simulation; unmarked simulation labelled `real`; the mismatch and
+  disconnected cargo refusals without evidence; the `SETTLE_S` span check.
+  The round-3 guards were not re-mutated this round.
+- `PYTHONPATH=$PWD make verify PYTHON=<repo>/.venv/bin/python`: run twice,
+  rc 0 both times, ruff clean, 2109 passed, 20 skipped.
+- `flyto-index verify --strict` in the worktree: rc 0, 20 pass, 0 warn,
+  0 fail.
+- Indexer: CLI `context` on the halt guards and the cargo/deployment path
+  before editing (the MCP server is pinned to the flyto-indexer root, so
+  MCP `task(plan)`/`task(validate)` were not used as evidence).
+- Not re-run this round: the MuJoCo-backed bridge/fetch-return tests with
+  the e2e host interpreter (no `arm_reports` code changed; the new settle
+  test runs in the repo venv).
+
+Third round (tip after 9015cd3):
 
 - Tests first. Against the code at 15f882c (a scratch copy, conftest shim
   for the new hold API):
@@ -200,12 +302,16 @@ round (tip after 9015cd3):
   join, tick lock). Tests were added for the first three and the tick
   lock; the presence guard was redundant and removed; the join was
   removed (see above). One mutant first counted as killed was a syntax
-  error and was redone. Final: all 37 killed, including the four review
-  survivors (`retract.at >= place.at`, `object_held is False`,
-  `_resume_hold`'s presence-only skip, the hardware no-subscribe guard)
-  and `cargo_topic`'s discover-on-demand.
+  error and was redone. Final: all 37 of the guards in that set killed,
+  including the four review survivors (`retract.at >= place.at`,
+  `object_held is False`, `_resume_hold`'s presence-only skip, the
+  hardware no-subscribe guard) and `cargo_topic`'s discover-on-demand.
+  Correction (review round 4): that set was not complete. Three guards of
+  this change outside it survived the reviewers' mutation: the rosbridge
+  `_cancel_for_halt` except, `_halt_in_epoch`'s `if not stopped`, and
+  `settled_run`'s `SETTLE_S` span. They are pinned in round 4 (above).
 - `PYTHONPATH=$PWD make verify PYTHON=<repo>/.venv/bin/python`: rc 0, ruff
-  clean, 2094 passed, 20 skipped.
+  clean, 2094 passed, 20 skipped (one run; see the flake below).
 - MuJoCo-backed: `tests/test_sim_cargo_bridge.py tests/test_fetch_return_sim.py`
   with the e2e host venv's interpreter (mujoco 3.17.0, read only,
   `PYTHONDONTWRITEBYTECODE=1`): 68 passed.
@@ -227,16 +333,24 @@ counts) are superseded by the above; the round-2 counts were incomplete
 - Nothing ran against the live twin, Gazebo, rosbridge on 19090 or the
   robot. The halt's stillness wait, the zero hold, re-sent cancels and the
   halt epoch are tested with fake transports only.
-- Release can free an orphaned goal (residual risk, not fixed). A halt
-  that sees the robot still releases the hold even when held goals from an
-  earlier connection never had a confirmed cancel. On rosbridge a
-  `cancel_action_goal` re-sent for a goal another (dead) socket sent is
-  very likely a no-op; on rclpy a handle from a destroyed node likewise.
-  If Nav2 pauses (a wait or recovery, or the zero hold briefly winning), a
-  halt can see stillness, release, and the orphaned goal can drive again.
-  Closing it needs a confirmed end of those goals (Nav2's action status
-  topic, or a cancel-all through `<action>/_action/cancel_goal`), which
-  was not built or tested here.
+- The confirmed end of held goals (round 4) is tested with fakes only. Not
+  checked on a real rosbridge: that `call_service` reaches the hidden
+  `/navigate_to_pose/_action/cancel_goal` with `type` given and the zero
+  `uuid` as a list of 16 ints, and that Nav2 answers a cancel-all with no
+  goals as `return_code` 0 and an empty `goals_canceling` (if it answers
+  otherwise the hold is never released by a halt). The cancel-all also
+  cancels goals another client sent to that action server; that is
+  intended for a halt, but not discussed with the owner.
+- Liveness cost (round 4): a held goal with no confirmable end (a
+  restarted rclpy host, a rosbridge token with no action name, an action
+  server that never answers) now keeps the robot held until an operator
+  removes the kept hold file; there is still no operator release.
+- `make verify` flake (reported by the reviewers, not reproduced here):
+  `tests/test_managed_transport_adapter.py::test_status_reports_state_since_attempts_and_last_error`
+  timed out once ("condition not reached" after 3 s) in one of the
+  reviewers' two full runs and passed five times alone. This branch does
+  not touch that file or the managed transport. Both round-4 full runs
+  passed. Not checked on `main`; not fixed.
 - The kept hold file: written and read in tests only; the default path's
   permissions on a Desktop install, and two adapter hosts for one robot on
   one computer (they would share the file by resource id), were not tried.
@@ -258,7 +372,8 @@ counts) are superseded by the above; the round-2 counts were incomplete
 
 - Decide whether an operator release is wanted; today only a halt seen
   still releases the hold (now also across a restart).
-- Close the orphaned-goal release risk above (confirmed end of held goals
-  before release).
+- Check the cancel-all confirmation against the live twin's rosbridge and
+  Nav2 before relying on a release after a reconnect.
+- Look at the managed-transport timing flake on `main`.
 - Re-run the 2.0 m twin advance and read `sim_time` before changing any
   default speed.
