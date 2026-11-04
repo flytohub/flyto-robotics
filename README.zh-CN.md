@@ -18,7 +18,7 @@
 
 ## 看看真实机器人演示
 
-<p align="center"><a href="https://github.com/flytohub/flyto-robotics/releases/download/demo-amr-arm-20261104/ai-amr-arm-2026-11.mp4"><img src="docs/assets/amr-arm-demo.jpg" width="760" alt="观看 Flyto2 AMR 与机械臂演示" /></a></p>
+https://github.com/user-attachments/assets/096028c2-1fb7-43fe-a0c3-df4170e7a73a
 
 来看看 TurtleBot3 和机械臂在实验室怎么运行。这是演示，不代表已经通过生产级验收。
 
