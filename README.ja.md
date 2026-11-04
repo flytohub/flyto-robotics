@@ -16,12 +16,6 @@
 
 </div>
 
-## 実機デモを見てみよう
-
-https://github.com/user-attachments/assets/096028c2-1fb7-43fe-a0c3-df4170e7a73a
-
-ラボで動く TurtleBot3 とロボットアームを紹介します。製品環境での動作保証を示すものではありません。
-
 ## クイックスタート
 
 ```bash

@@ -16,12 +16,6 @@
 
 </div>
 
-## Watch the real-robot demo
-
-https://github.com/user-attachments/assets/096028c2-1fb7-43fe-a0c3-df4170e7a73a
-
-See the TurtleBot3 and robot arm working in the lab. This is demo footage, not a production sign-off.
-
 ## Quick start
 
 ```bash

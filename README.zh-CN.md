@@ -16,12 +16,6 @@
 
 </div>
 
-## 看看真实机器人演示
-
-https://github.com/user-attachments/assets/096028c2-1fb7-43fe-a0c3-df4170e7a73a
-
-来看看 TurtleBot3 和机械臂在实验室怎么运行。这是演示，不代表已经通过生产级验收。
-
 ## 快速开始
 
 ```bash

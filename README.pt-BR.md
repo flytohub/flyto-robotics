@@ -16,12 +16,6 @@
 
 </div>
 
-## Assista à demonstração com robôs reais
-
-https://github.com/user-attachments/assets/096028c2-1fb7-43fe-a0c3-df4170e7a73a
-
-Confira o TurtleBot3 e o braço robótico funcionando no laboratório. É uma demonstração, não uma validação para produção.
-
 ## Início rápido
 
 ```bash

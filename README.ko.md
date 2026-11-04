@@ -16,12 +16,6 @@
 
 </div>
 
-## 실제 로봇 데모 보기
-
-https://github.com/user-attachments/assets/096028c2-1fb7-43fe-a0c3-df4170e7a73a
-
-실험실에서 움직이는 TurtleBot3와 로봇 팔을 확인해 보세요. 운영 환경 전체를 검증한 영상은 아니에요.
-
 ## 빠른 시작
 
 ```bash
