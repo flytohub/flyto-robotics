@@ -16,6 +16,12 @@
 
 </div>
 
+## Watch the real-robot demo
+
+<p align="center"><a href="https://github.com/flytohub/flyto-robotics/releases/download/demo-amr-arm-20261104/ai-amr-arm-2026-11.mp4"><img src="docs/assets/amr-arm-demo.jpg" width="760" alt="Watch the Flyto2 AMR and robot arm demo" /></a></p>
+
+See the TurtleBot3 and robot arm working in the lab. This is demo footage, not a production sign-off.
+
 ## Quick start
 
 ```bash
