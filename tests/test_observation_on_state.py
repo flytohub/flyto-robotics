@@ -12,6 +12,7 @@ would advance the fake clock instead, and a sleep or spin raises.
 from __future__ import annotations
 
 import json
+import math
 import queue
 import sys
 import threading
@@ -32,6 +33,14 @@ from flyto_robotics.generic_ros2_adapter import (
 )
 
 ODOM_PERIOD = 0.033
+
+def _admitted(call_id: str = "preflight-1") -> str:
+    """A call the adapter admitted, as ``_invoke`` does before its preflight."""
+    from flyto_robotics import generic_ros2_adapter
+
+    generic_ros2_adapter.HALT_HOLD.admit(call_id)
+    return call_id
+
 
 
 class FakeClock:
@@ -90,8 +99,47 @@ class FeedingCondition(threading.Condition):
 # --- a fake rclpy that refuses to be spun by the caller ---------------------
 
 
+class FakeActionServers:
+    """The action servers a fake rclpy node reaches: cancel services and goal status.
+
+    ``goals`` holds every goal per action name (any client's) with its
+    action_msgs/GoalStatus: 2 EXECUTING, 3 CANCELING, 5 CANCELED. As in
+    rcl_action, a cancel-all (a default CancelGoal request: the zero goal id)
+    moves only ACCEPTED/EXECUTING goals to CANCELING; a CANCELING goal is not
+    cancelable. While ``finishes_cancel`` a server ends its CANCELING goals.
+    A subscription to ``<action>/_action/status`` receives the array at once
+    (the publisher is transient-local) unless ``publishes`` is off.
+    """
+
+    def __init__(self) -> None:
+        self.goals: dict[str, dict[str, int]] = {}
+        self.finishes_cancel = True
+        self.publishes = True
+        self.cancel_alls: list[str] = []
+
+    def cancel_all(self, service: str) -> None:
+        self.cancel_alls.append(service)
+        goals = self.goals.get(service.removesuffix("/_action/cancel_goal"), {})
+        for goal, status in goals.items():
+            if status in (1, 2):
+                goals[goal] = 3
+        if self.finishes_cancel:
+            for goal, status in goals.items():
+                if status == 3:
+                    goals[goal] = 5
+
+    def status(self, action: str):
+        return SimpleNamespace(
+            status_list=[
+                SimpleNamespace(status=status) for status in self.goals.get(action, {}).values()
+            ]
+        )
+
+
 class FakeNode:
     instances: list[FakeNode] = []
+    #: Set by the ``action_servers`` fixture.
+    servers: FakeActionServers | None = None
 
     def __init__(self, _name: str) -> None:
         self.callbacks: dict[str, object] = {}
@@ -110,6 +158,19 @@ class FakeNode:
 
     def create_subscription(self, _type, topic, callback, _qos):
         self.callbacks[topic] = callback
+        servers = FakeNode.servers
+        if servers is not None and servers.publishes and topic.endswith("/_action/status"):
+            callback(servers.status(topic.removesuffix("/_action/status")))
+        return topic
+
+    def destroy_subscription(self, subscription) -> None:
+        self.callbacks.pop(subscription, None)
+
+    def create_client(self, _type, service):
+        servers = FakeNode.servers
+        if servers is None:
+            raise RuntimeError("no action servers in this test")
+        return SimpleNamespace(call_async=lambda _request: servers.cancel_all(service))
 
     def get_topic_names_and_types(self):
         self.graph_reads += 1
@@ -163,6 +224,37 @@ def fake_rclpy(monkeypatch):
     module("tf2_msgs")
     module("tf2_msgs.msg", TFMessage=object)
     return FakeExecutor
+
+
+@pytest.fixture
+def action_servers(fake_rclpy, monkeypatch):
+    """rclpy action servers for halt tests: cancel-all and goal status (see FakeActionServers)."""
+
+    def module(name, **attributes):
+        created = sys.modules.get(name) or types.ModuleType(name)
+        for key, value in attributes.items():
+            setattr(created, key, value)
+        monkeypatch.setitem(sys.modules, name, created)
+
+    class CancelGoal:
+        Request = staticmethod(lambda: SimpleNamespace())
+
+    module("action_msgs")
+    module(
+        "action_msgs.msg",
+        GoalStatusArray=object,
+        GoalStatus=SimpleNamespace(STATUS_SUCCEEDED=4, STATUS_CANCELED=5),
+    )
+    module("action_msgs.srv", CancelGoal=CancelGoal)
+    module(
+        "rclpy.qos",
+        QoSProfile=lambda **kwargs: SimpleNamespace(**kwargs),
+        ReliabilityPolicy=SimpleNamespace(RELIABLE="reliable"),
+        DurabilityPolicy=SimpleNamespace(TRANSIENT_LOCAL="transient_local"),
+    )
+    servers = FakeActionServers()
+    monkeypatch.setattr(FakeNode, "servers", servers)
+    return servers
 
 
 def odometry(x=0.0, *, linear=0.0, angular=0.0):
@@ -301,11 +393,17 @@ def test_a_safe_stop_never_waits_for_discovery(fake_rclpy, clock, monkeypatch):
         now=lambda: SimpleNamespace(to_msg=lambda: None)
     )
 
+    # The halt is completed on the odometry that shows the robot still for
+    # STILL_MIN_SECONDS; it never waits on discovery or a timer for it.
+    condition.feed = [lambda: backend._on_odometry(odometry(0.1))] * 40
+
     result = backend.safe_stop("stop-1")
 
     assert result.outcome == "completed"
     assert len(published) == 1
-    assert condition.timed_out == 0 and clock.now == 100.0
+    assert condition.timed_out == 0
+    needed = adapter_module.STILL_MIN_SECONDS / ODOM_PERIOD + 1
+    assert needed <= condition.delivered <= needed + 1
 
 
 def test_a_goal_future_is_awaited_by_its_done_callback(fake_rclpy, clock):
@@ -366,7 +464,7 @@ def test_navigate_preflight_waits_for_the_map_transform_instead_of_refusing(
         lambda: backend._on_tf(MAP_TF),
     ]
 
-    assert adapter._motion_preflight("motion.navigate") is None
+    assert adapter._motion_preflight(_admitted(), "motion.navigate") is None
     assert condition.delivered == 3
     assert condition.timed_out == 0
 
@@ -392,7 +490,7 @@ def test_navigate_still_refuses_once_the_wait_ends_without_a_transform(
     backend._on_odometry(odometry())
     backend._on_scan(SCAN)
 
-    refusal = adapter._motion_preflight("motion.navigate")
+    refusal = adapter._motion_preflight(_admitted(), "motion.navigate")
 
     assert refusal == "fresh map-to-odom transform is required before navigation"
     assert condition.timed_out == 1
@@ -414,20 +512,19 @@ def test_the_preflight_asks_only_for_what_navigation_needs(fake_rclpy, clock):
 def test_stationary_returns_on_consecutive_still_odometry(fake_rclpy, clock):
     backend, condition = rclpy_backend(clock)
     backend._on_odometry(odometry(0.10, linear=0.12))
-    condition.feed = [
-        lambda: backend._on_odometry(odometry(0.104, linear=0.08)),
-        lambda: backend._on_odometry(odometry(0.105, linear=0.0)),
-        lambda: backend._on_odometry(odometry(0.105, linear=0.0)),
-        lambda: backend._on_odometry(odometry(0.105, linear=0.0)),
-        lambda: pytest.fail("waited past the samples that showed it stopped"),
-    ]
+    # Still from the second message on, for STILL_MIN_SECONDS of odometry.
+    needed = math.ceil(adapter_module.STILL_MIN_SECONDS / ODOM_PERIOD - 1e-9) + 1
+    condition.feed = [lambda: backend._on_odometry(odometry(0.104, linear=0.08))] + [
+        (lambda: backend._on_odometry(odometry(0.105, linear=0.0))) for _ in range(needed)
+    ] + [lambda: pytest.fail("waited past the samples that showed it stopped")]
 
     settled = backend.wait_until_stationary(1.0)
 
     assert settled["stationary"] is True and settled["drifting"] is False
-    assert settled["still_samples"] == 3
-    assert condition.delivered == 4 and condition.timed_out == 0
-    assert settled["waited_seconds"] == pytest.approx(4 * ODOM_PERIOD)
+    assert settled["still_samples"] == needed
+    assert settled["still_seconds"] >= adapter_module.STILL_MIN_SECONDS
+    assert condition.delivered == needed + 1 and condition.timed_out == 0
+    assert settled["waited_seconds"] == pytest.approx((needed + 1) * ODOM_PERIOD)
     assert settled["waited_seconds"] < 1.0
 
 
@@ -449,7 +546,7 @@ def test_a_robot_still_moving_at_the_cap_is_reported_drifting(fake_rclpy, clock)
     assert condition.feed
 
 
-def test_stationary_judges_pose_when_odometry_carries_no_twist(clock):
+def test_odometry_that_carries_no_twist_is_never_stationary(clock):
     backend = quiet_backend()
     condition = FeedingCondition(clock)
     backend._condition = condition
@@ -457,18 +554,17 @@ def test_stationary_judges_pose_when_odometry_carries_no_twist(clock):
     def pose_only(x):
         return {"pose": {"pose": {"position": {"x": x, "y": 0.0}, "orientation": {"w": 1.0}}}}
 
+    # Was: judged on the pose alone. A twist that is not there is unknown, so
+    # the pose cannot show every axis still (review round 5).
     backend._update_odometry(pose_only(0.10), clock.now)
     condition.feed = [
-        lambda: backend._update_odometry(pose_only(0.12), clock.now),
-        lambda: backend._update_odometry(pose_only(0.1205), clock.now),
-        lambda: backend._update_odometry(pose_only(0.1205), clock.now),
-        lambda: backend._update_odometry(pose_only(0.1206), clock.now),
+        (lambda: backend._update_odometry(pose_only(0.1205), clock.now)) for _ in range(40)
     ]
 
     settled = backend.wait_until_stationary(1.0)
 
-    assert settled["stationary"] is True
-    assert condition.delivered == 4 and condition.timed_out == 0
+    assert settled["stationary"] is False
+    assert settled["unknown_twist_messages"] == settled["odometry_messages"] > 3
     backend.disconnect()
 
 
@@ -476,7 +572,7 @@ def test_the_adapter_exposes_the_settle_wait_for_the_host(fake_rclpy, clock):
     backend, condition = rclpy_backend(clock)
     adapter = GenericROS2Adapter(backend=backend, resource_id="robot")
     backend._on_odometry(odometry(linear=0.0))
-    condition.feed = [lambda: backend._on_odometry(odometry(linear=0.0)) for _ in range(3)]
+    condition.feed = [lambda: backend._on_odometry(odometry(linear=0.0)) for _ in range(40)]
 
     assert adapter.wait_until_stationary(1.0)["stationary"] is True
     assert adapter.supports_shared_connection is True
@@ -592,7 +688,7 @@ def test_rosbridge_discovery_is_served_from_cache_until_reconnect(no_sleep, monk
     for phase in ("before", "after", "post_stop"):
         adapter.observe(phase=phase, execution_id="call-1")
     assert adapter._deployment_mismatch() is None
-    assert adapter._motion_preflight("motion.advance") is None
+    assert adapter._motion_preflight(_admitted(), "motion.advance") is None
 
     assert queries == {"/rosapi/topics": 1, "/rosapi/action_servers": 1}
 
@@ -829,25 +925,36 @@ class _Handle:
         )
 
 
-def test_a_stop_publishes_first_and_tries_a_stale_goal_only_once(fake_rclpy, clock):
+def test_a_stop_publishes_first_and_keeps_a_goal_whose_cancel_is_refused(
+    fake_rclpy, clock, monkeypatch
+):
+    # Was: completed, the goal forgotten after one try. A refused cancel
+    # means Nav2 may still drive that goal, so the halt is effect_unknown,
+    # the handle is kept, and the next halt cancels it again.
+    monkeypatch.setattr(adapter_module, "CANCEL_CONFIRM_WAIT_S", 0.05)
     backend, _condition = rclpy_backend(clock)
     calls: list[str] = []
     backend._publish_zero = lambda: calls.append("zero") or True
-    backend._goal_handles["old-call"] = _Handle(calls)
-    backend._result_futures["old-call"] = SimpleNamespace(done=lambda: False)
+    handle = _Handle(calls)
+    backend._goal_handles["old-call"] = handle
+    backend._result_futures["old-call"] = SimpleNamespace(
+        done=lambda: False, add_done_callback=lambda _callback: None
+    )
 
-    assert backend.safe_stop("stop-1").outcome == "completed"
-    assert calls[0] == "zero"
-    assert calls.count("cancel") == 1
+    result = backend.safe_stop("stop-1")
+
+    assert result.outcome == "failed"
+    assert result.evidence["reason_code"] == "effect_unknown"
+    assert result.evidence["halt_confirmation"]["unconfirmed"].keys() == {"old-call"}
     # The action server could overwrite the first zero until its cancel
-    # landed, so the last command the stop sends comes after the cancel
-    # (cancel() publishes its own zero too; the stop does not rely on it).
-    assert calls == ["zero", "cancel", "zero", "zero"]
-    assert backend._goal_handles == {} and backend._result_futures == {}
+    # landed, so the last command the stop sends comes after the cancel.
+    assert calls[:4] == ["zero", "cancel", "zero", "zero"]
+    assert backend._goal_handles == {"old-call": handle}
+    assert backend.halt_hold()["goals"] == ["old-call"]
 
     calls.clear()
-    assert backend.safe_stop("stop-2").outcome == "completed"
-    assert calls == ["zero"]
+    assert backend.safe_stop("stop-2").outcome == "failed"
+    assert calls[:2] == ["zero", "cancel"]
     backend.disconnect()
 
 
@@ -866,7 +973,10 @@ def test_call_history_is_bounded(fake_rclpy, clock):
     backend.disconnect()
 
 
-def test_a_rosbridge_stop_publishes_first_and_forgets_the_old_goal(no_sleep):
+def test_a_rosbridge_stop_publishes_first_and_keeps_an_unanswered_goal(no_sleep):
+    # Was: completed, the goal forgotten. An unanswered cancel (Nav2
+    # restarted) proves nothing stopped, so the halt is effect_unknown and
+    # the goal is kept for the next halt to cancel again.
     backend = quiet_backend()
     sent: list[str] = []
     backend._topic_types = {"/cmd_vel": "geometry_msgs/msg/Twist"}
@@ -874,16 +984,19 @@ def test_a_rosbridge_stop_publishes_first_and_forgets_the_old_goal(no_sleep):
     backend._wait_for = lambda *_args, **_kwargs: None  # the cancel goes unanswered
     backend._active_actions["old-call"] = "/drive_on_heading"
 
-    assert backend.safe_stop("stop-1").outcome == "completed"
+    result = backend.safe_stop("stop-1")
+
+    assert result.outcome == "failed"
+    assert result.evidence["reason_code"] == "effect_unknown"
+    assert result.evidence["effect_unknown"] is True
     assert sent.index("publish") < sent.index("cancel_action_goal")
     # The last word on cmd_vel is the stop's, after the cancel.
     assert sent[-1] == "publish"
-    assert max(i for i, op in enumerate(sent) if op == "cancel_action_goal") < len(sent) - 1
-    assert backend._active_actions == {}
+    assert backend._active_actions == {"old-call": "/drive_on_heading"}
 
     sent.clear()
     backend.safe_stop("stop-2")
-    assert "cancel_action_goal" not in sent
+    assert "cancel_action_goal" in sent
     backend.disconnect()
 
 
@@ -899,19 +1012,29 @@ def test_a_rosbridge_reconnect_drops_goal_ids_of_the_old_socket(no_sleep):
 
 def test_a_stop_after_a_cancel_that_never_reaches_zero_still_ends_on_zero(fake_rclpy, clock):
     # A goal whose cancel times out never reaches cancel()'s own zero; the
-    # stop still ends with one, and reports it only if one went out.
+    # stop still ends with one, and reports whether one went out.
     backend, _condition = rclpy_backend(clock)
     calls: list[str] = []
     zeros = iter([False, True])
-    backend._publish_zero = lambda: calls.append("zero") or next(zeros)
-    backend.cancel = lambda call_id: calls.append("cancel")
+    backend._publish_zero = lambda: calls.append("zero") or next(zeros, False)
+
+    from flyto_robotics.adapter_contract import CallResult
+
+    def timed_out(call_id):
+        calls.append("cancel")
+        return CallResult(call_id, "failed", detail="ROS 2 cancel timed out")
+
+    backend.cancel = timed_out
     backend._goal_handles["old-call"] = object()
     backend._result_futures["old-call"] = SimpleNamespace(done=lambda: False)
 
     result = backend.safe_stop("stop-1")
 
-    assert calls == ["zero", "cancel", "zero"]
-    assert result.outcome == "completed"
+    assert calls[:3] == ["zero", "cancel", "zero"]
+    # Was: completed. The zero went out, but nothing confirmed the goal
+    # stopped driving, so the halt is effect_unknown.
+    assert result.outcome == "failed"
+    assert result.evidence["reason_code"] == "effect_unknown"
     assert result.evidence["zero_velocity_published"] is True
     backend.disconnect()
 
@@ -1025,7 +1148,7 @@ def test_readings_missing_at_preflight_forget_the_cached_graph(fake_rclpy, clock
     backend.invalidate_discovery = lambda: invalidated.append(True)
     backend._on_tf(MAP_TF)
 
-    assert adapter._motion_preflight("motion.advance") == (
+    assert adapter._motion_preflight(_admitted(), "motion.advance") == (
         "fresh odometry is required before motion"
     )
     assert invalidated == [True]

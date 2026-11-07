@@ -76,3 +76,69 @@ simulation only and the navigation safety floor must NOT be disabled to pass.
   12 V arm cut-off, and do not let the robot leave before retraction + load
   verification. Exact dimensions depend on the real hardware measurements,
   so none are asserted by this simulated fixture.
+
+## Cargo bridge for the live twin (SIMULATION)
+
+The Gazebo/Nav2 twin has no tray sensor. `cargo_bridge.py` holds the
+**symbolic** tray (`mobile_cargo.MobileCargoSimulator`, the same object
+`run.py` uses) and publishes it so the robot's adapter reads
+`sensing.cargo_present` from a topic. It is simulation state, not a
+measurement, and it can only reach a simulation.
+
+| What | Value |
+| --- | --- |
+| Topic | `$FLYTO_ROS2_CARGO_TOPIC`, else `/flyto/cargo_present` (the adapter's simulation default; `cargo_sensor.simulated_tray_topic`). A hardware adapter never reads `/flyto/cargo_present`, not even when configured to |
+| Type | `std_msgs/msg/Bool` (`{"data": true}` = block in tray) |
+| QoS | volatile, re-published at `--rate-hz` (2-10, default 2); never latched. The rate contract is written once, in `flyto_robotics/cargo_sensor.py` |
+| Publisher | the adapter's `RosbridgeROS2Backend.publish_simulated_state`, presence mode (odometry only, never motion) |
+| Gate | refuses unless `FLYTO_ROS2_DEPLOYMENT_MODE=simulation`, the marker check is on, and the graph carries `/clock`; the process refuses to start otherwise |
+| Robot pose | `/odom` over the same connection, odometry frame |
+| Reports | `--reports FILE`, `flyto.sim-arm-report.v1` lines pushed by the arm's and mission's host (`run.py --reports FILE`); without it the tray never loads |
+
+The tray loads only through `accept_station_handoff`, when all of these hold
+for one place: a completed place, seen inside, released and not held; a
+settled run of the arm's own tray readings (>= 3 readings over 0.5 s of
+simulated time, inside 2 mm, not held); a completed retract to `ready`; and
+odometry within `--station-tolerance-m` of the station, moving less than
+1 cm, with no gap over 1.5 s, **from the place report's `started_at` (taken
+before the place was commanded) until the moment the handoff is decided**.
+Each pose sample is one odometry message stamped when it was received, so
+odometry silence is a gap however often the bridge ticks, and the decision
+waits for a message received after the decision time.
+
+It empties on an `unload` report (delivered at home), a `mission_end` report
+(and nothing reported before it loads again), a `loss` report, an arm
+reading showing the block out or held again before departure,
+`--max-carry-s` (default 600) of carrying, and when the bridge stops (it
+publishes `false` last).
+
+```
+PY=<repo>/.venv/bin/python
+# 1. The twin is up (sim/twin/compose.yaml) and the robot has not moved since
+#    it was launched, so its odometry frame starts at its start pose.
+# 2. FLYTO_ROS2_DEPLOYMENT_MODE=simulation $PY sim/fetch_return/cargo_bridge.py \
+#      --station-x 0.4 --station-y 0.0 --reports /tmp/fetch-reports.jsonl
+# 3. The arm/mission host drives the twin itself and appends to the same file:
+#      $PY sim/fetch_return/run.py --arm-config <config> \
+#        --navigation gazebo --station-distance-m 0.4 \
+#        --reports /tmp/fetch-reports.jsonl
+# Tests (no Docker; fake rosbridge):
+$PY -m pytest -q tests/test_sim_cargo_bridge.py tests/test_fetch_return_report_trail.py
+```
+
+Step 3 needs `--navigation gazebo`: the default kinematic navigator never
+moves the twin, so the odometry the bridge reads never reaches the station and
+the tray can never load. With it, `run.py` parks the twin
+`--station-distance-m` ahead of the pose it started from (in the map frame,
+along its start heading). The bridge's station is in the **odometry** frame:
+for a twin that has not moved since launch, odometry starts at the start pose
+with heading 0, so the parked pose is (`--station-distance-m`, 0), which is
+what `--station-x 0.4 --station-y 0.0` says. If the twin has moved before,
+read `/odom` once before step 3 and put the station `--station-distance-m`
+ahead of that pose along its heading. Nav2's arrival tolerance must stay
+inside `--station-tolerance-m` (0.10 m by default), or the parked check fails.
+This live sequence has not been run against the twin; only the tests above
+have.
+
+The bridge never commands motion and never touches the 0.35 m clearance
+floor or any other safety limit.

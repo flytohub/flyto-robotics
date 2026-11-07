@@ -121,9 +121,12 @@ def test_a_call_while_the_forward_is_down_is_refused_typed_and_sends_nothing(lin
     assert result.evidence["transport"]["state"] == "failed"
     assert result.detail.startswith("transport_unavailable:")
     assert backend.invoked == []
+    # A stop that cannot reach the robot never fails open: it holds.
     stop = device.safe_stop()
     assert stop.outcome == OUTCOME_FAILED
-    assert stop.evidence["reason_code"] == "transport_unavailable"
+    assert stop.evidence["reason_code"] == "effect_unknown"
+    assert stop.evidence["transport_unavailable"] is True
+    assert adapter_module.HALT_HOLD.snapshot() is not None
     assert device.cancel("go").evidence["reason_code"] == "transport_unavailable"
     assert backend.stops == 0
 

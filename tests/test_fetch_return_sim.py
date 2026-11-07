@@ -122,7 +122,7 @@ def test_e2e_real_mujoco_contact_physics_pick_and_return():
         pytest.skip("external LeRobot config not installed")
     verdict = run_mission("派機器人去把紅色積木拿回來", config_path=CONFIG)
     assert verdict["state"] == "done", verdict.get("failure")
-    assert verdict["step_count"] == 11
+    assert verdict["step_count"] == 12
     assert [e["stage"] for e in verdict["steps"]] == [
         "planning",
         "outbound_nav",
@@ -135,8 +135,12 @@ def test_e2e_real_mujoco_contact_physics_pick_and_return():
         "cross_device_handoff",
         "return_nav",
         "final_verification",
+        "unload",
     ]
-    assert verdict["steps"][-1]["detail"]["payload_present"] is True
+    assert verdict["steps"][-2]["detail"]["payload_present"] is True
+    # Delivered at home, the tray is emptied: it never stays loaded.
+    assert verdict["steps"][-1]["detail"]["unloaded"] is True
+    assert verdict["steps"][-1]["detail"]["cargo_present"] is False
     assert verdict["fidelity"]["mobile_arm_and_payload_physical_coupling"] is False
 
 

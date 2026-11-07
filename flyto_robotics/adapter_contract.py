@@ -58,6 +58,15 @@ _CAPABILITY_METADATA: Mapping[str, Mapping[str, Any]] = {
         "requires_safe_stop": False,
         "cancellable": False,
     },
+    # The robot's own cargo sensor, opt-in per resource (flyto_robotics.cargo_sensor).
+    "sensing.cargo_present": {
+        "display_name": "Cargo Present",
+        "description": "Read the robot's own cargo sensor: is a load on board now",
+        "safety_class": "read_only",
+        "required_permissions": (),
+        "requires_safe_stop": False,
+        "cancellable": False,
+    },
     # Named places, kept on the execution host (flyto_robotics.places).
     "places.list": {
         "display_name": "Places",
@@ -210,6 +219,8 @@ class DeclaredArgument:
     unit: str = ""
     # Text arguments only: the most characters the value may have.
     max_length: int | None = None
+    # Number arguments only: the value a call that names none is run with.
+    default: float | None = None
 
     @property
     def narrows(self) -> bool:
@@ -231,6 +242,8 @@ class DeclaredArgument:
         # the schema hash it had before text arguments existed.
         if self.max_length is not None:
             result["max_length"] = self.max_length
+        if self.default is not None:
+            result["default"] = self.default
         return result
 
 
@@ -348,6 +361,8 @@ def arguments_to_json_schema(arguments: Sequence[DeclaredArgument]) -> dict[str,
             schema["minimum"] = item.minimum
         if item.maximum is not None:
             schema["maximum"] = item.maximum
+        if item.default is not None:
+            schema["default"] = item.default
         if item.description:
             schema["description"] = item.description
         if item.unit:

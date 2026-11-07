@@ -13,9 +13,9 @@ from pathlib import Path
 from typing import Any
 
 from .safety_profile import (
-    DEFAULT_PROFILE_PATH,
+    PROFILE_PATH_ENV,
     apply_profile,
-    load_profile,
+    configured_profile,
 )
 
 logger = logging.getLogger("flyto.robotics.contracts")
@@ -24,7 +24,7 @@ logger = logging.getLogger("flyto.robotics.contracts")
 #: or a second installation on one host can point elsewhere; there is no
 #: switch to disable enforcement, because a site limit an operator can turn
 #: off from the job side is not a site limit.
-SAFETY_PROFILE_ENV = "FLYTO_SAFETY_PROFILE"
+SAFETY_PROFILE_ENV = PROFILE_PATH_ENV
 
 JOB_CONTRACT_VERSION = "flyto.robotics.job.v1"
 RESULT_CONTRACT_VERSION = "flyto.robotics.result.v1"
@@ -242,7 +242,7 @@ def _constrained_by_site(requested: SafetyLimits) -> SafetyLimits:
     The parse-time clamps above remain the outer bound: a profile narrows what
     a job may ask for, it cannot widen it past what the contract allows.
     """
-    profile = load_profile(os.getenv(SAFETY_PROFILE_ENV, DEFAULT_PROFILE_PATH))
+    profile = configured_profile()
     if not profile:
         return requested
 

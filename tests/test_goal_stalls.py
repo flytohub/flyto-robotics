@@ -129,7 +129,7 @@ def test_the_rosbridge_backend_reads_the_watched_topics_into_a_running_goal(no_s
         track = _track(started_at=time.monotonic())
         backend._motion_tracks["nav-1"] = track
         backend._store_odometry({"frame": "odom", "x": 0.0, "y": 0.0, "yaw": 0.0},
-                                (0.0, 0.0), time.monotonic())
+                                (0.0, 0.0, 0.0, 0.0, 0.0, 0.0), time.monotonic())
         backend._handle_message(
             json.loads(json.dumps({
                 "op": "publish",

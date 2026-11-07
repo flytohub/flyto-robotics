@@ -138,9 +138,15 @@ GUARD_END_PLANNED_STOP = "planned_stop"
 # Half-width of the wedge read the way the robot was travelling.
 TRAVEL_HALF_WIDTH_RAD = math.radians(20.0)
 # Where that wedge is centred, relative to the robot's heading.
-#: The base counts as standing still below these odometry speeds.
-STILL_LINEAR_MPS = 0.01
-STILL_ANGULAR_RADPS = 0.05
+#: A goal's base counts as stalled (not progressing) below these odometry
+#: speeds on its driven axes, linear x and angular z. This is stall evidence,
+#: not stillness: a base creeping or wobbling at a few cm/s or rad/s while its
+#: goal makes no progress is still a stall to record. Whether the robot is
+#: still after a halt is a different, stricter question, answered only by
+#: ``generic_ros2_adapter`` (every twist axis and the pose, over time); the
+#: two are named apart so neither is read as the other.
+STALL_LINEAR_MPS = 0.01
+STALL_ANGULAR_RADPS = 0.05
 #: A still spell this long while a goal runs is recorded as a stall. Shorter
 #: than Nav2's default progress window (10 s), so a stall is on record before
 #: the controller gives up on it.
@@ -238,7 +244,7 @@ class MotionTrack:
         linear, angular = velocity
         if not (math.isfinite(linear) and math.isfinite(angular)):
             return
-        if abs(linear) < STILL_LINEAR_MPS and abs(angular) < STILL_ANGULAR_RADPS:
+        if abs(linear) < STALL_LINEAR_MPS and abs(angular) < STALL_ANGULAR_RADPS:
             if self._still_since is None:
                 self._still_since = at
                 self._still_pose = dict(pose) if isinstance(pose, Mapping) else None

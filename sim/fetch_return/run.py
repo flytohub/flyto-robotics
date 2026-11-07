@@ -17,6 +17,7 @@ import json
 import math
 import re
 import sys
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -26,7 +27,9 @@ from typing import Any
 if __package__ in ("", None):
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from sim.fetch_return import arm_reports as reports
 from sim.fetch_return.contract import WORKSPACE_FRAME, MissionFailure, Pose
+from sim.fetch_return.mobile_cargo import ARM_RESOURCE, MOBILE_RESOURCE, MobileCargoSimulator
 
 GOALS = (
     re.compile(
@@ -40,8 +43,6 @@ GOALS = (
 )
 PAYLOAD = "block-red"
 CARGO = "bin-blue"
-MOBILE_RESOURCE = "turtlebot3-mobile-sim"
-ARM_RESOURCE = "am-arm200-fixed-station-sim"
 PICKUP_STATION = "station-red"
 
 
@@ -221,54 +222,24 @@ class ArmRig:
             "z_m": round(dz, 5),
         }
 
+    def tray_reading(self) -> dict[str, Any]:
+        """This process's own arm world, read after integrating it to now (it owns the world)."""
+        self.world.step()
+        with self.world.lock:
+            block = [float(v) for v in self.world.data.body(PAYLOAD).xpos]
+            tip = self.world.tip().position
+            held = block[2] > 0.04 and math.hypot(block[0] - tip[0], block[1] - tip[1]) < 0.03
+        return reports.tray_reading(
+            inside=self.independent_cargo_check()["in_cargo"],
+            held=held,
+            block=block,
+            sim_t=self.clock.now(),
+        )
 
-class MobileCargoSimulator:
-    """Independent mobile tray state; never read the fixed arm after departure.
-
-    The stationary arm's MuJoCo model verifies placement into the tray *proxy*
-    while docked. A separate cargo simulator owns the transported object's
-    presence thereafter. This boundary is NOT a physical cargo simulation.
-    """
-
-    def __init__(self):
-        self._carrying = False
-        self._verified_transfer = False
-
-    def accept_station_handoff(
-        self,
-        *,
-        is_docked: bool,
-        fixed_arm_retracted: bool,
-        observed_placement: bool,
-        physics_placement: bool,
-    ) -> dict[str, Any]:
-        if not is_docked:
-            raise MissionFailure("handoff", "robot_not_docked")
-        if not fixed_arm_retracted:
-            raise MissionFailure("handoff", "stationary_arm_not_retracted")
-        if not observed_placement or not physics_placement:
-            raise MissionFailure("handoff", "cargo_transfer_not_verified")
-        self._carrying = True
-        self._verified_transfer = True
-        return {
-            "source": "station_mujoco_physics_plus_simulated_mobile_cargo_sensor",
-            "from_resource_id": ARM_RESOURCE,
-            "to_resource_id": MOBILE_RESOURCE,
-            "handoff_verified": True,
-            "cargo_present": True,
-            "simulation_only": True,
-        }
-
-    def inject_loss(self) -> None:
-        self._carrying = False
-
-    def observe_on_mobile(self) -> dict[str, Any]:
-        return {
-            "source": "mobile_cargo_sensor_simulation_not_physical",
-            "resource_id": MOBILE_RESOURCE,
-            "cargo_present": self._carrying,
-            "handoff_verified": self._verified_transfer,
-        }
+    def push_settle_readings(self, path: Path, *, count: int = 8, every_s: float = 0.1) -> None:
+        for _ in range(count):
+            self.clock.sleep(every_s)
+            reports.append_report(path, self.tray_reading())
 
 
 class Evidence:
@@ -299,6 +270,7 @@ def run_mission(
     drop_on_return: bool = False,
     navigation: str = "kinematic",
     station_distance_m: float = 0.4,
+    reports_path: Path | None = None,
 ) -> dict[str, Any]:
     task_id = str(uuid.uuid4())
     evidence = Evidence(task_id)
@@ -410,13 +382,25 @@ def run_mission(
                     "resource_id": ARM_RESOURCE,
                 },
             )
+            place_started_at = time.time()
             placed = arm.call("manipulation.place", {"container_id": "blue-1"})
+            if reports_path is not None:
+                # Opt-in: push the place to a live cargo bridge (cargo_bridge.py),
+                # whatever its outcome; the bridge judges it.
+                reports.append_report(
+                    reports_path,
+                    reports.place_report(
+                        placed.outcome, placed.evidence, started_at=place_started_at
+                    ),
+                )
             if (
                 placed.outcome != "completed"
                 or placed.evidence.get("perception_after", {}).get("object_in_container")
                 is not True
             ):
                 raise MissionFailure("load_cargo", "place_not_independently_verified")
+            if reports_path is not None:
+                arm.push_settle_readings(reports_path)
             cargo_before = arm.independent_cargo_check()
             if not cargo_before["in_cargo"]:
                 raise MissionFailure("load_cargo", "block_not_in_cargo")
@@ -430,6 +414,8 @@ def run_mission(
             )
             # Fixed station's arm must retract before the mobile robot can leave.
             stowed = arm.call("manipulation.move_joints", {"pose": "ready"})
+            if reports_path is not None:
+                reports.append_report(reports_path, reports.retract_report(stowed.outcome))
             if stowed.outcome != "completed":
                 raise MissionFailure("stow_arm", "arm_not_stowed")
             evidence.add(
@@ -455,6 +441,10 @@ def run_mission(
             )
             if drop_on_return:
                 cargo_sensor.inject_loss()
+                if reports_path is not None:
+                    reports.append_report(
+                        reports_path, reports.loss_report("payload_lost_in_transit")
+                    )
                 evidence.add(
                     "fault_injection",
                     {
@@ -481,6 +471,10 @@ def run_mission(
                     "cargo": cargo_after,
                 },
             )
+            # Delivered at home: the load is taken off, and the tray says so.
+            evidence.add("unload", cargo_sensor.unload())
+            if reports_path is not None:
+                reports.append_report(reports_path, reports.unload_report("completed"))
             report["state"] = "done"
         finally:
             from flyto_modules_lerobot import mujoco_sim
@@ -498,6 +492,10 @@ def run_mission(
             },
         )
         report["failure"] = {"stage": exc.stage, "reason": exc.reason}
+    finally:
+        if reports_path is not None:
+            # Whatever happened, nothing of this mission may load the tray again.
+            reports.append_report(reports_path, reports.mission_end_report(report["state"]))
     nav.close()
     report["digest"] = evidence.chain
     report["step_count"] = len(evidence.entries)
@@ -515,6 +513,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--station-distance-m", type=float, default=0.4)
     parser.add_argument("--hide-target", action="store_true")
     parser.add_argument("--drop-on-return", action="store_true")
+    parser.add_argument(
+        "--reports",
+        type=Path,
+        help="append place/settle/retract/unload/loss/mission_end reports here "
+        "for cargo_bridge.py",
+    )
     args = parser.parse_args(argv)
     verdict = run_mission(
         args.goal,
@@ -524,6 +528,7 @@ def main(argv: list[str] | None = None) -> int:
         drop_on_return=args.drop_on_return,
         navigation=args.navigation,
         station_distance_m=args.station_distance_m,
+        reports_path=args.reports,
     )
     serialized = json.dumps(verdict, ensure_ascii=False, indent=2)
     if args.out:

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import time
 
+import pytest
 from test_inflation_escape import OBSERVED, EscapeBackend, make, navigate
 from test_presence_on_state import RecordingSocket, no_sleep  # noqa: F401
 
@@ -195,3 +196,40 @@ def test_an_escape_reports_the_clock_per_leg_and_for_the_call(monkeypatch):
     assert escape["sim_time"]["legs_measured"] == 3
     assert escape["sim_time"]["rtf_min"] == 0.35
     assert escape["sim_time"]["sim_slow"] is True
+
+
+def test_a_simulated_straight_drive_reports_wall_against_sim_time(monkeypatch):
+    # A 2.0 m advance took 52 s wall on the twin at 0.12 m/s. Cloud can only
+    # tell a slow simulator from a slow robot if the drive's own evidence
+    # carries both clocks: sim_time.wall_s, sim_s and the real-time factor.
+    from test_motion_outcome import backend_with, odom
+
+    monkeypatch.setenv("FLYTO_ROS2_DEPLOYMENT_MODE", "simulation")
+    monkeypatch.setenv("FLYTO_ROS2_SIM_MARKER_TOPIC", "/clock")
+
+    def drive(call_id):
+        clock = [
+            {"op": "publish", "topic": "/clock", "msg": _clock(50.0 + step * 0.05)}
+            for step in range(4)
+        ]
+        return [
+            *clock,
+            odom(0.3),
+            {"op": "action_result", "id": call_id, "status": 4, "result": True,
+             "values": {"error_code": 0}},
+        ]
+
+    backend, _socket = backend_with(drive, monkeypatch)
+    try:
+        result = backend.invoke(
+            call_id="adv-sim", capability_id="motion.advance",
+            arguments={"distance_m": 0.3}, deadline_seconds=3.0,
+        )
+    finally:
+        backend.disconnect()
+    timed = result.evidence["motion_outcome"]["sim_time"]
+    assert timed["applicable"] is True and timed["measured"] is True
+    assert timed["sim_s"] == pytest.approx(0.15)
+    # The fake delivers the clock in microseconds of wall time, so only the
+    # fields are checked here; the factor itself is covered by _record above.
+    assert {"wall_s", "rtf_mean", "rtf_min", "sim_slow", "sim_slow_threshold"} <= timed.keys()
