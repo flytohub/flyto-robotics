@@ -115,6 +115,12 @@ def test_the_rosbridge_backend_reads_the_watched_topics_into_a_running_goal(no_s
         return sockets[-1]
 
     backend = RosbridgeROS2Backend(url="ws://127.0.0.1:1", connection_factory=connect)
+    # Held while a motion runs, not while the connection is idle.
+    assert not any(
+        item["topic"] in ("/cmd_vel_nav", "/cmd_vel") for item in sockets[-1].subscribed
+    )
+    hold = backend.hold_readings(adapter_module.READ_MOTION)
+    hold.__enter__()
     try:
         watched = {
             item["topic"]: item
@@ -139,6 +145,7 @@ def test_the_rosbridge_backend_reads_the_watched_topics_into_a_running_goal(no_s
         )
         assert track._still_commands["/cmd_vel_nav"].samples == 1
     finally:
+        hold.__exit__(None, None, None)
         backend.disconnect()
 
 

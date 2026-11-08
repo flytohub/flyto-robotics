@@ -7,6 +7,7 @@ import time
 
 import pytest
 
+from flyto_robotics.generic_ros2_adapter import READ_STATE
 from flyto_robotics.ros2_observation_bundle import (
     Ros2ObservationError,
     build_ros2_observation_bundle,
@@ -85,11 +86,12 @@ def test_rosbridge_reports_the_sweep_with_the_range(monkeypatch):
         "angle_min": 0.0,
         "angle_increment": FULL / 4,
     }
-    with backend._condition:
-        backend._update_odometry(ODOM, time.monotonic())
-        backend._update_scan(scan, time.monotonic())
-
-    observed = backend.observation()["range"]
+    # The scans a reader waits for are the ones sent after it subscribed.
+    with backend.hold_readings(READ_STATE):
+        with backend._condition:
+            backend._update_odometry(ODOM, time.monotonic())
+            backend._update_scan(scan, time.monotonic())
+        observed = backend.observation()["range"]
 
     assert observed["minimum_range_m"] == 0.8
     assert observed["sweep"]["ranges_m"] == [0.8, 0.9, 1.0, 1.1]
