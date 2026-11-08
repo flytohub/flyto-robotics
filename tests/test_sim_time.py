@@ -15,7 +15,7 @@ from test_presence_on_state import RecordingSocket, no_sleep  # noqa: F401
 
 from flyto_robotics import motion_outcome, sim_time
 from flyto_robotics.adapter_contract import CallResult
-from flyto_robotics.generic_ros2_adapter import CLOCK_TYPE, RosbridgeROS2Backend
+from flyto_robotics.generic_ros2_adapter import CLOCK_TYPE, READ_MOTION, RosbridgeROS2Backend
 
 
 def _clock(sim_s: float) -> dict:
@@ -129,6 +129,10 @@ def test_a_simulation_reads_clock_into_each_running_motion(monkeypatch, no_sleep
     monkeypatch.setenv("FLYTO_ROS2_SIM_MARKER_TOPIC", "/clock")
     sockets: list[RecordingSocket] = []
     backend = _backend(sockets)
+    # Read while a motion runs, not while the connection is idle.
+    assert all(item["topic"] != "/clock" for item in sockets[-1].subscribed)
+    hold = backend.hold_readings(READ_MOTION)
+    hold.__enter__()
     try:
         clock = [item for item in sockets[-1].subscribed if item["topic"] == "/clock"]
         assert len(clock) == 1
@@ -143,6 +147,7 @@ def test_a_simulation_reads_clock_into_each_running_motion(monkeypatch, no_sleep
         assert len(track.clock.samples) == 3
         assert track.sim_time_summary()["measured"] is True
     finally:
+        hold.__exit__(None, None, None)
         backend.disconnect()
 
 

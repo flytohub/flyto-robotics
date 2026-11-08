@@ -177,7 +177,8 @@ def test_the_backend_subscribes_to_the_nav2_lifecycle_topics(no_sleep):
     topics = {item["topic"]: item.get("type") for item in sockets[-1].subscribed}
     assert topics["/bt_navigator/transition_event"] == "lifecycle_msgs/msg/TransitionEvent"
     assert topics["/behavior_server/transition_event"] == "lifecycle_msgs/msg/TransitionEvent"
-    assert "/scan" in topics
+    # LiDAR is read only while a call needs it (test_rosbridge_subscription_cost).
+    assert "/scan" not in topics
     backend.disconnect()
 
 
