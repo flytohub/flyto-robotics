@@ -391,3 +391,24 @@ def test_the_time_between_two_calls_is_never_a_scan_interval():
 def test_only_a_transport_that_holds_per_call_waits_for_scan_timing():
     assert RosbridgeROS2Backend.HOLDS_READINGS_PER_CALL is True
     assert getattr(adapter_module.RclpyROS2Backend, "HOLDS_READINGS_PER_CALL", False) is False
+
+
+@pytest.mark.usefixtures("no_sleep")
+def test_reading_the_backend_directly_holds_what_it_waits_for():
+    # A tool or probe that reads the backend outside a call (the twin's
+    # scenario runner) gets readings sent after it asked, and leaves the
+    # connection idle again.
+    backend, sockets = connection()
+    taken: list[set[str]] = []
+    original = backend._missing
+
+    def missing(required):
+        taken.append(set(sockets[-1].held()))
+        return original(required)
+
+    backend._missing = missing
+    backend.observation()
+    after = set(sockets[-1].held())
+    backend.disconnect()
+    assert taken and all(held >= CALL_TOPICS for held in taken)
+    assert after == IDLE_TOPICS

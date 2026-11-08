@@ -4588,6 +4588,16 @@ class RosbridgeROS2Backend(_ObservationState):
                 self._holds[reading] = max(0, self._holds.get(reading, 0) - 1)
             self._resync_subscriptions()
 
+    def observation(self, required: Iterable[str] | None = None) -> Mapping[str, Any]:
+        """Current readings, holding what they come from while waiting for them.
+
+        Inside a call that already holds them this changes nothing; a caller
+        reading the backend directly (a tool, a probe) gets readings sent
+        after it asked rather than nothing at all.
+        """
+        with self.hold_readings(READ_STATE):
+            return super().observation(required)
+
     def subscribed_topics(self) -> dict[str, str]:
         """``{subscription id: topic}`` this socket holds now."""
         with self._subscription_lock:
