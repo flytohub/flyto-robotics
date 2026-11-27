@@ -99,6 +99,11 @@ def _observation_wait_seconds() -> float:
 REQUIRE_POSE = "pose"
 REQUIRE_RANGE = "range"
 REQUIRE_MAP_TF = "map_tf"
+# Scan intervals measured since the scan subscription was (re)made: the
+# braking guard's latency budget is measured, never assumed, for the link as
+# it is now. LatencyEstimator needs this many before it gives a budget.
+REQUIRE_SCAN_TIMING = "scan_timing"
+SCAN_TIMING_MIN_INTERVALS = 3
 
 # A robot is stationary once this many consecutive odometry messages report
 # speeds this close to zero. A TurtleBot3 publishes odometry at about 30 Hz,
@@ -446,57 +451,6 @@ def _collision_state_topic() -> str:
 COLLISION_STATE_TYPE = "nav2_msgs/msg/CollisionMonitorState"
 
 
-@dataclass(frozen=True)
-class ContinuousSubscription:
-    """One topic a rosbridge connection reads for as long as it is open."""
-
-    topic_env: str
-    default_topic: str
-    message_type: str
-    reliability: str
-    #: rosbridge sends at most one message per this many ms (0: every one).
-    throttle_ms: int
-    #: rosbridge queues at most this many and drops the oldest (0: its default).
-    queue_length: int
-    #: What reads it, and why this rate is enough.
-    reader: str
-
-
-#: What every full rosbridge connection reads continuously. rosbridge on the
-#: robot is Python and converts every message it sends to JSON; on 2026-10-12
-#: it used 75 % of a core on burger-01 (load ~10 on 4 cores) and scans reached
-#: the adapter up to 0.965 s late while the sensor kept 10 Hz. Measured
-#: read-only through the robot's tunnel that day, one connection carried
-#: /camera/image_raw 756 KiB/s (0.9 msg/s, 811 KiB each), /scan 98 KiB/s
-#: (10/s), /odom 13 KiB/s (18/s), /tf 10 KiB/s (27/s), /camera/camera_info
-#: 6 KiB/s (15/s). Each row is only what its reader needs:
-#:
-#: * no camera: only the observation bundle's ``camera`` digest read the raw
-#:   frames and nothing consumes it; ``vision.observe`` subscribes to the
-#:   compressed topic for the one frame it captures, and the HMI's live camera
-#:   is its own channel;
-#: * scan: every scan, newest first -- the braking guard's period is the
-#:   sensor's, and an old scan is worth nothing once a newer one exists;
-#: * odometry: 10 Hz, newest first -- the guard's speed and stop pose, the
-#:   stillness wait and motion tracks; the robot publishes about 20 Hz;
-#: * /tf: unthrottled, because rosbridge throttles per topic and the frequent
-#:   odom->base transforms would crowd out map->odom.
-ROSBRIDGE_CONTINUOUS_SUBSCRIPTIONS: tuple[ContinuousSubscription, ...] = (
-    ContinuousSubscription(
-        "FLYTO_ROS2_ODOM_TOPIC", "/odom", "nav_msgs/msg/Odometry", "reliable", 100, 1,
-        "pose, velocity and stillness; braking guard speed and stop pose",
-    ),
-    ContinuousSubscription(
-        "FLYTO_ROS2_SCAN_TOPIC", "/scan", "sensor_msgs/msg/LaserScan", "best_effort", 0, 1,
-        "clearance, braking guard, floor guard, escape and destination checks",
-    ),
-    ContinuousSubscription(
-        "FLYTO_ROS2_TF_TOPIC", "/tf", "tf2_msgs/msg/TFMessage", "best_effort", 0, 0,
-        "map->odom for the map pose",
-    ),
-)
-
-
 BATTERY_STATE_TYPE = "sensor_msgs/msg/BatteryState"
 #: The robot publishes its battery about once a second; never sample faster.
 BATTERY_THROTTLE_MS = 1000
@@ -531,6 +485,180 @@ def _served_deployment_mode() -> str:
     if _configured_deployment_mode() == "simulation" and _simulation_marker_topic():
         return "simulation"
     return "real"
+
+
+#: Who holds a row of ``ROSBRIDGE_SUBSCRIPTIONS``. A row is subscribed while
+#: any of its holders is active and unsubscribed when none is.
+#:
+#: * ``HOLD_PRESENCE``: every connection, presence or full, for as long as it
+#:   is open -- what a host needs to know the robot is there;
+#: * ``HOLD_CONNECTED``: every full connection while it is open;
+#: * ``READ_MOTION``: while a motion call runs, or a goal it sent is still
+#:   running on the robot (a call that ran out of time leaves its goal
+#:   driving, and the floor guard keeps reading scans until it ends);
+#: * ``READ_STATE``: while a call reads where the robot is and what is around
+#:   it (an observation, a stillness wait, marking a place).
+HOLD_PRESENCE = "presence"
+HOLD_CONNECTED = "connected"
+READ_MOTION = "motion"
+READ_STATE = "state"
+
+
+def _env_topic(name: str, default: str) -> Callable[[], tuple[str, ...]]:
+    def topics() -> tuple[str, ...]:
+        topic = os.getenv(name, default).strip()
+        return (topic,) if topic else ()
+
+    return topics
+
+
+def _always() -> bool:
+    return True
+
+
+@dataclass(frozen=True)
+class ObservationSubscription:
+    """One rosbridge subscription, and which calls need it held."""
+
+    #: Stable part of the rosbridge subscription id (``observation-<key>``).
+    key: str
+    #: The topics it reads, resolved when the subscription is made.
+    topics: Callable[[], tuple[str, ...]]
+    #: None lets rosbridge take the type the graph advertises.
+    message_type: str | None
+    reliability: str
+    #: rosbridge sends at most one message per this many ms (0: every one).
+    throttle_ms: int
+    #: rosbridge queues at most this many and drops the oldest (0: its default).
+    queue_length: int
+    #: HOLD_PRESENCE, HOLD_CONNECTED, or the READ_* call kinds that need it.
+    held_by: frozenset[str]
+    #: The reading it delivers (REQUIRE_*), forgotten when it is subscribed
+    #: again, so a call waits for a message sent after it asked.
+    reading: str | None
+    #: What reads it, and why this rate is enough.
+    reader: str
+    #: Whether the row applies to this deployment at all.
+    applies: Callable[[], bool] = _always
+
+
+_MOTION_AND_STATE = frozenset({READ_MOTION, READ_STATE})
+
+#: What a rosbridge connection reads, and while what. rosbridge on the robot is
+#: Python and converts every message it sends to JSON for each client.
+#:
+#: 2026-10-12: 75 % of a core on burger-01; one connection carried
+#: /camera/image_raw 756 KiB/s, /scan 98 KiB/s (10/s), /odom 13 KiB/s (18/s),
+#: /tf 10 KiB/s (27/s), /camera/camera_info 6 KiB/s. The camera was dropped
+#: (``vision.observe`` captures one compressed frame on its own subscription;
+#: the HMI's live camera is its own channel) and odometry throttled.
+#:
+#: 2026-11-09: with the robot completely idle rosbridge still used 52 % of a
+#: core (516 ticks in 10 s): flyto-cloud's warm adapter (one full connection
+#: per host and robot, kept for the life of the host) read every scan and
+#: every /tf message (42 Hz) with no job running, ~121 KB/s, while the
+#: presence watch read ~1.9 KB/s. Scan, /tf, fast odometry, command watch and
+#: the simulator clock are now held only while a call needs them:
+#:
+#: * odometry 2 Hz while idle (presence and the HMI pose), 10 Hz newest first
+#:   while a call runs -- the guard's speed and stop pose, the stillness wait
+#:   and motion tracks. rosbridge sends one topic at the smallest throttle and
+#:   queue any of a client's ids on it asks for, so both rows say 1;
+#: * scan: every scan, newest first -- the braking guard's period is the
+#:   sensor's, and an old scan is worth nothing once a newer one exists;
+#: * /tf: unthrottled, because rosbridge throttles per topic and the frequent
+#:   odom->base transforms would crowd out map->odom;
+#: * the collision monitor's state stays held on a full connection: it is
+#:   published only when the monitor changes what it does to the base, so it
+#:   costs nothing idle, and a motion is seeded with the state in force when
+#:   it began, which a subscription taken at the call could not know.
+ROSBRIDGE_SUBSCRIPTIONS: tuple[ObservationSubscription, ...] = (
+    ObservationSubscription(
+        "odom-presence", _env_topic("FLYTO_ROS2_ODOM_TOPIC", "/odom"), ODOM_TYPE,
+        "reliable", 500, 1, frozenset({HOLD_PRESENCE}), None,
+        "the robot is there (silence), the HMI's idle pose",
+    ),
+    ObservationSubscription(
+        "battery", lambda: (_battery_topic(),), BATTERY_STATE_TYPE,
+        "best_effort", BATTERY_THROTTLE_MS, 0, frozenset({HOLD_PRESENCE}), None,
+        "the battery for a host's HMI",
+    ),
+    ObservationSubscription(
+        "lifecycle", lambda: tuple(sorted(_lifecycle_event_topics())), LIFECYCLE_EVENT_TYPE,
+        "reliable", 0, 0, frozenset({HOLD_PRESENCE}), None,
+        "Nav2 servers activating: their actions joined the graph",
+    ),
+    ObservationSubscription(
+        "collision", lambda: (_collision_state_topic(),) if _collision_state_topic() else (),
+        COLLISION_STATE_TYPE, "reliable", 0, 0, frozenset({HOLD_CONNECTED}), None,
+        "why a motion stopped; seeds each motion with the state in force",
+    ),
+    ObservationSubscription(
+        "odom", _env_topic("FLYTO_ROS2_ODOM_TOPIC", "/odom"), ODOM_TYPE,
+        "reliable", 100, 1, _MOTION_AND_STATE, REQUIRE_POSE,
+        "pose, velocity and stillness; braking guard speed and stop pose",
+    ),
+    ObservationSubscription(
+        "scan", _env_topic("FLYTO_ROS2_SCAN_TOPIC", "/scan"), "sensor_msgs/msg/LaserScan",
+        "best_effort", 0, 1, _MOTION_AND_STATE, REQUIRE_RANGE,
+        "clearance, braking guard, floor guard, escape and destination checks",
+    ),
+    ObservationSubscription(
+        "tf", _env_topic("FLYTO_ROS2_TF_TOPIC", "/tf"), "tf2_msgs/msg/TFMessage",
+        "best_effort", 0, 0, _MOTION_AND_STATE, REQUIRE_MAP_TF,
+        "map->odom for the map pose",
+    ),
+    ObservationSubscription(
+        "command", _command_watch_topics, None,
+        "reliable", COMMAND_WATCH_THROTTLE_MS, 0, frozenset({READ_MOTION}), None,
+        "what was commanded while a goal stood still",
+    ),
+    ObservationSubscription(
+        "clock", lambda: (_simulation_marker_topic(),) if _simulation_marker_topic() else (),
+        CLOCK_TYPE, "best_effort", sim_time.CLOCK_THROTTLE_MS, 0, frozenset({READ_MOTION}),
+        None, "how fast simulated time runs against the wall (simulation only)",
+        applies=lambda: _served_deployment_mode() == "simulation",
+    ),
+)
+
+
+#: The readings each call needs held while it runs (``ROSBRIDGE_SUBSCRIPTIONS``
+#: rows whose ``held_by`` names it). None: the call reads nothing the
+#: connection holds -- a stop goes out at once, a capture subscribes to its
+#: one message itself, the places list is a file. A capability missing here
+#: is read as a motion, the kind that holds the most.
+CALL_READINGS: Mapping[str, str | None] = {
+    "motion.navigate": READ_MOTION,
+    "motion.navigate_through_poses": READ_MOTION,
+    "motion.advance": READ_MOTION,
+    "motion.retreat": READ_MOTION,
+    "motion.rotate": READ_MOTION,
+    "motion.halt": None,
+    "vision.observe": None,
+    "sensing.map": None,
+    "places.list": None,
+    "places.mark": READ_STATE,
+    # Adapter methods a host calls outside a capability.
+    "observe": READ_STATE,
+    "wait_until_stationary": READ_STATE,
+}
+
+
+def _call_reading(name: str) -> str | None:
+    return CALL_READINGS.get(name, READ_MOTION)
+
+
+def subscription_rows(*, presence_only: bool, holders: Iterable[str]) -> tuple[
+    tuple[ObservationSubscription, str], ...
+]:
+    """``(row, topic)`` a connection subscribes while ``holders`` are active."""
+    active = {HOLD_PRESENCE, *(() if presence_only else (HOLD_CONNECTED, *holders))}
+    return tuple(
+        (row, topic)
+        for row in ROSBRIDGE_SUBSCRIPTIONS
+        if row.held_by & active and row.applies()
+        for topic in row.topics()
+    )
 
 
 def _safe_fragment(value: str) -> str:
@@ -912,6 +1040,13 @@ class _ObservationState:
         # published one with its values; composed with odometry into the
         # robot's map pose (see map_frame).
         self._map_from_odom: tuple[float, float, float] | None = None
+        # A reading kind counts only once it arrived after this moment: set
+        # when its subscription is made again, so a call that took it waits
+        # for a message sent after it asked (see ``_require_fresh``).
+        self._fresh_after: dict[str, float] = {}
+        # LatencyEstimator.intervals_measured when the scan subscription was
+        # last made (REQUIRE_SCAN_TIMING counts from here).
+        self._scan_timing_mark = 0
         # When this connection started listening: a robot never heard from
         # since then has been silent for as long as it has been listening.
         self._listening_since = time.monotonic()
@@ -1452,6 +1587,8 @@ class _ObservationState:
             self._map_tf_seen_at = None
             self._map_from_odom = None
             self._latency.reset()
+            self._fresh_after.clear()
+            self._scan_timing_mark = 0
             self._declared_decel_read = False
             self._declared_decel_mps2 = None
             self._listening_since = time.monotonic()
@@ -1484,6 +1621,29 @@ class _ObservationState:
             last = max(heard, default=self._listening_since)
         return max(0.0, time.monotonic() - last)
 
+    def _require_fresh(self, kinds: Iterable[str]) -> None:
+        """Count ``kinds`` only from messages that arrive from now on.
+
+        Called just before their subscription is made again: a reading held
+        from before (an earlier call, the idle odometry) says nothing about
+        the robot the call is about to judge.
+        """
+        with self._condition:
+            now = time.monotonic()
+            for kind in kinds:
+                self._fresh_after[kind] = now
+                if kind == REQUIRE_RANGE:
+                    # The gap until the next scan is not a scan interval.
+                    self._latency.break_chain()
+                    self._scan_timing_mark = self._latency.intervals_measured
+
+    def _fresh(self, kind: str, seen_at: float | None, now: float, max_age: float) -> bool:
+        return (
+            seen_at is not None
+            and now - seen_at <= max_age
+            and seen_at >= self._fresh_after.get(kind, -math.inf)
+        )
+
     def _missing(self, required: Iterable[str]) -> list[str]:
         # Stale counts as missing: on a warm connection the next callback is
         # one message period away, so it is waited for rather than refused.
@@ -1494,11 +1654,15 @@ class _ObservationState:
             REQUIRE_RANGE: self._range_seen_at,
             REQUIRE_MAP_TF: self._map_tf_seen_at,
         }
-        return [
-            key
-            for key in required
-            if seen.get(key) is None or now - seen[key] > max_age
-        ]
+        missing = []
+        for key in required:
+            if key == REQUIRE_SCAN_TIMING:
+                measured = self._latency.intervals_measured - self._scan_timing_mark
+                if measured < SCAN_TIMING_MIN_INTERVALS or self._latency.scan_period_s is None:
+                    missing.append(key)
+            elif not self._fresh(key, seen.get(key), now, max_age):
+                missing.append(key)
+        return missing
 
     def is_connected(self) -> bool:
         return bool(self._connected)
@@ -1537,6 +1701,11 @@ class _ObservationState:
                 self._condition.wait(timeout=remaining)
             return self._snapshot()
 
+    def has_localized(self) -> bool:
+        """Localization has published map->odom on this connection."""
+        with self._condition:
+            return "map_transform" in self._heard_kinds
+
     def held_observation(self) -> dict[str, Any]:
         """The readings held now, without waiting for any.
 
@@ -1559,12 +1728,12 @@ class _ObservationState:
         now = time.monotonic()
         max_age = _max_observation_age()
 
-        def fresh(seen_at: float | None) -> bool:
-            return seen_at is not None and now - seen_at <= max_age
+        def fresh(seen_at: float | None, kind: str = "") -> bool:
+            return self._fresh(kind, seen_at, now, max_age)
 
         pose = (
             dict(self._pose)
-            if self._pose is not None and fresh(self._pose_seen_at)
+            if self._pose is not None and fresh(self._pose_seen_at, REQUIRE_POSE)
             else None
         )
         # The same pose in the map frame, only while localization's transform
@@ -1572,7 +1741,7 @@ class _ObservationState:
         # was. Odometry stays the pose motion is judged on.
         map_pose = (
             map_frame_module.compose(self._map_from_odom, pose)
-            if pose is not None and fresh(self._map_tf_seen_at)
+            if pose is not None and fresh(self._map_tf_seen_at, REQUIRE_MAP_TF)
             else None
         )
         return {
@@ -1584,7 +1753,7 @@ class _ObservationState:
                     "sample_count": self._range_sample_count,
                     **({"sweep": self._range_sweep} if self._range_sweep else {}),
                 }
-                if self._minimum_range is not None and fresh(self._range_seen_at)
+                if self._minimum_range is not None and fresh(self._range_seen_at, REQUIRE_RANGE)
                 else None
             ),
             "camera": (
@@ -1592,7 +1761,7 @@ class _ObservationState:
                 if self._camera is not None and fresh(self._camera_seen_at)
                 else None
             ),
-            "map_tf_available": fresh(self._map_tf_seen_at),
+            "map_tf_available": fresh(self._map_tf_seen_at, REQUIRE_MAP_TF),
         }
 
     def _still(self, previous: Mapping[str, Any] | None) -> bool:
@@ -1971,13 +2140,21 @@ class GenericROS2Adapter:
         basis = _safety_basis()
         if basis not in SAFETY_BASES:
             return f"FLYTO_ROS2_SAFETY_BASIS {basis!r} is not one of {', '.join(SAFETY_BASES)}"
-        if capability_id in PLANNED_MOTIONS and basis != SAFETY_BASIS_OPERATOR:
-            # Wait for the map->odom transform as well, so a navigate on a
-            # fresh connection is judged once it arrives instead of refused
-            # because LiDAR happened to come first.
-            observation = self.backend.observation(
-                required=(REQUIRE_POSE, REQUIRE_RANGE, REQUIRE_MAP_TF)
-            )
+        if basis != SAFETY_BASIS_OPERATOR:
+            required: tuple[str, ...] = (REQUIRE_POSE, REQUIRE_RANGE)
+            if getattr(self.backend, "HOLDS_READINGS_PER_CALL", False):
+                # The scan subscription was made for this call: wait until a
+                # few scans measured the link as it is now, so the braking
+                # guard's latency is measured as on a connection that never
+                # stopped reading. Not having them refuses nothing; the
+                # configured latency still holds, as on any first scan.
+                required = (*required, REQUIRE_SCAN_TIMING)
+            if capability_id in PLANNED_MOTIONS:
+                # Wait for the map->odom transform as well, so a navigate on a
+                # fresh connection is judged once it arrives instead of refused
+                # because LiDAR happened to come first.
+                required = (*required, REQUIRE_MAP_TF)
+            observation = self.backend.observation(required=required)
         else:
             observation = self.backend.observation()
         if observation.get("pose") is None or (
@@ -2111,9 +2288,19 @@ class GenericROS2Adapter:
                 request.call_id, "the connection is being refreshed by an operator"
             )
         try:
-            return self._invoke(request)
+            with self._holding(_call_reading(request.capability_id)):
+                return self._invoke(request)
         finally:
             self._gate.end(token)
+
+    def _holding(self, reading: str | None):
+        """Hold what ``reading`` needs on the backend for the block (CALL_READINGS).
+
+        A backend that reads everything for as long as it is connected (rclpy)
+        has nothing to hold.
+        """
+        hold = getattr(self.backend, "hold_readings", None)
+        return hold(reading) if callable(hold) else contextlib.nullcontext()
 
     def _invoke(self, request: CallRequest) -> CallResult:
         if request.capability_id not in self._declared:
@@ -2791,7 +2978,8 @@ class GenericROS2Adapter:
         provider: str | None = None,
     ) -> dict[str, Any]:
         interfaces = tuple(self.backend.discover())
-        observation = dict(self.backend.observation())
+        with self._holding(_call_reading("observe")):
+            observation = dict(self.backend.observation(required=self._observe_requirements()))
         mode = (
             deployment_mode
             or os.getenv("FLYTO_ROS2_DEPLOYMENT_MODE", "hardware")
@@ -2823,6 +3011,19 @@ class GenericROS2Adapter:
                 raise
             return bundle({key: value for key, value in reading.items() if key != "sweep"})
 
+    def _observe_requirements(self) -> tuple[str, ...] | None:
+        """What an observation waits for: the defaults, plus the map transform
+        once this connection has seen localization publish one.
+
+        The transform's subscription may be made for this observation, and
+        LiDAR and odometry can arrive before it; without the wait the map
+        pose would be missing from evidence on a robot that has one.
+        """
+        localized = getattr(self.backend, "has_localized", None)
+        if not callable(localized) or not localized():
+            return None
+        return (*_default_requirements(), REQUIRE_MAP_TF)
+
     def wait_until_stationary(self, max_seconds: float = 1.0) -> dict[str, Any] | None:
         """Wait for odometry to show the robot stopped, at most ``max_seconds``.
 
@@ -2831,7 +3032,8 @@ class GenericROS2Adapter:
         method = getattr(self.backend, "wait_until_stationary", None)
         if not callable(method):
             return None
-        return method(max_seconds)
+        with self._holding(_call_reading("wait_until_stationary")):
+            return method(max_seconds)
 
     def telemetry_readings(self) -> dict[str, Any] | None:
         """The backend's live readings for a host's HMI; None while disconnected."""
@@ -3917,6 +4119,10 @@ class RosbridgeROS2Backend(_ObservationState):
     RESENDS_GOALS = True
     #: Samples /clock (read only, throttled) in a simulation deployment.
     READS_SIM_CLOCK = True
+    #: LiDAR, transforms and fast odometry are subscribed per call
+    #: (``hold_readings``), so a motion waits for the scan timing it is
+    #: guarded with to be measured afresh.
+    HOLDS_READINGS_PER_CALL = True
 
     def __init__(
         self,
@@ -3974,6 +4180,12 @@ class RosbridgeROS2Backend(_ObservationState):
         self._counts: dict[str, int] = {}
         self._advertised_topics: set[tuple[str, str]] = set()
         self._topic_types: dict[str, str] = {}
+        # Subscriptions held on this socket (``ROSBRIDGE_SUBSCRIPTIONS``):
+        # subscription id -> (row, topic). Changed only under this lock.
+        self._subscription_lock = threading.RLock()
+        self._subscribed: dict[str, tuple[ObservationSubscription, str]] = {}
+        # Calls running now that hold readings, by READ_* kind.
+        self._holds: dict[str, int] = {}
         if connect:
             self.reconnect()
 
@@ -4046,14 +4258,20 @@ class RosbridgeROS2Backend(_ObservationState):
                 # one: the server aborted it for the preemption, which says
                 # nothing about how the call ends.
                 return
+            ended = False
             if operation == "service_response":
                 self._responses[identifier] = message
                 self._condition.notify_all()
             elif operation == "action_result":
                 self._action_results[owner] = message
+                ended = owner in self._active_actions
                 self._condition.notify_all()
             elif operation == "action_feedback":
                 self._track_feedback(owner, message.get("values"))
+        if ended:
+            # A goal no call is waiting on any more may have been the last
+            # thing holding the motion readings.
+            self._resync_subscriptions()
 
     @staticmethod
     def _camera_payload(data: Any) -> bytes:
@@ -4347,74 +4565,119 @@ class RosbridgeROS2Backend(_ObservationState):
             raise RuntimeError(f"rosbridge service response is invalid: {service}")
         return dict(values)
 
-    def _subscribe_standard_observations(self) -> None:
-        subscriptions = tuple(
-            (os.getenv(row.topic_env, row.default_topic), row.message_type,
-             row.reliability, row.throttle_ms, row.queue_length)
-            for row in ROSBRIDGE_CONTINUOUS_SUBSCRIPTIONS
-        )
-        collision_topic = _collision_state_topic()
-        if collision_topic:
-            # Published when the monitor changes what it does to the base,
-            # so it costs nothing while the robot drives freely.
-            subscriptions = (
-                *subscriptions,
-                (collision_topic, COLLISION_STATE_TYPE, "reliable", 0, 0),
+    # -- what this connection reads, and while what (ROSBRIDGE_SUBSCRIPTIONS) ----------
+
+    @contextlib.contextmanager
+    def hold_readings(self, reading: str | None):
+        """Hold the subscriptions ``reading`` (a READ_* kind) needs while the block runs.
+
+        A row taken now counts only from its first message after this, so the
+        call waits for readings sent after it asked (``observation``). None,
+        or a presence connection, holds nothing more.
+        """
+        if reading is None or self._presence_only:
+            yield
+            return
+        with self._subscription_lock:
+            self._holds[reading] = self._holds.get(reading, 0) + 1
+        try:
+            self._resync_subscriptions()
+            yield
+        finally:
+            with self._subscription_lock:
+                self._holds[reading] = max(0, self._holds.get(reading, 0) - 1)
+            self._resync_subscriptions()
+
+    def observation(self, required: Iterable[str] | None = None) -> Mapping[str, Any]:
+        """Current readings, holding what they come from while waiting for them.
+
+        Inside a call that already holds them this changes nothing; a caller
+        reading the backend directly (a tool, a probe) gets readings sent
+        after it asked rather than nothing at all.
+        """
+        with self.hold_readings(READ_STATE):
+            return super().observation(required)
+
+    def subscribed_topics(self) -> dict[str, str]:
+        """``{subscription id: topic}`` this socket holds now."""
+        with self._subscription_lock:
+            return {sid: topic for sid, (_row, topic) in self._subscribed.items()}
+
+    def _goal_running(self) -> bool:
+        """A goal this connection sent has not reported its result yet."""
+        with self._condition:
+            return any(call_id not in self._action_results for call_id in self._active_actions)
+
+    def _wanted_subscriptions(self) -> dict[str, tuple[ObservationSubscription, str]]:
+        with self._subscription_lock:
+            holders = {kind for kind, count in self._holds.items() if count > 0}
+        if not self._presence_only and self._goal_running():
+            # A call that ran out of time leaves its goal driving: the floor
+            # guard and the motion track keep reading until it ends.
+            holders.add(READ_MOTION)
+        return {
+            f"observation-{row.key}:{topic}": (row, topic)
+            for row, topic in subscription_rows(
+                presence_only=self._presence_only, holders=holders
             )
-        clock_topic = _simulation_marker_topic()
-        if not self._presence_only and clock_topic and _served_deployment_mode() == "simulation":
-            # Read only, sampled: how fast simulated time runs against the wall.
-            subscriptions = (
-                *subscriptions,
-                (clock_topic, CLOCK_TYPE, "best_effort", sim_time.CLOCK_THROTTLE_MS, 0),
-            )
-        if not self._presence_only:
-            # Read only, sampled: what was commanded while a goal stood still.
-            subscriptions = (
-                *subscriptions,
-                *(
-                    (topic, None, "reliable", COMMAND_WATCH_THROTTLE_MS, 0)
-                    for topic in _command_watch_topics()
-                ),
-            )
-        if self._presence_only:
-            # Odometry says the robot is there; a few a second is plenty.
-            subscriptions = ((subscriptions[0][0], subscriptions[0][1], "reliable", 500, 0),)
-        # Read only, sampled: the battery for a host's HMI, on every connection.
-        subscriptions = (
-            *subscriptions,
-            (_battery_topic(), BATTERY_STATE_TYPE, "best_effort", BATTERY_THROTTLE_MS, 0),
-        )
-        subscriptions = (
-            *subscriptions,
-            *(
-                (topic, LIFECYCLE_EVENT_TYPE, "reliable", 0, 0)
-                for topic in sorted(self._lifecycle_topics)
-            ),
-        )
-        for index, (topic, message_type, reliability, throttle_rate, queue_length) in enumerate(
-            subscriptions
-        ):
-            request: dict[str, Any] = {
-                "op": "subscribe",
-                "id": f"observation-{index}",
-                "topic": topic,
-                "qos": {
-                    "history": "keep_last",
-                    "depth": 5,
-                    "reliability": reliability,
-                    "durability": "volatile",
-                },
-                "throttle_rate": throttle_rate,
+        }
+
+    @staticmethod
+    def _subscribe_request(
+        subscription_id: str, row: ObservationSubscription, topic: str
+    ) -> dict[str, Any]:
+        request: dict[str, Any] = {
+            "op": "subscribe",
+            "id": subscription_id,
+            "topic": topic,
+            "qos": {
+                "history": "keep_last",
+                "depth": 5,
+                "reliability": row.reliability,
+                "durability": "volatile",
+            },
+            "throttle_rate": row.throttle_ms,
+        }
+        if row.queue_length:
+            # rosbridge keeps only the newest when it falls behind.
+            request["queue_length"] = row.queue_length
+        if row.message_type is not None:
+            # Without a type rosbridge takes the one the graph advertises,
+            # so a stamped and an unstamped cmd_vel both subscribe.
+            request["type"] = row.message_type
+        return request
+
+    def _sync_subscriptions(self, *, new_socket: bool = False) -> None:
+        """Subscribe what is wanted now and drop what is not.
+
+        rosbridge unregisters its ROS subscription once no client id is left
+        on a topic, so a dropped row stops costing the robot anything.
+        """
+        with self._subscription_lock:
+            if new_socket:
+                self._subscribed = {}
+            if not self._connected:
+                return
+            wanted = self._wanted_subscriptions()
+            for subscription_id in [sid for sid in self._subscribed if sid not in wanted]:
+                _row, topic = self._subscribed.pop(subscription_id)
+                self._send({"op": "unsubscribe", "id": subscription_id, "topic": topic})
+            added = {
+                sid: item for sid, item in wanted.items() if sid not in self._subscribed
             }
-            if queue_length:
-                # rosbridge keeps only the newest when it falls behind.
-                request["queue_length"] = queue_length
-            if message_type is not None:
-                # Without a type rosbridge takes the one the graph advertises,
-                # so a stamped and an unstamped cmd_vel both subscribe.
-                request["type"] = message_type
-            self._send(request)
+            self._require_fresh(
+                {row.reading for row, _topic in added.values() if row.reading is not None}
+            )
+            for subscription_id, (row, topic) in added.items():
+                self._send(self._subscribe_request(subscription_id, row, topic))
+                self._subscribed[subscription_id] = (row, topic)
+
+    def _resync_subscriptions(self) -> None:
+        """``_sync_subscriptions`` where a dead socket is the reader's to report."""
+        try:
+            self._sync_subscriptions()
+        except Exception:  # noqa: BLE001 - the reader notices a dead socket
+            logger.debug("rosbridge subscriptions not updated", exc_info=True)
 
     def capture(
         self, *, call_id: str, capability_id: str, deadline_seconds: float
@@ -4972,6 +5235,7 @@ class RosbridgeROS2Backend(_ObservationState):
             )
         self._active_actions.pop(call_id, None)
         self._forget_track(call_id)
+        self._resync_subscriptions()
         return self._keep_result(
             call_id, CallResult(call_id, OUTCOME_CANCELLED, detail="cancelled")
         )
@@ -4995,6 +5259,8 @@ class RosbridgeROS2Backend(_ObservationState):
             # first zero; the last command on cmd_vel must be this stop's.
             with contextlib.suppress(RuntimeError):
                 stopped = self._publish_zero() or stopped
+            # After the stop is out: no goal left to read for.
+            self._resync_subscriptions()
         if not stopped:
             return CallResult(
                 call_id,
@@ -5032,6 +5298,9 @@ class RosbridgeROS2Backend(_ObservationState):
         if websocket is not None:
             with contextlib.suppress(Exception):
                 websocket.close()
+        with self._subscription_lock:
+            # Subscriptions belong to the socket that made them.
+            self._subscribed = {}
         self._reset_readings()
         self._stop_graph_events()
 
@@ -5066,7 +5335,7 @@ class RosbridgeROS2Backend(_ObservationState):
             name="rosbridge-keepalive",
             daemon=True,
         ).start()
-        self._subscribe_standard_observations()
+        self._sync_subscriptions(new_socket=True)
         self._notify_connection(True)
 
     def _keepalive_loop(self, websocket: Any, stop: threading.Event) -> None:

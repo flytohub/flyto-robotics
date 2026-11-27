@@ -115,12 +115,16 @@ class LatencyEstimator:
     _last_arrival: float | None = None
     _intervals: deque = field(default_factory=deque)
     _delays: deque = field(default_factory=deque)
+    #: Intervals measured since this estimator was made or reset, for a
+    #: caller that needs some measured after a given moment (``intervals_since``).
+    intervals_measured: int = 0
 
     def observe(self, arrival_monotonic: float, delay_s: float | None = None) -> None:
         if self._last_arrival is not None:
             interval = arrival_monotonic - self._last_arrival
             if 0.0 < interval < 5.0:
                 self._push(self._intervals, interval)
+                self.intervals_measured += 1
         self._last_arrival = arrival_monotonic
         if delay_s is not None and 0.0 <= delay_s <= MAX_PLAUSIBLE_TRANSPORT_S:
             self._push(self._delays, delay_s)
@@ -134,6 +138,16 @@ class LatencyEstimator:
         self._last_arrival = None
         self._intervals.clear()
         self._delays.clear()
+        self.intervals_measured = 0
+
+    def break_chain(self) -> None:
+        """Scans stop arriving on purpose (their subscription was dropped).
+
+        The time until the next scan is not an interval of the sensor or the
+        link, so the next arrival starts a new chain; the intervals already
+        measured on this connection are kept.
+        """
+        self._last_arrival = None
 
     @property
     def scan_period_s(self) -> float | None:

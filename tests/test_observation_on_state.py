@@ -566,6 +566,24 @@ class RosapiSocket:
         self.inbox.put(ConnectionError("closed"))
 
 
+class StreamingRosapiSocket(RosapiSocket):
+    """Also publishes odometry and a few scans whenever they are subscribed."""
+
+    STREAMS = {"/odom": (ROSBRIDGE_ODOM, 1), "/scan": (ROSBRIDGE_SCAN, 4)}
+
+    def send(self, payload):
+        message = json.loads(payload)
+        subscribed = message.get("op") == "subscribe"
+        stream = self.STREAMS.get(message.get("topic")) if subscribed else None
+        if stream is not None:
+            reading, count = stream
+            for _ in range(count):
+                self.inbox.put(
+                    json.dumps({"op": "publish", "topic": message["topic"], "msg": reading})
+                )
+        super().send(payload)
+
+
 @pytest.fixture
 def no_sleep(monkeypatch):
     monkeypatch.setattr(
@@ -581,12 +599,9 @@ def test_rosbridge_discovery_is_served_from_cache_until_reconnect(no_sleep, monk
     monkeypatch.setenv("FLYTO_ROS2_DEPLOYMENT_MODE", "hardware")
     queries: dict[str, int] = {}
     backend = RosbridgeROS2Backend(
-        url="ws://127.0.0.1:1", connection_factory=lambda _url: RosapiSocket(queries)
+        url="ws://127.0.0.1:1", connection_factory=lambda _url: StreamingRosapiSocket(queries)
     )
     adapter = GenericROS2Adapter(backend=backend, resource_id="robot")
-    with backend._condition:
-        backend._update_odometry(ROSBRIDGE_ODOM, time.monotonic())
-        backend._update_scan(ROSBRIDGE_SCAN, time.monotonic())
 
     adapter.describe()
     for phase in ("before", "after", "post_stop"):
@@ -598,9 +613,6 @@ def test_rosbridge_discovery_is_served_from_cache_until_reconnect(no_sleep, monk
 
     backend.reconnect()
     # The new socket's own readings: the old ones were forgotten on reconnect.
-    with backend._condition:
-        backend._update_odometry(ROSBRIDGE_ODOM, time.monotonic())
-        backend._update_scan(ROSBRIDGE_SCAN, time.monotonic())
     adapter.observe(phase="before", execution_id="call-1")
     assert queries == {"/rosapi/topics": 2, "/rosapi/action_servers": 2}
     backend.disconnect()
